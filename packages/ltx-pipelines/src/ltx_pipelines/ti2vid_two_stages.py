@@ -169,8 +169,13 @@ class TI2VidTwoStagesPipeline:
         transformer = self.stage_1_model_ledger.transformer()
         sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
 
+        # is_conditioning: the caller (run_denoising_stage) gained this argument and passes
+        # it positionally; this signature was never updated, so ANY invocation of this
+        # pipeline died with "takes 4 positional arguments but 5 were given". Same API drift
+        # already fixed in ic_lora.py -- it means neither pipeline had run since the change.
         def first_stage_denoising_loop(
-                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+                stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -240,7 +245,8 @@ class TI2VidTwoStagesPipeline:
         distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
 
         def second_stage_denoising_loop(
-                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+                stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,

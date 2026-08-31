@@ -1,0 +1,17 @@
+// Ultima tentativa por script -- getDefaultOptions/writeFile corretos, bombeando
+// eventos apos o load, testado depois de reinstalar o componente do exportador.
+// TODAS as variacoes (ver README.md) devolveram codigo 101. Guardado aqui como
+// o script mais completo para quem for testar via GUI e comparar comportamento.
+var FBX_OUT = "SAIDA.fbx"; // ajuste
+var oContentMgr = App.getContentMgr();
+var oExportMgr = App.getExportMgr();
+Scene.clear();
+oContentMgr.openFile(oContentMgr.findFile("People/Genesis 9/Genesis 9.duf"), true);
+for (var i = 0; i < 200; i++) { if (App.processEvents) App.processEvents(); }
+var fig = Scene.getPrimarySelection();
+if (fig) { Scene.selectAllNodes(false); fig.select(true); }
+var oExporter = oExportMgr.findExporterByClassName("DzFbxExporter");
+var oSettings = new DzFileIOSettings();
+oExporter.getDefaultOptions(oSettings);
+var nResult = oExporter.writeFile(FBX_OUT, oSettings);
+print("writeFile resultado: " + nResult);

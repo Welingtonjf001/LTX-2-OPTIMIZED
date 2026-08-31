@@ -149,8 +149,17 @@ class ICLoraPipeline:
         transformer = self.stage_1_model_ledger.transformer()
         stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
 
+        # BUGFIX (2026-08-10): denoise_audio_video() in utils/helpers.py calls
+        # denoising_loop_fn with 5 positional args (..., stepper, is_conditioning),
+        # but this module's loops still had the older 4-arg signature -- TypeError on
+        # every run. distilled.py / music_to_video.py / music_to_video_v2.py all
+        # already carry `is_conditioning: bool = True` and forward it into
+        # simple_denoising_func; ic_lora.py was simply left behind. Matched to those.
+        # (Not adding disable_audio here, which those pipelines also pass -- that
+        # variable does not exist in this module's scope.)
         def first_stage_denoising_loop(
-            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+            stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -161,6 +170,7 @@ class ICLoraPipeline:
                     video_context=video_context,
                     audio_context=audio_context,
                     transformer=transformer,  # noqa: F821
+                    is_conditioning=is_conditioning,
                 ),
             )
 
@@ -223,8 +233,10 @@ class ICLoraPipeline:
         transformer = self.stage_2_model_ledger.transformer()
         distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
 
+        # Same signature fix as first_stage_denoising_loop above -- see its comment.
         def second_stage_denoising_loop(
-            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+            stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -235,6 +247,7 @@ class ICLoraPipeline:
                     video_context=video_context,
                     audio_context=audio_context,
                     transformer=transformer,  # noqa: F821
+                    is_conditioning=is_conditioning,
                 ),
             )
 
@@ -336,6 +349,28 @@ def main() -> None:
         nargs=2,
         metavar=("PATH", "STRENGTH"),
         required=True,
+    )
+    # BUGFIX (2026-08-10): main() reads args.conditioning_attention_mask a few lines
+    # below, but this argument was never registered on the parser -- so EVERY
+    # invocation of this module died with AttributeError before reaching generation.
+    # VideoMaskConditioningAction was already imported here and documented in
+    # utils/args.py, so the registration is simply missing, not the feature.
+    parser.add_argument(
+        "--conditioning-attention-mask",
+        action=VideoMaskConditioningAction,
+        nargs=2,
+        metavar=("PATH", "STRENGTH"),
+        default=None,
+    )
+    # Same class of bug as above: main() passes args.skip_stage_2 into the pipeline
+    # (which does accept skip_stage_2: bool = False), but the flag was never
+    # registered. Defaults to False, matching the pipeline's own default, so the
+    # two-stage behaviour is unchanged unless explicitly asked for.
+    parser.add_argument(
+        "--skip-stage-2",
+        dest="skip_stage_2",
+        action="store_true",
+        help="Skip the 2x spatial upsample/refine stage (faster, lower resolution output).",
     )
     args = parser.parse_args()
     # Load mask video if provided via --conditioning-attention-mask

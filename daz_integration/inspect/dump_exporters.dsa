@@ -1,0 +1,14 @@
+var OUT = "E:/Users/home/Documents/LTX-2-OPTIMIZED/daz_integration/inspect/exporters.json";
+var out = { exporters: [] };
+var mgr = App.getExportMgr();
+for (var i = 0; i < mgr.getNumExporters(); i++) {
+    var exp = mgr.getExporter(i);
+    var info = {};
+    try { info.className = exp.className; } catch(e) { info.className_err = String(e); }
+    try { info.name = exp.getName(); } catch(e) { info.name_err = String(e); }
+    try { info.description = exp.getDescription(); } catch(e) {}
+    out.exporters.push(info);
+}
+var f = new DzFile(OUT);
+if (f.open(DzFile.WriteOnly)) { f.write(JSON.stringify(out, null, 2)); f.close(); print("saved"); }
+App.quitApp();

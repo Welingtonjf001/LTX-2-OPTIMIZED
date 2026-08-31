@@ -66,6 +66,7 @@ class LTXModel(torch.nn.Module):
         caption_projection: torch.nn.Module | None = None,
         audio_caption_projection: torch.nn.Module | None = None,
         cross_attention_adaln: bool = False,
+        ff_bias: bool = True,
     ):
         super().__init__()
         self._enable_gradient_checkpointing = False
@@ -120,6 +121,7 @@ class LTXModel(torch.nn.Module):
             norm_eps=norm_eps,
             attention_type=attention_type,
             apply_gated_attention=apply_gated_attention,
+            ff_bias=ff_bias,
         )
 
     @property
@@ -293,6 +295,7 @@ class LTXModel(torch.nn.Module):
         norm_eps: float,
         attention_type: AttentionFunction | AttentionCallable,
         apply_gated_attention: bool,
+        ff_bias: bool = True,
     ) -> None:
         """Initialize transformer blocks for LTX."""
         video_config = (
@@ -303,6 +306,7 @@ class LTXModel(torch.nn.Module):
                 context_dim=cross_attention_dim,
                 apply_gated_attention=apply_gated_attention,
                 cross_attention_adaln=self.cross_attention_adaln,
+                ff_bias=ff_bias,
             )
             if self.model_type.is_video_enabled()
             else None
@@ -315,6 +319,9 @@ class LTXModel(torch.nn.Module):
                 context_dim=audio_cross_attention_dim,
                 apply_gated_attention=apply_gated_attention,
                 cross_attention_adaln=self.cross_attention_adaln,
+                # audio_ff keeps bias regardless of the video-side `ff_bias` config flag
+                # (confirmed against the LTX-2.5 checkpoint: transformer_blocks.N.ff has no
+                # bias, but transformer_blocks.N.audio_ff does).
             )
             if self.model_type.is_audio_enabled()
             else None

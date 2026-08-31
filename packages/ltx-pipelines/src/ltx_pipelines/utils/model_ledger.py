@@ -1,4 +1,5 @@
 from dataclasses import replace
+import os
 
 import torch
 
@@ -216,7 +217,10 @@ class ModelLedger:
         )
 
     def transformer(self) -> X0Model:
-        offload_config = {0: "0.2GiB", "cpu": "32GiB"}
+        offload_config = {
+            0: os.environ.get("LTX_TRANSFORMER_GPU_MEMORY", "0.2GiB"),
+            "cpu": os.environ.get("LTX_TRANSFORMER_CPU_MEMORY", "32GiB"),
+        }
         if not hasattr(self, "transformer_builder"):
             raise ValueError(
                 "Transformer not initialized. Please provide a checkpoint path to the ModelLedger constructor."
@@ -246,7 +250,9 @@ class ModelLedger:
                 "Video decoder not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
 
-        return self.vae_decoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        # FIX: carrega o VAE em CPU (safe_open device=cpu, via mmap robusta) e depois move
+        # para a GPU, evitando o "invalid python storage" da carga direta safe_open(device=cuda).
+        return self.vae_decoder_builder.build(device=torch.device("cpu"), dtype=self.dtype).to(self.device).eval()
 
     def video_encoder(self) -> VideoEncoder:
         if not hasattr(self, "vae_encoder_builder"):
@@ -254,7 +260,8 @@ class ModelLedger:
                 "Video encoder not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
 
-        return self.vae_encoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        # FIX: mesma via robusta (CPU -> GPU) para o encoder (usado em image->video).
+        return self.vae_encoder_builder.build(device=torch.device("cpu"), dtype=self.dtype).to(self.device).eval()
 
     def text_encoder(self) -> GemmaTextEncoder:
         if not hasattr(self, "text_encoder_builder"):
@@ -266,7 +273,10 @@ class ModelLedger:
         return self.text_encoder_builder.build(
             device=self._target_device(),
             dtype=self.dtype,
-            max_memory={0: "2GiB", "cpu": "32GiB"})   # .to(self.device).eval()
+            max_memory={
+                0: os.environ.get("LTX_TEXT_ENCODER_GPU_MEMORY", "2GiB"),
+                "cpu": os.environ.get("LTX_TRANSFORMER_CPU_MEMORY", "32GiB"),
+            })   # .to(self.device).eval()
 
     def gemma_embeddings_processor(self) -> EmbeddingsProcessor:
         if not hasattr(self, "embeddings_processor_builder"):
@@ -274,8 +284,13 @@ class ModelLedger:
                 "Embeddings processor not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
 
+        # FIX: mesma via robusta CPU -> GPU já usada no VAE encoder/decoder. Carregar
+        # o safetensors direto em CUDA (device=self._target_device()) dispara de forma
+        # intermitente "Attempted to access the data pointer on an invalid python
+        # storage", especialmente logo após o text encoder ter sido carregado/liberado
+        # com offload (memória CUDA fragmentada). Carregar em CPU e depois mover evita.
         return (
-            self.embeddings_processor_builder.build(device=self._target_device(), dtype=self.dtype)
+            self.embeddings_processor_builder.build(device=torch.device("cpu"), dtype=self.dtype)
                 .to(self.device)
                 .eval()
         )
@@ -294,7 +309,11 @@ class ModelLedger:
                 "Audio decoder not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
 
-        return self.audio_decoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        # Load from safetensors on CPU first, then transfer the complete module.
+        # Direct safe_open(device=cuda) can leave an invalid Python storage after
+        # repeated scene/offload cycles (Windows + Triton/PyTorch).
+        decoder = self.audio_decoder_builder.build(device=torch.device("cpu"), dtype=self.dtype)
+        return decoder.to(self.device).eval()
 
     def audio_encoder(self) -> AudioEncoder:
         if not hasattr(self, "audio_encoder_builder"):
@@ -310,10 +329,15 @@ class ModelLedger:
                 "Vocoder not initialized. Please provide a checkpoint path to the ModelLedger constructor."
             )
 
-        return self.vocoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        # Keep the same safe CPU->GPU loading path as the audio decoder.
+        vocoder = self.vocoder_builder.build(device=torch.device("cpu"), dtype=self.dtype)
+        return vocoder.to(self.device).eval()
 
     def spatial_upsampler(self) -> LatentUpsampler:
         if not hasattr(self, "upsampler_builder"):
             raise ValueError("Upsampler not initialized. Please provide upsampler path to the ModelLedger constructor.")
-        offload_config = {0: "0.1GiB", "cpu": "32GiB"}
+        offload_config = {
+            0: os.environ.get("LTX_UPSAMPLER_GPU_MEMORY", "0.1GiB"),
+            "cpu": os.environ.get("LTX_TRANSFORMER_CPU_MEMORY", "32GiB"),
+        }
         return self.upsampler_builder.build(device=self._target_device(), dtype=self.dtype, max_memory=offload_config)  # .to(self.device).eval()

@@ -1,4 +1,5 @@
 import gradio as gr
+import video_doctor_ui  # aba de diagnostico temporal pos-geracao
 import subprocess
 import os
 import datetime
@@ -456,7 +457,7 @@ theme = gr.themes.Soft(primary_hue="blue").set(
     block_background_fill="*neutral_100",
 )
 
-with gr.Blocks(title="LTX-2.3 Film Maker", theme=theme) as demo:
+with gr.Blocks(title="LTX-2.3 Film Maker") as demo:
     gr.Markdown("# 🎬 LTX-2.3 CinemaMaker UI")
     
     with gr.Row():
@@ -472,9 +473,32 @@ with gr.Blocks(title="LTX-2.3 Film Maker", theme=theme) as demo:
                 with gr.Row():
                     steps = gr.Slider(label="Steps", minimum=1, maximum=50, value=12)
                     fps = gr.Number(label="FPS", value=24)
+                res_preset = gr.Dropdown(
+                    label="Resolucao (preset preenche Width/Height; LTX exige multiplo de 64)",
+                    choices=[
+                        "1536x1024 (Standard)",
+                        "768x512 (1/2 Standard)",
+                        "384x256 (1/4 Standard)",
+                        "704x1280 (Vertical)",
+                        "384x640 (1/2 Vertical aprox)",
+                    ],
+                    value="1536x1024 (Standard)",
+                )
                 with gr.Row():
                     width = gr.Number(label="Width", value=1536)
                     height = gr.Number(label="Height", value=1024)
+
+                def _apply_res_preset(label):
+                    presets = {
+                        "1536x1024 (Standard)": (1536, 1024),
+                        "768x512 (1/2 Standard)": (768, 512),
+                        "384x256 (1/4 Standard)": (384, 256),
+                        "704x1280 (Vertical)": (704, 1280),
+                        "384x640 (1/2 Vertical aprox)": (384, 640),
+                    }
+                    w, h = presets.get(label, (1536, 1024))
+                    return gr.update(value=w), gr.update(value=h)
+                res_preset.change(_apply_res_preset, inputs=[res_preset], outputs=[width, height])
                 num_frames = gr.Slider(label="Frames per Scene", minimum=9, maximum=257, step=8, value=121)
                 with gr.Row():
                     seed = gr.Number(label="Seed", value=10, precision=0)
@@ -570,5 +594,14 @@ with gr.Blocks(title="LTX-2.3 Film Maker", theme=theme) as demo:
         outputs=[latest_video, log_box, status_box] + [comp for zip_list in zip(scene_videos, scene_previews) for comp in zip_list]
     )
 
+    # Pos-producao: diagnostico e correcao temporal do video ja gerado.
+    # Fica FORA do fluxo de geracao de proposito -- e ferramenta aplicada ao
+    # resultado, e so quando a pessoa quiser. Em accordion porque esta UI e de
+    # layout plano: uma aba solta criaria um container de aba unica.
+    video_doctor_ui.build_doctor_tab(label="Diagnostico e correcao (video doctor)",
+                                     container="accordion")
+
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0")
+    # theme/css movidos do Blocks para o launch (Gradio 6): deixados no
+    # construtor viram aviso e sao ignorados, e a UI sobe sem o tema.
+    demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), theme=theme)

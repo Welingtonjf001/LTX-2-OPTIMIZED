@@ -1,0 +1,22 @@
+# Prompt negativo COMUM, aplicado ao video (LTX) e aos stills (FLUX/SD3.5).
+#
+# Linhas comecadas por '#' e linhas vazias sao ignoradas; o resto e concatenado
+# com virgula. Editavel sem tocar em codigo -- lido por
+# generate_storyboards.load_common_negative(), que tanto o gerador de still
+# quanto o ltx25_backend usam.
+#
+# ATENCAO ao que se acrescenta aqui: os termos abaixo sobre FALA e SINCRONIA
+# ("inaccurate lip sync", "overlapping dialogue", "background voices",
+# "gibberish speech") so significam alguma coisa para um modelo que gera AUDIO
+# e MOVIMENTO. Num gerador de imagem parada eles nao tem referente, e prompt
+# negativo inchado dilui o peso dos termos que importam. Ficam aqui por decisao
+# explicita do usuario (2026-08-27), ciente disso.
+
+subtitles, captions, written text, logos, watermark
+extra characters, duplicate characters, merged faces, identity swapping
+costume changes, wrong speaker
+both characters moving their lips simultaneously, overlapping dialogue
+background voices, inaccurate lip sync
+deformed hands, distorted faces
+flickering, abrupt cuts, camera teleportation
+gibberish speech

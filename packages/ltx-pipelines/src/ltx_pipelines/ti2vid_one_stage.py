@@ -99,7 +99,8 @@ class TI2VidOneStagePipeline:
         sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
 
         def first_stage_denoising_loop(
-            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+            stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,

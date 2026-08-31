@@ -1,0 +1,44 @@
+# Gerado a partir de packages/ltx-core/pyproject.toml + packages/ltx-pipelines/pyproject.toml
+# (o pyproject.toml da raiz e' um workspace uv, sem lista propria de
+# dependencias de runtime -- as duas paginas abaixo sao as que o .venv
+# principal (pipelines nativos: ltx_pipelines, script_pipeline/) usa de fato).
+#
+# Instalar com: pip install -r requirements.txt
+# torch precisa da build CUDA certa para a GPU do usuario -- ver
+# https://download.pytorch.org/whl/cu129 (indice usado neste checkout).
+
+torch~=2.7
+torchaudio
+einops
+numpy
+transformers>=4.52
+safetensors
+accelerate
+scipy>=1.14
+av
+tqdm
+pillow
+
+# --- extra: xformers (atencao otimizada, opcional) ---
+# xformers  # via indice pytorch, ver pyproject.toml
+
+# ------------------------------------------------------------------
+# ESTE REPOSITORIO USA 3 AMBIENTES PYTHON SEPARADOS (ver CLAUDE.md,
+# secao "Ambientes Python") -- este requirements.txt cobre só o .venv
+# principal. Os outros dois têm exigências próprias e incompatíveis
+# entre si; reinstalar sem isso reproduz bugs já resolvidos aqui:
+#
+#   .venv (este arquivo)  numpy 2.4.4, torch 2.8.0+cu128, onnxruntime CPU-only
+#   gemma4_env             numpy 2.5.2, torch 2.11.0+cu121 -- Gemma4 exige
+#                           transformers>=5.5.0.dev0, incompatível com o
+#                           transformers 4.x deste arquivo -- venv própria,
+#                           não misturar.
+#   Python global           numpy FIXADO em 1.26.4 (não 2.x -- torch.from_numpy
+#                           e librosa quebram com numpy 2.x neste ambiente) +
+#                           onnxruntime-gpu (SEM o pacote onnxruntime CPU
+#                           instalado junto -- os dois brigam pelo mesmo
+#                           namespace e o CPU, mais novo, vence em silêncio).
+#
+# ComfyUI/ (vendorizado) tem seu próprio requirements.txt -- não duplicado
+# aqui. Ver também packages/ltx-trainer/ se for treinar LoRA (não usado em
+# produção neste checkout).

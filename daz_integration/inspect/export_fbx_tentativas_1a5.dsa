@@ -1,0 +1,51 @@
+var FBX_OUT = "E:/Users/home/Documents/LTX-2-OPTIMIZED/daz_integration/inspect/genesis9_test.fbx";
+var LOG_OUT = "E:/Users/home/Documents/LTX-2-OPTIMIZED/daz_integration/inspect/export_log7.json";
+function salvar(o) { var f = new DzFile(LOG_OUT); if (f.open(DzFile.WriteOnly)) { f.write(JSON.stringify(o, null, 2)); f.close(); } }
+
+var resultado = { passo: "inicio" }; salvar(resultado);
+var oContentMgr = App.getContentMgr();
+var oExportMgr = App.getExportMgr();
+Scene.clear();
+var sDufFullPath = oContentMgr.findFile("People/Genesis 9/Genesis 9.duf");
+oContentMgr.openFile(sDufFullPath, true);
+
+var fig = Scene.getPrimarySelection();
+resultado.figura_selecionada = !!fig;
+if (fig) { resultado.figura_nome = fig.getName(); Scene.selectAllNodes(false); fig.select(true); }
+salvar(resultado);
+
+var oExporter = oExportMgr.findExporterByClassName("DzFbxExporter");
+resultado.exporter_ok = !!oExporter; salvar(resultado);
+
+if (oExporter) {
+    // TENTATIVA A: so os defaults, sem mexer em nenhuma opcao
+    var oSettings = new DzFileIOSettings();
+    oExporter.getDefaultOptions(oSettings);
+    resultado.passo = "tentando com defaults puros, figura selecionada";
+    salvar(resultado);
+    try {
+        var nResult = oExporter.writeFile(FBX_OUT, oSettings);
+        resultado.writeFile_defaults_puros = String(nResult);
+    } catch (e) { resultado.writeFile_defaults_erro = String(e); }
+    salvar(resultado);
+
+    // verifica se o arquivo apareceu mesmo com resultado != 0
+    var fchk = new DzFile(FBX_OUT);
+    resultado.arquivo_existe_apos_A = fchk.exists();
+    salvar(resultado);
+
+    if (!fchk.exists()) {
+        // TENTATIVA B: caminho com barras invertidas (estilo Windows nativo),
+        // caso o exportador rejeite forward-slash silenciosamente
+        var FBX_OUT_WIN = "E:\Users\home\Documents\LTX-2-OPTIMIZED\daz_integration\inspect\genesis9_test_b.fbx";
+        try {
+            var nResult2 = oExporter.writeFile(FBX_OUT_WIN, oSettings);
+            resultado.writeFile_caminho_windows = String(nResult2);
+        } catch (e) { resultado.writeFile_b_erro = String(e); }
+        var fchk2 = new DzFile(FBX_OUT_WIN);
+        resultado.arquivo_existe_apos_B = fchk2.exists();
+        salvar(resultado);
+    }
+}
+resultado.passo = "fim"; salvar(resultado);
+App.quitApp();

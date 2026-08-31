@@ -223,11 +223,16 @@ class Attention(torch.nn.Module):
             q = self.to_q(x)
             k = self.to_k(context)
 
-            if self.q_norm.weight.device != q.device:
+            # Accelerate represents CPU-offloaded weights as ``meta`` tensors
+            # until the module's pre-forward hook materializes them.  Calling
+            # ``.to()`` before ``self.q_norm(q)`` bypasses that hook and raises
+            # "Cannot copy out of meta tensor".  Materialized weights can still
+            # be aligned explicitly for the non-offloaded path.
+            if self.q_norm.weight.device.type != "meta" and self.q_norm.weight.device != q.device:
                 self.q_norm.to(q.device)
             q = self.q_norm(q)
 
-            if self.k_norm.weight.device != k.device:
+            if self.k_norm.weight.device.type != "meta" and self.k_norm.weight.device != k.device:
                 self.k_norm.to(k.device)
             k = self.k_norm(k)
 

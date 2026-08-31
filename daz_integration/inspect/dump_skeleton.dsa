@@ -1,0 +1,49 @@
+// Carrega a Genesis 9 e despeja hierarquia de ossos + testa export FBX.
+var OUT = "E:/Users/home/Documents/LTX-2-OPTIMIZED/daz_integration/inspect/genesis9_skeleton.json";
+var FIGURE = "C:/Users/Public/Documents/My DAZ 3D Library/People/Genesis 9/Genesis 9.duf";
+var FBX_OUT = "E:/Users/home/Documents/LTX-2-OPTIMIZED/daz_integration/inspect/genesis9_test.fbx";
+
+var ok = App.getContentMgr().openNativeFile(FIGURE, true);
+var resultado = { figure_loaded: ok };
+
+var fig = Scene.getPrimarySelection();
+if (fig) {
+    resultado.figure_name = fig.getName();
+    var skel = fig.getSkeleton();
+    resultado.bones = [];
+    if (skel) {
+        function walk(node, parentName, depth) {
+            if (!node) return;
+            resultado.bones.push({ name: node.getName(), label: node.getLabel(), parent: parentName, depth: depth });
+            for (var i = 0; i < node.getNumNodeChildren(); i++) {
+                walk(node.getNodeChild(i), node.getName(), depth + 1);
+            }
+        }
+        walk(skel, null, 0);
+    }
+    resultado.num_bones = resultado.bones.length;
+
+    // testa exportacao FBX via API de export
+    try {
+        var expMgr = App.getExportMgr();
+        var ids = [];
+        for (var i = 0; i < expMgr.getNumExporters(); i++) {
+            ids.push(expMgr.getExporter(i).getClassName ? expMgr.getExporter(i).getClassName() : "?");
+        }
+        resultado.exporters_disponiveis = ids;
+    } catch (e) {
+        resultado.erro_exporters = String(e);
+    }
+} else {
+    resultado.erro = "Nenhuma figura selecionada apos carregar.";
+}
+
+var f = new DzFile(OUT);
+if (f.open(DzFile.WriteOnly)) {
+    f.write(JSON.stringify(resultado, null, 2));
+    f.close();
+    print("Skeleton dump salvo: " + OUT);
+} else {
+    print("FALHA ao escrever: " + OUT);
+}
+App.quitApp();

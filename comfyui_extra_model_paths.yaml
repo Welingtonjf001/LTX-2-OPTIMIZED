@@ -1,0 +1,5 @@
+# Mantém o checkpoint FLUX 2 Klein já existente no projeto visível ao ComfyUI.
+comfyui:
+  base_path: E:\Users\home\Documents\LTX-2-OPTIMIZED
+  checkpoints: models
+  diffusion_models: models

@@ -2,13 +2,14 @@ import logging
 import time
 import hashlib
 import os
+import importlib
 
 from collections.abc import Iterator
 import numpy as np
 
 import torch
 
-from ltx_core.components.diffusion_steps import EulerDiffusionStep
+from ltx_core.components.diffusion_steps import EulerDiffusionStep, Res2sDiffusionStep
 from ltx_core.components.noisers import GaussianNoiser
 from ltx_core.components.protocols import DiffusionStepProtocol
 from ltx_core.loader import LoraPathStrengthAndSDOps
@@ -18,7 +19,7 @@ from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.quantization import QuantizationPolicy
 from ltx_core.types import Audio, LatentState, VideoPixelShape
-from ltx_pipelines.utils import ModelLedger, euler_denoising_loop
+from ltx_pipelines.utils import ModelLedger, euler_denoising_loop, res2s_audio_video_denoising_loop
 from ltx_pipelines.utils.args import (
     ImageConditioningInput,
     default_2_stage_distilled_arg_parser,
@@ -63,9 +64,13 @@ class DistilledPipeline:
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
         quantization: QuantizationPolicy | None = None,
+        torch_compile: bool = False,
+        teacache_threshold: float | None = None,
     ):
         self.device = device
         self.dtype = torch.bfloat16
+        self.torch_compile = torch_compile
+        self.teacache_threshold = teacache_threshold
 
         self.model_ledger = ModelLedger(
             dtype=self.dtype,
@@ -117,6 +122,7 @@ class DistilledPipeline:
             fps: int = 0,
             disable_audio: bool = True,
             save_step_1_preview: bool = False,
+            sampler: str = "euler",
     ) -> tuple[Iterator[torch.Tensor], Audio]:
         print("Preparing Inference")
         startAt = time.time()
@@ -124,7 +130,17 @@ class DistilledPipeline:
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
         noiser = GaussianNoiser(generator=generator)
-        stepper = EulerDiffusionStep()
+        # sampler="res2s" exists because LTX-2.3 paints garbled burned-in subtitles over
+        # any clip with speech, and the community traces it to the Euler-family samplers
+        # (Lightricks/LTX-2.3 discussion #5: "this due to euler_anc samplers. Res_2s both
+        # stages should fix this!"). Both the second-order stepper and its denoising loop
+        # already shipped in this repo -- res2s_audio_video_denoising_loop is even exported
+        # from ltx_pipelines.utils -- they were simply never wired to a pipeline.
+        # Confirmed inert in our case first: a negative prompt at CFG 3.0 through the base
+        # checkpoint did NOT remove the subtitles, so guidance is not the lever.
+        if sampler not in ("euler", "res2s"):
+            raise ValueError(f"sampler must be 'euler' or 'res2s', got {sampler!r}")
+        stepper = Res2sDiffusionStep() if sampler == "res2s" else EulerDiffusionStep()
         dtype = torch.bfloat16
 
         # --- PROMPT CACHE LOGIC START ---
@@ -173,6 +189,21 @@ class DistilledPipeline:
         # Stage 1: Initial low resolution video generation.
 
         transformer = self.model_ledger.transformer()
+        if self.torch_compile:
+            try:
+                from triton.compiler.compiler import triton_key  # noqa: F401
+                torch_dynamo = importlib.import_module("torch._dynamo")
+
+                torch_dynamo.config.suppress_errors = True
+                print("Torch compile enabled. First run may spend extra time compiling kernels.")
+                transformer = torch.compile(transformer, mode="default")
+            except Exception as e:
+                print(f"Torch compile unavailable; falling back to eager mode. Reason: {e}")
+        if self.teacache_threshold is not None:
+            print(
+                "TeaCache requested with threshold "
+                f"{self.teacache_threshold}, but native TeaCache is not implemented in this pipeline yet."
+            )
         stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
         # stage_1_sigmas = self.get_interpolated_sigmas(16, self.device)
 
@@ -184,18 +215,32 @@ class DistilledPipeline:
         def denoising_loop(
                 sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
+            denoise_fn = simple_denoising_func(
+                video_context=video_context,
+                audio_context=audio_context,
+                transformer=transformer,  # noqa: F821
+                is_conditioning=is_conditioning,
+                disable_audio=disable_audio,
+            )
+            if sampler == "res2s":
+                # res2s is second-order: it evaluates the denoiser twice per step, so the
+                # same step count costs roughly double. It takes no disable_audio flag --
+                # it always drives both modalities -- and needs a seed for its SDE noise.
+                return res2s_audio_video_denoising_loop(
+                    sigmas=sigmas,
+                    video_state=video_state,
+                    audio_state=audio_state,
+                    stepper=stepper,
+                    denoise_fn=denoise_fn,
+                    noise_seed=seed,
+                    model_dtype=dtype,
+                )
             return euler_denoising_loop(
                 sigmas=sigmas,
                 video_state=video_state,
                 audio_state=audio_state,
                 stepper=stepper,
-                denoise_fn=simple_denoising_func(
-                    video_context=video_context,
-                    audio_context=audio_context,
-                    transformer=transformer,  # noqa: F821
-                    is_conditioning=is_conditioning,
-                    disable_audio=disable_audio,
-                ),
+                denoise_fn=denoise_fn,
                 disable_audio=disable_audio,
             )
         stage_1_output_shape = VideoPixelShape(
@@ -347,6 +392,12 @@ def main() -> None:
     checkpoint_path = detect_checkpoint_path(distilled=True)
     params = detect_params(checkpoint_path)
     parser = default_2_stage_distilled_arg_parser(params=params)
+    parser.add_argument("--torch-compile", action="store_true")
+    parser.add_argument("--teacache-threshold", type=float, default=None)
+    parser.add_argument("--sampler", choices=["euler", "res2s"], default="euler",
+                        help="Diffusion sampler for both stages. res2s is second-order "
+                             "(about 2x the transformer evaluations per step) and is the "
+                             "community's remedy for LTX-2.3's burned-in garbled subtitles.")
     args = parser.parse_args()
     pipeline = DistilledPipeline(
         distilled_checkpoint_path=args.distilled_checkpoint_path,
@@ -354,6 +405,8 @@ def main() -> None:
         gemma_root=args.gemma_root,
         loras=tuple(args.lora) if args.lora else (),
         quantization=args.quantization,
+        torch_compile=args.torch_compile,
+        teacache_threshold=args.teacache_threshold,
     )
     tiling_config = TilingConfig.default()
     video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)
@@ -371,6 +424,7 @@ def main() -> None:
         video_chunks_number=video_chunks_number,
         fps=args.frame_rate,
         disable_audio=args.disable_audio,
+        sampler=args.sampler,
     )
 
     encode_video(

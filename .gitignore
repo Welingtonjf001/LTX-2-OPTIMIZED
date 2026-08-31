@@ -15,10 +15,66 @@ checkpoints/
 .idea/
 .vscode/
 
+# Estado local de ferramentas de agente (Claude Code): worktrees temporarios
+# (checkout git ANINHADO, com .git proprio -- faz `git add -A` no repo pai
+# falhar com "mmap failed" nesta maquina, medido) e transcricoes de sessao.
+# Nao e codigo do projeto.
+.claude/
+
 # Other files
 .DS_Store
 tmp
 .wandb
+
+# Ferramentas e ambientes vendorizados (upstream de terceiros, nao codigo
+# proprio -- ver CLAUDE.md). Cada um tem seu proprio historico ou instalador.
+/ComfyUI/
+/Hunyuan3D-2/
+/MHR/
+/sam-3d-body/
+/MiniMax-H3/
+/daz_integration/lib/
+/gemma4_env/
+/hf-cache/
+/venv/
+
+# Pesos de modelo baixados (509 GB medido 2026-08-31) -- inclui blobs sem
+# extensao (cache HF, ex.: models/whisper/models--*/blobs/<hash>) que as
+# regras de extensao abaixo (*.safetensors etc.) nao cobrem. Sem esta linha
+# `git add -A` tenta mapear um blob de 139 MB e falha com "mmap failed"
+# nesta maquina -- medido, nao hipotetico.
+/models/
+
+# Mais vendorizado/binario, medido 2026-08-31: tensorxx_ge/ sozinho e 94 GB
+# (toolkit TensorRT), tools/ e 890 MB (realesrgan/rife/Wav2Lip -- binarios
+# ncnn-vulkan e checkpoints de terceiros, ver CLAUDE.md "Ferramentas
+# externas"). Mesma categoria de ComfyUI/Hunyuan3D-2/MHR acima.
+/tensorxx_ge/
+/tools/
+
+# Arquivo com nome reservado do Windows (nul = dispositivo nulo) -- caindo
+# na raiz ele quebra `git add -A` com "mmap failed: Invalid argument"
+# (medido). Provavelmente lixo de um redirecionamento `> nul` que rodou na
+# pasta errada; nao apagado aqui, so ignorado.
+/nul
+
+# Saidas geradas, logs de execucao e coisas de trabalho descartaveis. Nada
+# aqui e reproduzivel a partir do codigo sozinho -- e o produto de rodar o
+# codigo contra modelos de varios GB que nao ficam no repo.
+/outputs/
+/logs/
+/audios_moving/
+*.log
+*.bak*.py
+*_ANTES/
+*.antes
+*.json.antes
+
+# Backups nomeados a mao (a familia music_maker_ui_v2.*) -- historico vive no
+# proprio nome do arquivo, nao precisa duplicar no git.
+*.old.py
+*.prev.py
+*.before_*.py
 
 # Model checkpoints
 *.ckpt
@@ -39,3 +95,12 @@ tmp
 *.png
 *.wav
 *.webp
+
+# `*.json` acima e um bloqueio geral -- ele existia para nao versionar os
+# manifestos que cada execucao produz (cast.json, clips.json, lines.json...),
+# mas pegava TAMBEM os workflows do ComfyUI escritos a mao, que sao codigo-
+# fonte. MEDIDO 2026-08-29: `comfyui_workflows/storyboard_sd35_txt2img.json`
+# (autoral, desta sessao) estava invisivel ao git por essa regra. Os
+# manifestos de execucao continuam de fora porque `/outputs/` acima ja os
+# cobre por DIRETORIO, nao por extensao -- a negacao abaixo nao os reabre.
+!/comfyui_workflows/**/*.json

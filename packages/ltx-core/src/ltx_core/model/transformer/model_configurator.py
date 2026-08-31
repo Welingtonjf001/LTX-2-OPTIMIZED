@@ -15,6 +15,8 @@ class LTXModelConfigurator(ModelConfigurator[LTXModel]):
     Used to create an LTX model from a configuration dictionary.
     """
 
+    no_split_modules = ["BasicAVTransformerBlock"]
+
     @classmethod
     def from_config(cls: type[LTXModel], config: dict) -> LTXModel:
         # Build caption projections for 19B models (projection handled in transformer).
@@ -68,6 +70,7 @@ class LTXModelConfigurator(ModelConfigurator[LTXModel]):
             caption_projection=caption_projection,
             audio_caption_projection=audio_caption_projection,
             cross_attention_adaln=config.get("cross_attention_adaln", False),
+            ff_bias=config.get("ff_bias", True),
         )
 
 
@@ -76,6 +79,8 @@ class LTXVideoOnlyModelConfigurator(ModelConfigurator[LTXModel]):
     Configurator for LTX video only model.
     Used to create an LTX video only model from a configuration dictionary.
     """
+
+    no_split_modules = ["BasicAVTransformerBlock"]
 
     @classmethod
     def from_config(cls: type[LTXModel], config: dict) -> LTXModel:
@@ -119,6 +124,7 @@ class LTXVideoOnlyModelConfigurator(ModelConfigurator[LTXModel]):
             apply_gated_attention=config.get("apply_gated_attention", False),
             caption_projection=caption_projection,
             cross_attention_adaln=config.get("cross_attention_adaln", False),
+            ff_bias=config.get("ff_bias", True),
         )
 
 

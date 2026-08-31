@@ -1,4 +1,5 @@
 import gradio as gr
+import video_doctor_ui  # aba de diagnostico temporal pos-geracao
 import subprocess
 import os
 import datetime
@@ -185,7 +186,7 @@ css = """
 textarea { font-family: monospace; }
 """
 
-with gr.Blocks(title="LTX-2 Studio", theme=theme, css=css) as demo:
+with gr.Blocks(title="LTX-2 Studio") as demo:
     gr.Markdown("## 🎬 LTX-2 Distilled Web Interface")
 
     with gr.Row():
@@ -214,7 +215,15 @@ with gr.Blocks(title="LTX-2 Studio", theme=theme, css=css) as demo:
 
             with gr.Accordion("Advanced Settings", open=False):
                 with gr.Row():
-                    steps = gr.Slider(label="Inference Steps", minimum=8, maximum=8, step=1, value=8, info="Fixed to 8 for distilled model")
+                    # Era um Slider com minimum == maximum, usado so para MOSTRAR
+                    # um valor fixo. O Gradio 6 rejeita isso ("Slider minimum must
+                    # be less than maximum") e a UI inteira deixava de subir.
+                    # Um campo nao editavel diz a mesma coisa sem fingir que ha
+                    # uma faixa para arrastar, e o valor que segue para o
+                    # subprocesso continua sendo int(steps) == 8.
+                    steps = gr.Number(label="Inference Steps", value=8, precision=0,
+                                      interactive=False,
+                                      info="Fixo em 8: o checkpoint e destilado")
                     seed = gr.Number(label="Seed", value=10, precision=0)
 
                 with gr.Row():
@@ -299,5 +308,14 @@ with gr.Blocks(title="LTX-2 Studio", theme=theme, css=css) as demo:
         outputs=[out_video, console_log]
     )
 
+    # Pos-producao: diagnostico e correcao temporal do video ja gerado.
+    # Fica FORA do fluxo de geracao de proposito -- e ferramenta aplicada ao
+    # resultado, e so quando a pessoa quiser. Em accordion porque esta UI e de
+    # layout plano: uma aba solta criaria um container de aba unica.
+    video_doctor_ui.build_doctor_tab(label="Diagnostico e correcao (video doctor)",
+                                     container="accordion")
+
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=False)
+    # theme e css sairam do construtor do Blocks no Gradio 6. Deixados la
+    # viram aviso e sao IGNORADOS -- a UI sobe sem o tema, sem dizer nada.
+    demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), share=False, theme=theme, css=css)

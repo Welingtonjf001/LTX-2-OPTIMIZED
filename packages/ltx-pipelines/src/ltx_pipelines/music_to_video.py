@@ -1,7 +1,8 @@
 import logging
 import time
-import hashlib
 import os
+import subprocess
+import numpy as np
 import einops
 
 from collections.abc import Iterator
@@ -37,6 +38,7 @@ from ltx_pipelines.utils.helpers import (
     noise_audio_state
 )
 from ltx_pipelines.utils.media_io import encode_video
+from ltx_pipelines.utils.prompt_cache import DEFAULT_PROMPT_CACHE_DIR, prompt_cache_path
 from ltx_pipelines.utils.types import PipelineComponents
 
 device = get_device()
@@ -49,11 +51,18 @@ AUDIO_SAMPLE_RATE = 16000
 
 
 def load_audio_input(audio_path: str, target_sample_rate: int, device: torch.device) -> torch.Tensor:
-    waveform, sample_rate = torchaudio.load(audio_path)
-    if sample_rate != target_sample_rate:
-        waveform = torchaudio.functional.resample(waveform, sample_rate, target_sample_rate)
-    
-    return waveform.to(device)
+    try:
+        waveform, sample_rate = torchaudio.load(audio_path)
+        if sample_rate != target_sample_rate:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, target_sample_rate)
+        return waveform.to(device)
+    except RuntimeError:
+        ffmpeg = "C:/ffmpeg/bin/ffmpeg.exe"
+        proc = subprocess.run([ffmpeg, "-v", "error", "-i", audio_path, "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "2", "-ar", str(target_sample_rate), "pipe:1"], check=True, capture_output=True)
+        samples = np.frombuffer(proc.stdout, dtype=np.float32)
+        if samples.size == 0 or samples.size % 2:
+            raise RuntimeError("FFmpeg returned no valid audio samples")
+        return torch.from_numpy(samples.reshape(-1, 2).T.copy()).to(device)
 
 from line_profiler import profile
 
@@ -71,9 +80,11 @@ class MusicToVideoPipeline:
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
         quantization: QuantizationPolicy | None = None,
+        torch_compile: bool = False,
     ):
         self.device = device
         self.dtype = torch.bfloat16
+        self.torch_compile = bool(torch_compile)
 
         self.model_ledger = ModelLedger(
             dtype=self.dtype,
@@ -168,21 +179,16 @@ class MusicToVideoPipeline:
              pass
 
         # --- PROMPT CACHE LOGIC START ---
-        CACHE_DIR = "./prompt_embeddings_cache"
-        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(DEFAULT_PROMPT_CACHE_DIR, exist_ok=True)
 
         image_identifier = images[0][0] if (len(images) > 0 and enhance_prompt) else "no_img"
 
-        hash_input_str = (
-            f"prompt:{prompt}|"
-            f"pipeline:music_distilled|"
-            f"enhance:{enhance_prompt}|"
-            f"seed:{seed if enhance_prompt else 'ignored'}|"
-            f"img:{image_identifier}"
+        cache_path = prompt_cache_path(
+            prompt,
+            enhance_prompt=enhance_prompt,
+            seed=seed,
+            image_identifier=image_identifier,
         )
-
-        cache_filename = hashlib.md5(hash_input_str.encode('utf-8')).hexdigest() + ".pt"
-        cache_path = os.path.join(CACHE_DIR, cache_filename)
 
         context_p = None
 
@@ -212,6 +218,22 @@ class MusicToVideoPipeline:
         print("Stage 1: Initial low resolution video generation.")
 
         transformer = self.model_ledger.transformer()
+        if self.torch_compile:
+            print("Compiling LTX transformer with torch.compile (dynamic shapes enabled)...", flush=True)
+            try:
+                # Windows wheels can contain a Triton version without the
+                # Inductor API expected by this PyTorch build. Detect it before
+                # wrapping the transformer; otherwise the lazy compile fails
+                # only during the first denoising step.
+                import triton.compiler.compiler as triton_compiler
+                if not hasattr(triton_compiler, "triton_key"):
+                    raise RuntimeError("installed Triton lacks triton_key; using eager mode")
+                torch._dynamo.config.suppress_errors = True
+                transformer = torch.compile(transformer, mode="default", dynamic=True)
+                print("torch.compile enabled for MusicToVideo transformer.", flush=True)
+            except Exception as compile_error:
+                print(f"torch.compile unavailable; using eager transformer: {compile_error}", flush=True)
+                self.torch_compile = False
         stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
 
         def music_denoising_loop(
@@ -306,7 +328,17 @@ class MusicToVideoPipeline:
             audio_state, audio_tools = noise_audio_state(
                 stage_1_output_shape,
                 noiser,
-                stage_1_conditionings,
+                [],  # Audio has no image-based latents -- same as the branch above.
+                # BUGFIX (2026-08-10): this branch used to pass stage_1_conditionings,
+                # which includes IMAGE conditionings. Those are 5-D video latents
+                # (batch, channels, frames, height, width); an audio latent state is
+                # 4-D, so applying them raised
+                #   ValueError: not enough values to unpack (expected 5, got 4)
+                # in latent_cond.apply_to(). Only reachable with --image AND NO
+                # --audio-input-path -- an untested combination for a music->video
+                # pipeline, but exactly what a wordless action shot conditioned on a
+                # storyboard/previous frame needs. The audio-input branch above already
+                # passes [] for this reason and even says so in its comment.
                 self.pipeline_components,
                 self.dtype,
                 self.device,
@@ -362,6 +394,14 @@ class MusicToVideoPipeline:
             )
 
         print("Stage 2: Upsample and refine.")
+        # Stage 2 loads the VAE encoder after stage 1.  On Windows, keeping
+        # stale CUDA/CPU references alive here can force safetensors mmap to
+        # reserve more committed memory than the pagefile allows (WinError
+        # 1455).  Drop stage-1 objects and run both collectors before loading
+        # the encoder, especially for short music-to-video jobs.
+        import gc
+        gc.collect()
+        cleanup_memory()
         
         video_encoder = self.model_ledger.video_encoder()
         upsampler = self.model_ledger.spatial_upsampler()
@@ -419,19 +459,33 @@ class MusicToVideoPipeline:
         del video_decoder
         cleanup_memory()
     
-        if audio_state is not None:
-            pass
-
         audio = None
         if audio_state is not None:
             if audio_latents is not None:
                  vocoder = self.model_ledger.vocoder()
-                 audio = vae_decode_audio(audio_latents, self.model_ledger.audio_decoder(), vocoder)
+                 audio_decoder = self.model_ledger.audio_decoder()
+                 audio = vae_decode_audio(audio_latents, audio_decoder, vocoder)
                  torch.cuda.synchronize()
+                 del audio_decoder
                  del vocoder
                  cleanup_memory()
-            else:
-                 pass
+            elif os.environ.get("LTX_GENERATE_AMBIENT_AUDIO") == "1":
+                 # (2026-08-11) This branch used to be a bare `pass`, so a clip
+                 # rendered WITHOUT --audio-input-path came out with no audio track at
+                 # all -- even though the pipeline had just denoised a full audio
+                 # latent state for it alongside the video. Decoding audio_state.latent
+                 # (the same call the stage-1 preview above already makes) turns that
+                 # discarded state into the model's own scene-appropriate ambience:
+                 # rain, an engine, a closing door. Opt-in because it costs a vocoder
+                 # load + decode per clip, and because clips WITH dialogue never reach
+                 # this branch anyway.
+                 vocoder = self.model_ledger.vocoder()
+                 audio_decoder = self.model_ledger.audio_decoder()
+                 audio = vae_decode_audio(audio_state.latent, audio_decoder, vocoder)
+                 torch.cuda.synchronize()
+                 del audio_decoder
+                 del vocoder
+                 cleanup_memory()
         
         print("Stage 3: Done.", time.time() - startAt)
         final_audio = Audio(waveform=audio_waveform.cpu(), sampling_rate=AUDIO_SAMPLE_RATE) if audio_waveform is not None else audio
@@ -443,6 +497,12 @@ def main() -> None:
     logging.getLogger().setLevel(logging.INFO)
     parser = default_2_stage_distilled_arg_parser()
     parser.add_argument("--audio-input-path", type=str, default=None, help="Path to input audio file")
+    parser.add_argument("--torch-compile", action="store_true", help="Compile the multimodal transformer with torch.compile")
+    parser.add_argument(
+        "--save-stage-1-preview",
+        action="store_true",
+        help="Save the low-resolution stage-1 preview (disabled by default to avoid a duplicate VAE decode).",
+    )
     args = parser.parse_args()
     
     pipeline = MusicToVideoPipeline(
@@ -451,6 +511,7 @@ def main() -> None:
         gemma_root=args.gemma_root,
         loras=args.lora,
         quantization=args.quantization,
+        torch_compile=args.torch_compile,
     )
     tiling_config = TilingConfig.default()
     video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)
@@ -469,6 +530,7 @@ def main() -> None:
         output_path=args.output_path,
         video_chunks_number=video_chunks_number,
         fps=args.frame_rate,
+        save_step_1_preview=args.save_stage_1_preview,
     )
 
     encode_video(

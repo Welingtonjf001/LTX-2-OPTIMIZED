@@ -112,7 +112,8 @@ class KeyframeInterpolationPipeline:
         sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
 
         def first_stage_denoising_loop(
-            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+            stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -179,7 +180,8 @@ class KeyframeInterpolationPipeline:
         distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
 
         def second_stage_denoising_loop(
-            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState,
+            stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -190,6 +192,7 @@ class KeyframeInterpolationPipeline:
                     video_context=v_context_p,
                     audio_context=a_context_p,
                     transformer=transformer,  # noqa: F821
+                    is_conditioning=is_conditioning,
                 ),
             )
 

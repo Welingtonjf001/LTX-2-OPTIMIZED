@@ -1,4 +1,5 @@
 import gradio as gr
+import video_doctor_ui  # aba de diagnostico temporal pos-geracao
 import subprocess
 import os
 import datetime
@@ -13,6 +14,8 @@ DEFAULT_CHECKPOINT = "./models/ltx-2.3-22b-distilled-fp8.safetensors"
 DEFAULT_GEMMA = "./models/gemma3"
 DEFAULT_UPSAMPLER = "./models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
 LORA_ROOT = "./models/loras"
+LONG_FRAME_PRESETS = [257, 321, 385, 513]
+LONG_CHUNK_PRESETS = [121, 257]
 
 # LoRA List
 LORA_OPTIONS = [
@@ -25,8 +28,14 @@ LORA_OPTIONS = [
     "LTX-2-19b-LoRA-Camera-Control-Static"
 ]
 
-# Resolution Presets with Max Frame Data for 8GB VRAM
+# Resolution Presets with Max Frame Data for 8GB VRAM.
+# LTX accepts frame counts in the form (8 * k) + 1. The low-resolution
+# presets can be pushed further on a 24GB card, while higher resolutions stay
+# conservative to avoid out-of-memory failures.
 PRESETS = {
+    "768x512 (1/2 Standard)": {"w": 768, "h": 512, "max_frames": 513},
+    "384x256 (1/4 Standard)": {"w": 384, "h": 256, "max_frames": 513},
+    "384x640 (1/2 Vertical)": {"w": 384, "h": 640, "max_frames": 513},
     "1280x704 (Landscape)": {"w": 1280, "h": 704, "max_frames": 225},
     "704x1280 (Vertical)": {"w": 704, "h": 1280, "max_frames": 225},
     "1536x1024 (Standard)": {"w": 1536, "h": 1024, "max_frames": 121},
@@ -147,6 +156,55 @@ def get_preset_frames(preset_key, is_safe_mode, current_val):
     return 121
 
 
+def estimate_vram_text(preset_key, num_frames, long_video, chunk_frames):
+    if preset_key not in PRESETS:
+        return "VRAM estimate unavailable."
+    preset = PRESETS[preset_key]
+    pixels = preset["w"] * preset["h"]
+    active_frames = int(chunk_frames if long_video else num_frames)
+    reference_pixels = 1536 * 1024
+    reference_frames = 121
+    estimated_gb = 18.0 * (pixels / reference_pixels) * (active_frames / reference_frames)
+    estimated_gb = max(4.0, estimated_gb)
+    mode = f"chunked {active_frames} frame blocks" if long_video else f"{active_frames} frames"
+    return (
+        f"Estimated peak VRAM: ~{estimated_gb:.1f} GB for {preset['w']}x{preset['h']} at {mode}. "
+        "This is a rough planning estimate, not a hard guarantee."
+    )
+
+
+def normalize_ltx_frames(value):
+    value = int(value)
+    if value < 9:
+        return 9
+    return ((value - 1) // 8) * 8 + 1
+
+
+def extract_last_frame(video_path, image_path):
+    cmd = ["ffmpeg", "-y", "-sseof", "-1", "-i", video_path, "-update", "1", "-q:v", "2", image_path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return result.returncode == 0, result.stdout
+
+
+def trim_first_frame(video_path, output_path, fps):
+    # Used by Long Video continuity: chunk N starts from chunk N-1's last frame.
+    start_time = 1.0 / float(fps)
+    cmd = ["ffmpeg", "-y", "-ss", f"{start_time:.6f}", "-i", video_path, "-c", "copy", output_path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return result.returncode == 0, result.stdout
+
+
+def concat_videos(video_paths, output_path):
+    list_path = output_path.replace(".mp4", "_concat.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for path in video_paths:
+            safe_path = os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe_path}'\n")
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return result.returncode == 0, result.stdout
+
+
 # --- Worker Logic ---
 
 def process_job_logic(job):
@@ -169,61 +227,162 @@ def process_job_logic(job):
     CURRENT_OUTPUT_PATH = output_path
 
     CURRENT_LOG += f"\n\n--- STARTED JOB: {job['id']} ---\nPrompt: {prompt}\nSeed: {seed}\n"
+    CURRENT_LOG += (
+        "Optimizations: "
+        f"FP8={'on' if job['enable_fp8'] else 'off'}, "
+        f"Torch Compile={'on' if job['torch_compile'] else 'off'}, "
+        f"TeaCache={'on' if job['enable_teacache'] else 'off'}, "
+        f"Long Video={'on' if job['long_video'] else 'off'}\n"
+    )
 
-    # Build Command
-    cmd = [
-        sys.executable, "-m", "ltx_pipelines.distilled",
-        # "kernprof", "-l", "-v", "-m", "ltx_pipelines.distilled",
-        "--distilled-checkpoint-path", job['checkpoint_path'],
-        "--gemma-root", job['gemma_path'],
-        "--spatial-upsampler-path", job['upsampler_path'],
-        "--prompt", prompt,
-        "--output-path", output_path,
-        "--width", str(width),
-        "--height", str(height),
-        "--num-frames", str(int(job['num_frames'])),
-        "--frame-rate", str(job['frame_rate']),
-        "--num-inference-steps", str(int(job['steps'])),
-        "--seed", str(int(seed)),
-        # "--enable-chunked-stage2"
-        "--quantization", "fp8-cast"
-    ]
+    def build_command(target_path, frames, chunk_seed, images):
+        cmd = [
+            sys.executable, "-m", "ltx_pipelines.distilled",
+            "--distilled-checkpoint-path", job['checkpoint_path'],
+            "--gemma-root", job['gemma_path'],
+            "--spatial-upsampler-path", job['upsampler_path'],
+            "--prompt", prompt,
+            "--output-path", target_path,
+            "--width", str(width),
+            "--height", str(height),
+            "--num-frames", str(int(frames)),
+            "--frame-rate", str(job['frame_rate']),
+            "--num-inference-steps", str(int(job['steps'])),
+            "--seed", str(int(chunk_seed)),
+        ]
 
-    if job['enhance_prompt']: cmd.append("--enhance-prompt")
-    if job['disable_audio']: cmd.append("--disable-audio")
+        if job['enable_fp8']:
+            cmd.extend(["--quantization", "fp8-cast"])
+        if job['torch_compile']:
+            cmd.append("--torch-compile")
+        if job['enable_teacache']:
+            cmd.extend(["--teacache-threshold", str(float(job['teacache_threshold']))])
+        if job['enhance_prompt']:
+            cmd.append("--enhance-prompt")
+        if job['disable_audio']:
+            cmd.append("--disable-audio")
 
-    # Images
-    for path, idx, strength in job['images']:
-        if path is not None:
-            latent_idx = int(idx) // 8
-            cmd.extend(["--image", path, str(latent_idx), str(float(strength))])
+        for path, idx, strength in images:
+            if path is not None:
+                latent_idx = int(idx) // 8
+                cmd.extend(["--image", path, str(latent_idx), str(float(strength))])
 
-    # LoRAs
-    for lora_name in job['loras']:
-        lora_full_path = os.path.join(LORA_ROOT, f"{lora_name.lower()}.safetensors")
-        cmd.extend(["--lora", lora_full_path, "1.0"])
+        for lora_name in job['loras']:
+            lora_full_path = os.path.join(LORA_ROOT, f"{lora_name.lower()}.safetensors")
+            cmd.extend(["--lora", lora_full_path, "1.0"])
+        return cmd
+
+    if job['enable_teacache']:
+        CURRENT_LOG += (
+            "TeaCache note: UI and CLI argument are wired, but this local distilled pipeline "
+            "currently logs the request instead of applying true timestep caching.\n"
+        )
 
     import shlex
-    full_command_str = " ".join(shlex.quote(arg) for arg in cmd)
-    CURRENT_LOG += f"Command:\n{full_command_str}\n\n--- OUTPUT LOG ---\n"
 
-    # Execution
-    try:
+    def run_command(cmd):
+        nonlocal seed
+        global CURRENT_PROCESS, CURRENT_LOG
+        full_command_str = " ".join(shlex.quote(arg) for arg in cmd)
+        CURRENT_LOG += f"Command:\n{full_command_str}\n\n--- OUTPUT LOG ---\n"
         CURRENT_PROCESS = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, universal_newlines=True
         )
-
+        # Stream each line into the global log AS IT ARRIVES, so the UI's
+        # "Console Log" (polled by a timer) shows progress live instead of a
+        # single dump after the subprocess finishes.
         for line in CURRENT_PROCESS.stdout:
             CURRENT_LOG += line
-
+            print(line, end="", flush=True)
         CURRENT_PROCESS.wait()
+        return CURRENT_PROCESS.returncode
 
-        if CURRENT_PROCESS.returncode == 0 and os.path.exists(output_path):
-            CURRENT_LOG += f"\n--- JOB COMPLETE ---\nSaved: {output_path}\n"
-            LATEST_VIDEO_PATH = output_path
+    # Execution
+    try:
+        if job['long_video']:
+            total_frames = normalize_ltx_frames(job['num_frames'])
+            chunk_frames = normalize_ltx_frames(job['chunk_frames'])
+            produced_frames = 0
+            chunk_paths = []
+            continuity_image = None
+            chunk_index = 1
+
+            CURRENT_LOG += f"Long Video mode: total_frames={total_frames}, chunk_frames={chunk_frames}\n"
+            while produced_frames < total_frames:
+                remaining_output_frames = total_frames - produced_frames
+                if chunk_index == 1 or not job['auto_continue_last_frame']:
+                    frames_this_chunk = min(chunk_frames, remaining_output_frames)
+                else:
+                    frames_this_chunk = min(chunk_frames, remaining_output_frames + 1)
+                frames_this_chunk = normalize_ltx_frames(frames_this_chunk)
+                if frames_this_chunk < 9:
+                    break
+                chunk_path = output_path.replace(".mp4", f"_part{chunk_index:02d}.mp4")
+                chunk_images = list(job['images'])
+                if job['auto_continue_last_frame'] and continuity_image:
+                    chunk_images.append((continuity_image, 0, 0.85))
+                    CURRENT_LOG += f"Chunk {chunk_index}: using previous last frame as frame-0 conditioning.\n"
+
+                cmd = build_command(chunk_path, frames_this_chunk, int(seed) + chunk_index - 1, chunk_images)
+                CURRENT_LOG += f"\n--- LONG VIDEO CHUNK {chunk_index} / frames={frames_this_chunk} ---\n"
+                return_code = run_command(cmd)
+
+                if return_code != 0 or not os.path.exists(chunk_path):
+                    CURRENT_LOG += f"\n--- JOB FAILED ON CHUNK {chunk_index} ---\nReturn Code: {return_code}\n"
+                    return
+
+                chunk_paths.append(chunk_path)
+                if chunk_index == 1 or not job['auto_continue_last_frame']:
+                    produced_frames += frames_this_chunk
+                else:
+                    produced_frames += frames_this_chunk - 1
+
+                if job['auto_continue_last_frame'] and produced_frames < total_frames:
+                    continuity_image = output_path.replace(".mp4", f"_part{chunk_index:02d}_last.jpg")
+                    ok, log = extract_last_frame(chunk_path, continuity_image)
+                    if ok:
+                        CURRENT_LOG += f"Extracted continuity frame: {continuity_image}\n"
+                    else:
+                        CURRENT_LOG += f"Could not extract continuity frame:\n{log}\n"
+                        continuity_image = None
+
+                chunk_index += 1
+
+            concat_paths = list(chunk_paths)
+            if job['auto_continue_last_frame'] and len(chunk_paths) > 1:
+                concat_paths = [chunk_paths[0]]
+                for idx, path in enumerate(chunk_paths[1:], start=2):
+                    trimmed_path = path.replace(".mp4", "_trimmed.mp4")
+                    ok, log = trim_first_frame(path, trimmed_path, job['frame_rate'])
+                    if ok:
+                        concat_paths.append(trimmed_path)
+                        CURRENT_LOG += f"Trimmed duplicated continuity frame from chunk {idx}.\n"
+                    else:
+                        concat_paths.append(path)
+                        CURRENT_LOG += f"Could not trim chunk {idx}; using original chunk:\n{log}\n"
+
+            if len(concat_paths) == 1:
+                os.replace(concat_paths[0], output_path)
+                concat_ok = True
+                concat_log = "Single chunk moved to final output."
+            else:
+                concat_ok, concat_log = concat_videos(concat_paths, output_path)
+            CURRENT_LOG += f"\n--- CONCAT LOG ---\n{concat_log}\n"
+            if concat_ok and os.path.exists(output_path):
+                CURRENT_LOG += f"\n--- JOB COMPLETE ---\nSaved: {output_path}\n"
+                LATEST_VIDEO_PATH = output_path
+            else:
+                CURRENT_LOG += "\n--- JOB FAILED DURING CONCAT ---\n"
         else:
-            CURRENT_LOG += f"\n--- JOB FAILED ---\nReturn Code: {CURRENT_PROCESS.returncode}\n"
+            cmd = build_command(output_path, int(job['num_frames']), seed, job['images'])
+            return_code = run_command(cmd)
+
+            if return_code == 0 and os.path.exists(output_path):
+                CURRENT_LOG += f"\n--- JOB COMPLETE ---\nSaved: {output_path}\n"
+                LATEST_VIDEO_PATH = output_path
+            else:
+                CURRENT_LOG += f"\n--- JOB FAILED ---\nReturn Code: {return_code}\n"
     except Exception as e:
         CURRENT_LOG += f"\n--- EXCEPTION ---\n{str(e)}\n"
     finally:
@@ -274,6 +433,8 @@ threading.Thread(target=worker_thread, daemon=True).start()
 
 def enqueue_job(
         prompt, preset, num_frames, disable_audio, frame_rate, steps, seed, randomize_seed, enhance_prompt, enable_fp8,
+        enable_teacache, teacache_threshold, torch_compile, long_frame_preset, long_video, chunk_frames,
+        auto_continue_last_frame,
         checkpoint_path, gemma_path, upsampler_path,
         img1_path, img1_idx, img1_str,
         img2_path, img2_idx, img2_str,
@@ -294,6 +455,13 @@ def enqueue_job(
         "randomize_seed": randomize_seed,
         "enhance_prompt": enhance_prompt,
         "enable_fp8": enable_fp8,
+        "enable_teacache": enable_teacache,
+        "teacache_threshold": teacache_threshold,
+        "torch_compile": torch_compile,
+        "long_frame_preset": long_frame_preset,
+        "long_video": long_video,
+        "chunk_frames": chunk_frames,
+        "auto_continue_last_frame": auto_continue_last_frame,
         "checkpoint_path": checkpoint_path,
         "gemma_path": gemma_path,
         "upsampler_path": upsampler_path,
@@ -352,7 +520,7 @@ textarea { font-family: monospace; }
 #status_box { font-weight: bold; color: #475569; }
 """
 
-with gr.Blocks(title="LTX-2.3 Studio + Queue", theme=theme, css=css) as demo:
+with gr.Blocks(title="LTX-2.3 Studio + Queue") as demo:
     gr.Markdown("## 🎬 LTX-2.3 Distilled Web Interface (Queue Enabled)")
 
     with gr.Row():
@@ -383,8 +551,15 @@ with gr.Blocks(title="LTX-2.3 Studio + Queue", theme=theme, css=css) as demo:
                     disable_audio = gr.Checkbox(label="Disable audio", value=False)
 
                 with gr.Column(scale=1):
-                    num_frames = gr.Slider(label="Frames", minimum=9, maximum=257, step=8, value=121)
+                    num_frames = gr.Slider(label="Frames", minimum=9, maximum=513, step=8, value=121)
                     fps = gr.Slider(label="FPS", minimum=8, maximum=60, step=1, value=24)
+                    long_frame_preset = gr.Dropdown(
+                        label="Long Frame Preset",
+                        choices=LONG_FRAME_PRESETS,
+                        value=257,
+                        info="Quick valid LTX frame counts."
+                    )
+                    vram_estimate = gr.Markdown(estimate_vram_text("1536x1024 (Standard)", 121, False, 121))
 
             with gr.Accordion("Advanced", open=False):
                 with gr.Row():
@@ -394,6 +569,28 @@ with gr.Blocks(title="LTX-2.3 Studio + Queue", theme=theme, css=css) as demo:
                     random_seed = gr.Checkbox(label="Random Seed", value=True)
                     enable_fp8 = gr.Checkbox(label="FP8", value=True)
                     enhance_prompt = gr.Checkbox(label="Enhance", value=False)
+                with gr.Row():
+                    enable_teacache = gr.Checkbox(label="Enable TeaCache", value=False)
+                    teacache_threshold = gr.Slider(
+                        label="TeaCache Threshold",
+                        minimum=0.01,
+                        maximum=0.12,
+                        step=0.01,
+                        value=0.05,
+                        info="Experimental: UI/CLI wired; this pipeline logs it but does not apply true TeaCache yet."
+                    )
+                    torch_compile = gr.Checkbox(
+                        label="Torch Compile",
+                        value=False,
+                        info="Experimental on Windows; falls back to normal mode when Triton is incompatible."
+                    )
+                with gr.Row():
+                    long_video = gr.Checkbox(label="Long Video Mode", value=False)
+                    chunk_frames = gr.Dropdown(label="Chunk Frames", choices=LONG_CHUNK_PRESETS, value=121)
+                    auto_continue_last_frame = gr.Checkbox(
+                        label="Auto-use last frame for continuity",
+                        value=True
+                    )
 
                 checkpoint_path = gr.Textbox(label="Checkpoint", value=DEFAULT_CHECKPOINT)
                 gemma_path = gr.Textbox(label="Gemma Root", value=DEFAULT_GEMMA)
@@ -465,6 +662,8 @@ with gr.Blocks(title="LTX-2.3 Studio + Queue", theme=theme, css=css) as demo:
         fn=enqueue_job,
         inputs=[
             prompt, preset, num_frames, disable_audio, fps, steps, seed, random_seed, enhance_prompt, enable_fp8,
+            enable_teacache, teacache_threshold, torch_compile, long_frame_preset, long_video, chunk_frames,
+            auto_continue_last_frame,
             checkpoint_path, gemma_path, upsampler_path,
             i1_img, i1_idx, i1_str,
             i2_img, i2_idx, i2_str,
@@ -491,6 +690,19 @@ with gr.Blocks(title="LTX-2.3 Studio + Queue", theme=theme, css=css) as demo:
     # 4. Presets Logic
     preset.change(fn=get_preset_frames, inputs=[preset, safe_mode, num_frames], outputs=num_frames)
     safe_mode.change(fn=get_preset_frames, inputs=[preset, safe_mode, num_frames], outputs=num_frames)
+    long_frame_preset.change(fn=lambda x: x, inputs=long_frame_preset, outputs=num_frames)
+    preset.change(fn=estimate_vram_text, inputs=[preset, num_frames, long_video, chunk_frames], outputs=vram_estimate)
+    num_frames.change(fn=estimate_vram_text, inputs=[preset, num_frames, long_video, chunk_frames], outputs=vram_estimate)
+    long_video.change(fn=estimate_vram_text, inputs=[preset, num_frames, long_video, chunk_frames], outputs=vram_estimate)
+    chunk_frames.change(fn=estimate_vram_text, inputs=[preset, num_frames, long_video, chunk_frames], outputs=vram_estimate)
+
+    # Pos-producao: diagnostico e correcao temporal do video ja gerado.
+    # Fica FORA do fluxo de geracao de proposito -- e ferramenta aplicada ao
+    # resultado, e so quando a pessoa quiser. Em accordion porque esta UI e de
+    # layout plano: uma aba solta criaria um container de aba unica.
+    video_doctor_ui.build_doctor_tab(label="Diagnostico e correcao (video doctor)",
+                                     container="accordion")
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=False)
+    # theme/css movidos do Blocks para o launch (Gradio 6).
+    demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), share=False, theme=theme, css=css)
