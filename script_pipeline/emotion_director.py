@@ -40,6 +40,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -78,14 +79,29 @@ def _ollama(system: str, user: str, model: str, log=print) -> dict | None:
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}],
                "options": {"temperature": 0.1, "num_ctx": 16384}}
-    req = urllib.request.Request(f"{OLLAMA_URL}/api/chat",
-                                 data=json.dumps(payload).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=300) as r:
-            body = json.load(r)
-    except Exception as e:
-        log(f"[emotion_director] Ollama indisponivel ({type(e).__name__}); usando palavra-chave.")
+    req_bytes = json.dumps(payload).encode("utf-8")
+    # RETRY (2026-09-09): mesmo fix de parse_screenplay.py (MEMORIAL 3.65) --
+    # sem isto uma falha HTTP transiente derrubava a direcao emocional do
+    # ROTEIRO INTEIRO pro fallback de palavra-chave (o proprio docstring da
+    # funcao promete "uma chamada para o roteiro inteiro" -- e exatamente por
+    # cobrir tanta coisa numa chamada so que vale insistir antes de desistir).
+    body = None
+    for tentativa in range(3):
+        req = urllib.request.Request(f"{OLLAMA_URL}/api/chat", data=req_bytes,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                body = json.load(r)
+            if tentativa:
+                log(f"[emotion_director] Ollama ok na tentativa {tentativa + 1}/3.")
+            break
+        except Exception as e:
+            log(f"[emotion_director] Ollama indisponivel ({type(e).__name__}) "
+                f"(tentativa {tentativa + 1}/3).")
+        if tentativa < 2:
+            time.sleep(2)
+    if body is None:
+        log("[emotion_director] Ollama indisponivel apos 3 tentativas; usando palavra-chave.")
         return None
     content = (body.get("message") or {}).get("content") or ""
     if not content.strip():

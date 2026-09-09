@@ -145,13 +145,21 @@ class TI2VidTwoStagesPipeline:
         # If cache miss or load failed
         if context_p is None:
             print("Disk cache miss. Running text encoder.")
-            context_p, context_n = encode_prompts(
-                [prompt, negative_prompt],
+            # Two SEPARATE encode_prompts() calls, not one call with
+            # [prompt, negative_prompt]: encoding two prompts in a single
+            # call throws `torch.OutOfMemoryError` reporting a physically
+            # impossible amount allocated (looks like a leak in accelerate's
+            # CPU-offload hooks that only shows up encoding a second prompt
+            # without a cleanup_memory() in between -- see
+            # lora_storyboard_encode.py for the full investigation).
+            (context_p,) = encode_prompts(
+                [prompt],
                 self.stage_1_model_ledger,
                 enhance_first_prompt=enhance_prompt,
                 enhance_prompt_image=images[0][0] if len(images) > 0 else None,
                 enhance_prompt_seed=seed,
             )
+            (context_n,) = encode_prompts([negative_prompt], self.stage_1_model_ledger)
 
             # Save to disk for next time
             print(f"Saving embeddings to {cache_path}")

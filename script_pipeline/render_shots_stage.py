@@ -48,19 +48,25 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
-def build_clips_manifest(feitos: list, plan: dict, dialogue: dict) -> list:
+def build_clips_manifest(feitos: list, plan: dict, dialogue: dict, engine: str = "ltx") -> list:
     """Converte a saída de render_shots para o formato de `scenes/clips.json`.
 
     Os campos são os que `lipsync_scenes` e `mix_audio` leem: `id`,
     `scene_index`, `line_index`, `character`, `video_path`, `audio_path`, `ok`.
     Plano de ação entra com `audio_path: None` -- é assim que o estágio 6
-    reconhece "nada a sincronizar" e passa o clipe adiante intacto."""
+    reconhece "nada a sincronizar" e passa o clipe adiante intacto.
+
+    `engine="minimax"` usa o MESMO truque: o MiniMax H3 já gera fala e
+    lip-sync NATIVOS dentro do clipe (não passa pelo TTS), então forçar
+    `audio_path=None` aqui faz o estágio 6 tratar todo plano minimax como o
+    plano de ação já trata -- passa o clipe adiante intacto, sem o Wav2Lip
+    tentar resincronizar com um WAV de um personagem/voz diferente."""
     out = []
     for f in feitos:
         i = f["shot"]
         shot = plan["shots"][i]
         chave = (shot.get("scene"), shot.get("line_index"))
-        wav = dialogue.get(chave, (None, None))[0]
+        wav = None if engine == "minimax" else dialogue.get(chave, (None, None))[0]
         out.append({
             "id": f"scene{shot['scene']:02d}_shot{i:03d}",
             "scene_index": shot["scene"],
@@ -91,8 +97,9 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=544)
     ap.add_argument("--fps", type=float, default=24.0)
     ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--image-engine", default="flux", choices=["flux", "sd35", "sdxl"],
-                    help='motor de imagem dos stills. flux = melhor adesao a enquadramento e lado de tela e aceita imagem de referencia, mas carrega ~4 min e encosta no teto de VRAM da 3090. sd35 = carrega em ~1 min, cabe em ~12 GB e amostra mais rapido, mas obedece menos o enquadramento e NAO tem referencia. --checkpoint/--clip/--vae explicitos continuam ganhando disto.')
+    from script_pipeline.generate_storyboards import IMAGE_ENGINES
+    ap.add_argument("--image-engine", default="flux", choices=sorted(IMAGE_ENGINES),
+                    help='motor de imagem dos stills. flux = melhor adesao a enquadramento e lado de tela e aceita imagem de referencia, mas carrega ~4 min e encosta no teto de VRAM da 3090. sd35 = carrega em ~1 min, cabe em ~12 GB e amostra mais rapido, mas obedece menos o enquadramento e NAO tem referencia. flux-krea/flux-kontext = FLUX.1, ver MEMORIAL 3.48. --checkpoint/--clip/--vae explicitos continuam ganhando disto.')
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--clip", default=None)
     ap.add_argument("--vae", default=None)
@@ -107,6 +114,30 @@ def main() -> int:
     ap.add_argument("--no-reference", action="store_true")
     # Ver render_shots.py: sem condicionamento o LTX inventa voz propria.
     ap.add_argument("--no-audio-conditioning", action="store_true")
+    ap.add_argument("--engine", default="ltx", choices=["ltx", "minimax"],
+                    help="motor de video. ltx = LTX 2.5 via ComfyUI (8188), condicionado "
+                         "pela fala sintetizada (TTS). minimax = MiniMax H3 (ComfyUI "
+                         "separado, 8189) -- fala e lip-sync NATIVOS a partir do texto "
+                         "do prompt, sem passar pelo TTS/lipsync/mix do pipeline.")
+    ap.add_argument("--minimax-aspect-ratio", default=None)
+    ap.add_argument("--minimax-megapixels", type=float, default=None)
+    ap.add_argument("--minimax-no-turbo", dest="minimax_turbo", action="store_false", default=True,
+                    help="20 passos em vez dos 4 da LoRA turbo -- mais lento, nao medido aqui.")
+    ap.add_argument("--consistency-threshold", type=float, default=None,
+                    help="auditoria automatica de consistencia facial (insightface) contra a "
+                         "imagem de referencia do plano -- ver MEMORIAL 3.53. Sem isto, desligado "
+                         "(comportamento de sempre). 0.35 e um ponto de partida razoavel (medido: "
+                         "mesmo personagem ~0.85-0.97, personagens diferentes ~0.10-0.12).")
+    ap.add_argument("--consistency-max-retries", type=int, default=2,
+                    help="tentativas extras (seed diferente) quando a similaridade fica abaixo "
+                         "do limiar -- fica com a de MAIOR similaridade entre todas.")
+    from script_pipeline.generate_storyboards import available_loras_images
+    ap.add_argument("--lora", default="", choices=[""] + available_loras_images(),
+                    help="LoRA opcional aplicado aos STILLS (FLUX/FLUX.1/SD3.5/SDXL apenas; "
+                         "arquivos em models/loras_images/, separados dos LoRAs de video do "
+                         "LTX em models/loras/, que sao incompativeis aqui). Sem isto, nenhum "
+                         "LoRA (comportamento de sempre).")
+    ap.add_argument("--lora-strength", type=float, default=0.8)
     args = ap.parse_args()
 
     # O motor decide checkpoint, encoders e amostragem de uma vez. Passar
@@ -119,6 +150,11 @@ def main() -> int:
         args.clip = _motor["clip"]
     if args.vae is None:
         args.vae = _motor["vae"]
+    # BUGFIX 2026-09-02: sem isto, flux-kontext (que precisa de fp8_e4m3fn pra
+    # caber, ver MEMORIAL 3.48) carregava o bf16 de 23,8 GB cru -- weight_dtype
+    # nunca era resolvido pelo motor nesta cadeia, so no CLI standalone do
+    # generate_storyboards.py.
+    weight_dtype = _motor.get("weight_dtype", "default")
 
     run_dir = Path(args.run_dir).resolve()
     plan_path = run_dir / "parse" / "shot_plan.json"
@@ -133,15 +169,45 @@ def main() -> int:
         print("[5-D] sem dialogue/lines.json: os planos de fala sairao sem audio "
               "e o estagio 6 nao tera o que sincronizar.")
 
+    # Character sheets (cast.json, reference_image) -- rota de consistencia
+    # padrao desde 2026-09-03 (MEMORIAL 3.54). So personagens com sheet
+    # GERADA (aba dedicada em decupagem_ui.py) entram aqui; os demais seguem
+    # no comportamento antigo (primeiro still de perto vira referencia).
+    cast_path = run_dir / "characters" / "cast.json"
+    sheets: dict[str, str] = {}
+    if cast_path.exists():
+        try:
+            cast_data = json.loads(cast_path.read_text(encoding="utf-8"))
+            sheets = {nome: info["reference_image"] for nome, info in cast_data.items()
+                     if info.get("reference_image")}
+        except (OSError, json.JSONDecodeError):
+            sheets = {}
+    if sheets:
+        print(f"[5-D] {len(sheets)} personagem(ns) com character sheet: {sorted(sheets)}")
+
     shots_dir = run_folder.subdir(run_dir, "shots")
     log = lambda m: print(m, flush=True)  # noqa: E731
+    if args.engine == "minimax" and not args.videos_only and not dialogo:
+        print("[5-D] motor=minimax: a fala do MiniMax H3 vem do texto do "
+              "video_prompt, nao do dialogue/lines.json -- confira se o "
+              "shot_plan/decoupagem ja escreveu a fala dentro do prompt de "
+              "cada plano (mesma convencao dos prompts de teste do usuario).")
+
     feitos = rs.render(plan, shots_dir, width=args.width, height=args.height,
                        fps=args.fps, checkpoint=args.checkpoint, clip=args.clip,
                        vae=args.vae, seed=args.seed, limit=None,
                        stills_only=args.stills_only, videos_only=args.videos_only,
                        steps=args.steps, cfg=args.cfg, only_shots=args.only_shots,
                        use_reference=not args.no_reference, dialogue=dialogo,
-                       audio_conditioning=not args.no_audio_conditioning, log=log)
+                       character_sheets=sheets,
+                       audio_conditioning=not args.no_audio_conditioning,
+                       weight_dtype=weight_dtype,
+                       consistency_threshold=args.consistency_threshold,
+                       consistency_max_retries=args.consistency_max_retries,
+                       lora_name=args.lora, lora_strength=args.lora_strength,
+                       engine=args.engine, minimax_aspect_ratio=args.minimax_aspect_ratio,
+                       minimax_megapixels=args.minimax_megapixels,
+                       minimax_turbo=args.minimax_turbo, log=log)
     if args.stills_only:
         print(f"[5-D] {sum(1 for f in feitos if f.get('still'))} still(s); "
               "rode de novo com --videos-only para os clipes.")
@@ -149,7 +215,7 @@ def main() -> int:
 
     # O handoff: mesmo caminho e mesmo formato que render_scenes produz.
     scenes_dir = run_folder.subdir(run_dir, "scenes")
-    manifesto = build_clips_manifest(feitos, plan, dialogo)
+    manifesto = build_clips_manifest(feitos, plan, dialogo, engine=args.engine)
     (scenes_dir / "clips.json").write_text(
         json.dumps(manifesto, ensure_ascii=False, indent=2), encoding="utf-8")
 

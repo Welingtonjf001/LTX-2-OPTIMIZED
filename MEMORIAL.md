@@ -3638,12 +3638,2021 @@ não prova a causa do hang do `screenplay_ui` (roda só na 3090, nunca teve a
 raiz confirmada), mas é a primeira evidência real de que "outro processo
 segurando GPU" é uma hipótese a testar antes de qualquer outra.
 
+## 3.47 `--start-image` encadeado: continuidade de pixel testada de ponta a ponta, e `.gitignore` com 5 buracos reais (2026-08-31/09-01)
+
+Sequência de pedidos partindo de "teste a consistência da coreografia" até
+"insira a dança numa cena, ancorando por imagem" -- **detalhe completo,
+números e imagens em `ChoreoEngine/MEMORIAL.md` §32**; aqui só o que
+interessa para quem mexe neste repositório.
+
+**`comfy_union_patch.py --start-image` funciona e nunca tinha sido testado
+de ponta a ponta com uma imagem REAL (não sintética) como âncora.** Gerado 1
+still real de uma cena já existente (`outputs/decupagem/lyra/shots/stills/
+shot000_wide.png`) → vídeo 1; depois cada vídeo seguinte ancorado no ÚLTIMO
+FRAME do anterior (extraído após upscale+doctor). 4 elos, 49 frames cada,
+4 músicas diferentes (86-152 BPM): continuidade de cenário e identidade
+confirmada por frame extraído nos 3 pontos de corte -- é a primeira vez que
+isso é medido aqui por pixel, não só por prompt de texto repetido (o que
+`bridge/run_f3.py`/`bridge/dance_scene_test.py` já faziam).
+
+**Achado que importa para prompt/negativo neste repositório:** mesmo com o
+negativo cobrindo `staff, wand, weapon...` e o positivo nunca mencionando o
+objeto, um cajado de cristal (presente na imagem-âncora original, não no
+texto) apareceu solto no cenário de fundo do 2º elo da cadeia. `--start-
+image` carrega informação visual que o negativo TEXTUAL não alcança --
+vazamento pela imagem, não pelo prompt. Vale lembrar ao compor uma
+imagem-âncora para qualquer cena futura: o que está na imagem pode
+"ressurgir" no cenário mesmo proibido no texto.
+
+**`--disable-dynamic-vram` (§3.33, obrigatório para o 2.5) não foi
+necessário em nenhuma das ~22 gerações desta sessão pelo caminho Union-
+Control 2.3/GGUF** -- todas rodaram sem essa flag, sem travar. Não é prova
+de que a flag seja irrelevante para 2.3 (nunca testado COM ela aqui), só
+confirma que o requisito medido no §3.33 é específico do peso bf16 de 40GB
+do 2.5, não generaliza para o GGUF quantizado do 2.3.
+
+**Repetido com janela de 3s (73 frames) em vez de 2s (49 frames): 4/4 ok,
+1.722s de pipeline completo (~29min), qualidade mais IRREGULAR na inspeção
+visual** -- um frame saiu com borrão de movimento pesado e uma possível
+figura extra ao fundo, outro (172 BPM) saiu limpo. Consistente com o teto
+de aderência já medido no ChoreoEngine (PCK cai de 25 para 97 frames); 73
+fica no meio do caminho e começa a mostrar o preço. Não é medição de PCK
+formal aqui, só leitura visual -- ver `ChoreoEngine/MEMORIAL.md` §32.5.
+
+**`.gitignore` deste repositório tinha 5 buracos que derrubavam `git add
+-A` de verdade** (`fatal: mmap failed: Invalid argument`, sem dizer qual
+arquivo): `/models/` (509 GB, blobs de cache HF sem extensão), `/tensorxx_ge/`
+(94 GB), `/tools/` (890 MB), `/sam-3d-body/` (repo git aninhado, 2,7 GB) e
+`/nul` (36 KB, nome de dispositivo reservado do Windows -- sozinho já
+derrubava o `mmap`). Também achado `.claude/worktrees/` (checkout git
+aninhado de isolamento de agente) sem regra. Todos os seis corrigidos no
+`.gitignore` antes do commit consolidado; nada apagado do disco, só
+ignorado. Ver commit `68326b4`.
+
+## 3.48 Dois motores de still novos: FLUX.1 Krea e Kontext (2026-09-01)
+
+`script_pipeline/generate_storyboards.py` só sabia gerar storyboard com FLUX.2
+Klein ("flux"), SD 3.5 Medium ("sd35", já existia) e SDXL. Adicionados
+`--image-engine flux-krea` e `--image-engine flux-kontext`, usando os
+checkpoints que já estavam em `models/` (`flux1-krea-dev_fp8_scaled.safetensors`,
+11,9 GB; `flux1-kontext-dev.safetensors`, 23,8 GB bf16).
+
+**Armadilha evitada:** os dois são FLUX.1, não FLUX.2 -- `detect_architecture`
+antes classificava qualquer coisa com "flux" no nome como FLUX.2 Klein
+(CLIPLoader com Qwen3-8B, um encoder só). Isso teria roteado os dois
+checkpoints novos pelo grafo errado (FLUX.1 usa DualCLIPLoader com
+clip_l+t5xxl). Corrigido checando "flux1" ANTES do "flux" genérico. Novo
+template `comfyui_workflows/storyboard_flux1_txt2img.json`.
+
+**Não adivinhei os nomes de arquivo/VAE** -- subi o ComfyUI e consultei
+`/object_info` de `UNETLoader`/`DualCLIPLoader`/`VAELoader` ao vivo antes de
+escrever o JSON (mesma lição do §3.16: workflow com tipo errado falha longe da
+causa). Achado que não era óbvio: o VAE do FLUX.1 (`ae.safetensors`) mora em
+`models/vae/` mas o `extra_model_paths.yaml` mapeia `vae: .` (raiz de
+`models/`) para o perfil `ltx_optimized` -- o nome que o ComfyUI reconhece é
+`vae\ae.safetensors` (prefixo de subpasta), não `ae.safetensors` puro.
+
+**Testado de ponta a ponta** (não só compilado): os dois motores submeteram,
+rodaram e devolveram PNG real via `/history` -- prompt "test" av 512x512, só
+para validar o grafo, imagens entregues ao usuário. `weight_dtype` também virou
+campo do motor (`IMAGE_ENGINES[...]["weight_dtype"]`, novo parâmetro em
+`generate_scene_storyboard`/`--weight-dtype` na CLI): "default" para o Krea (já
+vem fp8-scaled, recastar perderia qualidade à toa) e "fp8_e4m3fn" para o
+Kontext (bf16 de 23,8 GB não cabe sem cast).
+
+**Não testado ainda:** geração de storyboard de verdade dentro da cadeia de
+decupagem/screenplay (`storyplay25.py`'s `do_storyboard` continua com
+Textbox livre para checkpoint/clip/vae, sem dropdown de motor -- quem quiser
+usar `flux-krea`/`flux-kontext` ali por enquanto cola os valores manualmente:
+checkpoint=`flux1-krea-dev_fp8_scaled.safetensors`, clip=
+`clip_l.safetensors,t5xxl_fp8_e4m3fn.safetensors`, vae=`vae\ae.safetensors`).
+Nem a característica de imagem-de-referência de personagem (`reference_image`)
+foi portada -- ela só existe para o FLUX.2 Klein (`character_flux_reference.json`).
+
+## 3.49 Vídeo contínuo por minutos: avaliação do plano do Gemini e Camada 0 (2026-09-01)
+
+Pedido do usuário: como treinar o LTX para gerar minutos de vídeo contínuo.
+Trouxe uma análise externa (Gemini) propondo três frentes -- RoPE
+estendido/YaRN, atenção temporal em janela deslizante, e um "LoRA de
+continuidade" treinado com loss de fluxo óptico sobre dataset de vídeos
+contínuos segmentados -- mais VAE causal para decodificação em streaming.
+
+**Avaliação: a estrutura de duas camadas (treino vs. orquestração) está
+certa, mas o Gemini superestimou o que este hardware (RTX 3090 24GB + i5)
+consegue treinar e subestimou o que este repositório já tinha pronto.**
+Descartado como fora de escala para uma GPU doméstica: retreinar/fine-tunar o
+VAE 3D para causalidade estrita (é treinar um autoencoder do zero, trabalho
+de laboratório) e reescrever a atenção temporal do DiT para janela deslizante
+nativa (exigiria mexer no `ltx_core`/ComfyUI vendorizado, que este projeto já
+evita por manutenção -- ver bugs contornados "de fora" no `CLAUDE.md`). RoPE
+scaling e um LoRA de continuidade treinado ficam possíveis em tese, mas em
+escala de dias de GPU, não horas -- não é o próximo passo.
+
+**O que o Gemini não sabia: metade da "Camada 2" (orquestração pura, sem
+treinar nada) já existia neste repositório, testada duas vezes.**
+`music_maker_ui_v2.py::process_chain_generation` e
+`script_pipeline/render_scenes.py::render_job`/`extract_last_frame` já
+encadeiam clipes LTX 2.3 pegando o ÚLTIMO FRAME decodificado de um clipe e
+usando como imagem de condicionamento (`--image PATH 0 FORÇA`, que vira
+`VideoConditionByLatentIndex` em `ltx_pipelines/utils/helpers.py` --
+substitui o latente de abertura, é I2V puro) do próximo. E o §3.47 (ontem/
+hoje) MEDIU esse mecanismo de ponta a ponta pela primeira vez por pixel (não
+só por prompt repetido): 4 elos encadeados, continuidade de cenário e
+identidade confirmada nos pontos de corte, mas com dois avisos que valem
+para qualquer uso de Camada 0:
+- **Vazamento por imagem, não por texto.** Um objeto presente só na imagem-
+  âncora (não no prompt, e proibido no negativo) ressurgiu no clipe seguinte.
+  O negativo textual não protege contra o que a imagem de condicionamento
+  carrega.
+- **Qualidade cai com a janela.** 73 frames (~3s) por elo saiu mais irregular
+  que 49 frames (~2s) na inspeção visual -- consistente com o teto de
+  aderência de pose já medido no ChoreoEngine. Chunks menores e mais numerosos
+  tendem a encadear melhor que poucos chunks longos, mesmo mantendo a duração
+  total constante.
+
+**Camada 0 generalizada, pronta para uso:** [continuous_chain.py](continuous_chain.py),
+na raiz do repo. Diferença para o `render_scenes.py`: aquele é acoplado a
+roteiro/fala/áudio (duração vem da narração); este toma só prompt(s) +
+duração por chunk, sem depender do `script_pipeline`. Reaproveita
+`normalize_ltx_frames`/`extract_last_frame` (duplicados de propósito, mesma
+convenção das UIs) e importa `concat_videos` de
+`script_pipeline/assemble_final.py`. Retomável (pula chunk já gerado em
+disco). Ao terminar, imprime o comando `video_doctor.py analyze --cuts ...`
+já com as fronteiras reais de cada chunk -- sem isso o doctor confunde
+fronteira de encadeamento com defeito (§3.36.1). **Não testado ainda nesta
+sessão** -- só compilado (`py_compile`); a primeira corrida real é o próximo
+passo antes de confiar no manifesto/concat.
+
+Se o drift de identidade (não de cenário/movimento, que o §3.47 já mostrou
+que o encadeamento resolve razoavelmente) for o gargalo depois de testar
+`continuous_chain.py` em algo mais longo que os 4 elos do §3.47: próximo
+passo é um LoRA de personagem (rank baixo, poucas dezenas de imagens/clipes,
+NÃO o LoRA de continuidade temporal do Gemini) aplicado em todo chunk -- mais
+barato de treinar que qualquer coisa que toque no DiT temporal ou no VAE.
+
+## 3.50 Primeira corrida real do `continuous_chain.py`: cena wuxia, 2.3 e 2.5 (2026-09-01)
+
+Pedido do usuário: gerar e testar uma cena única contínua de 40s (romance
+wuxia, floresta de bambu -> ponte -> close -> plano circular -> guindaste
+final, com falas em chinês) nas duas rotas, LTX 2.3 e 2.5. Escala reduzida
+para ~20s (5 beats x 4s = 97 frames cada) como primeira corrida real do
+`continuous_chain.py` (§3.49) -- nunca tinha rodado antes disso, só compilado.
+Falas em chinês viraram narração em inglês no prompt (mesma cautela já
+registrada em `generate_storyboards.py`: dialogo citado entre aspas no
+prompt já produziu balão de fala desenhado na cena neste projeto,
+MEASURED 2026-08-10).
+
+**Os dois rodaram de ponta a ponta sem intervenção.** `LTX_PIPELINE_MODULE=
+ltx_pipelines_25` trocou o motor sem tocar no script, confirmando que o
+mecanismo de swap documentado no `CLAUDE.md` (mesmo argv entre
+`ltx_pipelines.music_to_video` e `ltx_pipelines_25`) vale também para
+`continuous_chain.py`, não só para as UIs.
+
+**2.3: ~90s por chunk, 5 chunks em ~7 min de parede.** Cada chunk é um
+subprocesso novo (recarrega o checkpoint fp8 de 31 GB do zero) e ainda assim
+foi rápido -- bem abaixo da estimativa inicial de 20-40 min.
+
+**2.5: 353-1751s por chunk (~9,5 min de MEDIANA, mas um outlier de 29 min),
+~57 min de parede pelos mesmos 5 chunks.** Achado que não estava previsto:
+o log mostra "`ComfyUI não está no ar; iniciando servidor`" ANTES DE CADA
+CHUNK -- o servidor não fica de pé entre chamadas do `continuous_chain.py`
+como fica dentro de uma única sessão de UI (`storyplay25.py` etc. sobem o
+ComfyUI uma vez e reusam). Cada subprocesso novo reencontra o ComfyUI
+derrubado e paga o boot completo (~1 min só de start, mais o carregamento do
+transformer bf16 de 40 GB) de novo. Isso explica a variância enorme entre
+chunks -- o outlier de 1751s não tem explicação só por carga de GPU; é
+candidato a reflagrar o mesmo padrão de crash "window-CLOSE"/reinício do
+ComfyUI já visto hoje na sessão do `storyplay25` (log não verificado linha a
+linha para confirmar). **Não corrigido**: dá para manter o
+ComfyUI de pé entre chunks chamando `ensure_comfyui_running` uma vez no
+início do `continuous_chain.py` em vez de deixar cada subprocesso descobrir
+sozinho -- mas isso mistura a responsabilidade do script (hoje agnóstico de
+motor, só troca `LTX_PIPELINE_MODULE`) com conhecimento específico da rota
+2.5. Não vale a pena para uma cena de 20s; vale se a próxima corrida for de
+minutos de verdade com muitos chunks 2.5.
+
+**Os dois vídeos foram entregues ao usuário** (`outputs/continuous/wuxia_23/
+final/continuous.mp4`, `outputs/continuous/wuxia_25/final/continuous.mp4`).
+Avaliação de qualidade (drift, se o encadeamento segurou identidade/cenário
+pelos 5 beats) é do usuário -- não medida aqui por pixel como o §3.47 fez.
+
+## 3.51 Fala real + som ambiente no `continuous_chain.py`, e o checkpoint "redgraft" (2026-09-02)
+
+O usuário perguntou por que os diálogos wuxia do §3.50 não saíram falados --
+resposta: as falas literais tinham sido trocadas por narração em inglês de
+propósito (evitar balão de fala desenhado na cena, defeito já medido em
+`generate_storyboards.py`), e nenhuma das duas rotas nativas faz TTS mesmo
+que o texto estivesse lá. Confirmado por medição, não só teoria: os chunks do
+2.3 não tinham NENHUMA faixa de áudio (o `music_to_video` só decodifica áudio
+com `--audio-input-path` ou `LTX_GENERATE_AMBIENT_AUDIO=1`, nenhum dos dois
+setado); os do 2.5 tinham áudio ambiente variável (-63 a -12 dB), não fala.
+
+**Adicionado ao `continuous_chain.py`**: `--beats-file` (JSON, alternativa ao
+`--prompt-file`) onde cada beat pode ter `speech_text`+`speaker`+`emotion`,
+sintetizado via `script_pipeline/dialogue_tts.py` (o MESMO motor XTTS do
+pipeline de roteiro, reaproveitado, não duplicado) e passado como
+`--audio-input-path` -- o vídeo é GERADO em cima do áudio real, mesma razão
+do `render_scenes.py`: sem isso o LTX inventa uma voz própria. A duração do
+chunk passou a vir da duração da fala sintetizada (não mais fixa por
+`--seconds-per-chunk`), mesma dependência já documentada no `CLAUDE.md`
+("emoção muda a duração da fala; a duração da fala define a duração do
+plano"). Chunks sem fala ganharam som ambiente por padrão
+(`LTX_GENERATE_AMBIENT_AUDIO=1` no 2.3; o 2.5 já gerava ambiente sozinho,
+`--no-ambient-audio` desliga).
+
+**Testado em duas camadas antes de gastar GPU em vídeo**: primeiro só a
+síntese de fala isolada (5 falas em chinês, xtts, 2,1-3,3s cada, confirmado
+NÃO repetidas -- o *split* de frase do `xtts_worker.py` só corta em
+pontuação ASCII seguida de espaço, e chinês não tem espaço entre orações,
+então cada linha foi UMA passada só pelo TTS; a pausa que o `silencedetect`
+achou no meio é o modelo respirando na vírgula, não repetição). Só depois de
+confirmado, rodou a cena inteira: `outputs/continuous/wuxia_23_voz/`, 5
+chunks, ~15,4s, com fala real e áudio de verdade no arquivo final.
+
+**Checkpoint comunitário `redgraftLTX25Fast2K_ltx25Redgraft.safetensors`
+testado a pedido do usuário, antes de rodar a cena wuxia de novo no 2.5.**
+17,0 GiB (menor que o `distilled-int8` já catalogado aqui, 21,5 GiB).
+Metadata do safetensors confirma arquitetura `AVTransformer3DModel` (mesma
+do 2.5) e as chaves de tensor batem com `quant_format=="asym_w4a8_int8"` do
+`comfy/ops.py` (peso INT4 assimétrico + ativação INT8, escala por grupo
+`weight_s_rel`, escala por canal `weight_s_channel`, codebook Lloyd-Max
+opcional `weight_codebook`) -- formato NATIVO do ComfyUI já instalado aqui
+(linha ~1204-1223 de `ops.py`), não precisou de custom node. Hardlink NTFS
+de `models/` pra `models/2.5/diffusion_models/` (mesmo volume, custo zero) e
+nova entrada em `ltx25_backend.VARIANTS["redgraft"]`.
+
+**Resultado: 206,3s (~3,4 min) pra um clipe de 4s a 768x512 -- bem mais
+rápido que os 353-1751s medidos no §3.50 com o bf16 padrão.** Não é
+comparação limpa (resolução/frames diferentes, servidor recém-reiniciado nos
+dois casos), mas a diferença é grande o bastante pra valer investigar mais a
+fundo: o peso de 17 GB cabe com folga na VRAM sem o malabarismo de
+offload/`--disable-dynamic-vram` que o bf16 de 40 GB exige. **Não avaliado:
+qualidade** -- INT4 é compressão agressiva, o clipe saiu plausível na
+inspeção rápida mas não foi comparado lado a lado com o bf16 no mesmo prompt/
+seed. Antes de adotar como padrão, vale gerar o MESMO prompt nos dois
+checkpoints e comparar.
+
+**Terceiro teste pedido, LoRA `ltx_2.3_Multi-Ref Character Storyboard_V2.
+safetensors`** (`models/loras/`, 674 MB, treinado via `ai-toolkit`/ostris,
+`ss_base_model_version="ltx2"`, nome interno "ltx2.3 多参分镜V2" -- múltiplas
+referências/decupagem). Sem documentação de uso (metadata do safetensors só
+tem info de treino, não de trigger word ou contagem de referências
+esperada); testado do jeito mais simples possível -- `--lora ... 1.0` sobre
+`music_to_video`, mesmo prompt/beat 1 dos testes anteriores, SEM explorar a
+característica "multi-ref" de verdade (só uma imagem/áudio de condicionamento,
+não várias referências de personagem). Carregou e gerou sem erro.
+
+**Achado a investigar, não atribuído ao LoRA:** esse run levou 426s contra
+os ~90s de baseline do dia -- o log mostra `Dispatching model with
+max_memory constraints: {0: '0.2GiB', 'cpu': '32GiB'}` no stage 1, contra
+`{0: '18GiB', ...}` de todo run anterior. `nvidia-smi` DEPOIS do teste
+mostra a GPU limpa (372 MiB, 0%) e nenhum ComfyUI escutando -- ou seja, o
+orçamento de 0,2 GiB foi um instantâneo ruim no momento exato em que o
+`model_ledger` mediu VRAM livre, provavelmente porque o processo ComfyUI do
+teste do redgraft (rodado logo antes) ainda não tinha liberado o contexto
+CUDA por completo, mesmo já tendo saído. Mesmo padrão que o `CLAUDE.md` já
+avisa (§3.11: "derrubar outro processo pra liberar VRAM já quebrou geração
+em curso"). Se for repetir teste de LoRA, dar uma folga de alguns segundos
+depois de qualquer processo ComfyUI encerrar antes de medir/gerar de novo.
+
+**Atualização da mesma tarde, sessão paralela:** o mesmo LoRA ganhou um
+pipeline dedicado de teste (`lora_storyboard_backend.py` + `_encode.py`,
+UI porta 7915, ver memória `project_lora_storyboard_test_ui.md`), depois de
+uma investigação de 4 bugs numa tentativa via ComfyUI puro. Achado que
+explica por que o teste ACIMA gerou sem erro pela rota nativa: o checkpoint
+`ltx-2.3-22b-distilled-fp8.safetensors` é um modelo CONJUNTO áudio+vídeo
+(LTXAV) -- o `preprocess_text_embeds` do ComfyUI exige um tensor de
+conditioning com vídeo+áudio concatenados (4096+2048=6144 no último eixo), e
+um grafo ComfyUI cru que descarta `audio_encoding` quebra com "Expected 4096
+got 2048". A rota nativa (`music_to_video.py`, usada no teste acima) nunca
+bateu nesse problema porque não passa por esse ponto do ComfyUI -- ela já
+lida com os dois ramos internamente. Ou seja: os dois achados não se
+contradizem, são pipelines diferentes tropeçando (ou não) no mesmo detalhe
+de arquitetura. Qualidade do LoRA (se de fato melhora consistência de
+personagem) segue não avaliada em nenhum dos dois caminhos.
+
+**Teste A/B rodado nesta sessão** (`_test_lora_ab.py`, raiz do repo, usa
+`lora_storyboard_backend.py` da sessão paralela em vez de reescrever):
+mesma imagem de referência (rosto da espadachim, extraído do beat de
+close-up da cena wuxia), mesmo prompt NOVO (cena diferente da que gerou a
+referência -- "caminhando por bambuzal ao amanhecer"), mesma seed (777),
+`LTXVImgToVideo` com `strength=0.9` -- só `lora_strength` muda (0.0 vs 1.0).
+Texto codificado UMA vez e reaproveitado nas duas gerações (~150s), cada
+vídeo levou 117-157s de sampler. Os dois vídeos + a referência foram
+entregues ao usuário para avaliação visual -- **veredito de qualidade é do
+usuário, não medido aqui por pixel/embedding de identidade** (não há
+ferramenta de similaridade facial instalada neste projeto, mesma lacuna já
+registrada na §3.24 item 10).
+
+### `redgraft` exposto nos scripts 2.5, e teste de plano longo que reabre a §3.35
+
+Pedido do usuário: deixar `redgraft` selecionável nos scripts do 2.5 (não só
+via `--variant`/env manual), e testar num plano longo antes de mexer no
+padrão da decupagem -- ela evita `distilled-int8` desde a §3.35 porque esse
+checkpoint TRAVAVA (23min/9,5min presos em `0/8`) num plano de 129 frames a
+960x544, exatamente por caber inteiro na VRAM e não sobrar espaço pro resto
+do grafo.
+
+**Exposto**: `ltx25_backend.VARIANTS["redgraft"]` já bastava pra CLI/env
+(`--variant`/`LTX25_VARIANT`) em qualquer script -- `continuous_chain.py`
+incluso, via `LTX_PIPELINE_MODULE=ltx_pipelines_25`. O único lugar com
+dropdown de variante é `storyplay25.py` (`v_variant`); adicionado `redgraft`
+e `distilled-int8` (que já existia no backend mas não estava na UI). De
+brinde, corrigido um log em `ltx25_backend.py` que sempre dizia "variante
+distilled" mesmo rodando outra.
+
+**Teste do plano longo, MESMO tamanho que travava (129 frames, 960x544,
+`--disable-dynamic-vram`): fechou em 376s, sem travar.** Comparação com a
+§3.35:
+
+| checkpoint | resultado |
+|---|---|
+| `distilled-int8` (20 GiB) | travou 2x, 23min/9,5min presos em `0/8` |
+| `distilled` bf16 (39 GiB) | fechou em 1087s |
+| `redgraft` (17 GiB, INT4/W4A8) | fechou em **376s** -- quase 3x mais rápido que o bf16 |
+
+**O log do ComfyUI mostra o transformer do redgraft TAMBÉM carregando por
+completo** (`loaded completely; 20817.43 MB usable, 16201.54 MB loaded, full
+load: True`) -- ou seja, "caber inteiro" sozinho não é mais o preditor de
+travamento que a §3.35 concluiu. A diferença provável: mesmo carregando
+inteiro, sobram ~4,6 GB livres (20,8 GB de VRAM útil menos 16,2 GB do peso)
+contra quase nada no caso do int8 de 20 GB -- a folga que resta DEPOIS do
+full load, não o full load em si, é o que parece decidir.
+
+**Achado extra, relevante pra §3.42**: o log lista `asym_w4a8_int8` (o
+formato do redgraft) em **"Native ops"**, não em "emulated ops"
+(`Native ops: int8_tensorwise, convrot_w4a4, asym_w4a8_int8 , emulated ops:
+float8_e5m2, nvfp4, mxfp8, float8_e4m3fn`) -- e `int8_tensorwise`
+(o formato do `distilled-int8`) TAMBÉM aparece como nativo. Isso enfraquece a
+hipótese da §3.42 de que o travamento do int8 fosse por falta de kernel
+rápido (torch abaixo de cu130): se o kernel já é nativo aqui, a explicação
+original da §3.35 (VRAM sem folga) volta a ser a mais provável -- sem
+retestar `distilled-int8` de novo, não dá pra fechar de vez.
+
+**Não mudado**: o padrão de `decupagem_ui.py` continua `distilled` (bf16).
+Uma corrida de sucesso não é a mesma evidência que os dois travamentos
+medidos do int8 -- antes de trocar o padrão de produção, vale repetir o
+teste do redgraft pelo menos mais uma vez (seed/prompt diferente, talvez um
+plano ainda mais longo, tipo os 337 frames que a Mei-Li fechou com int8+
+`--disable-dynamic-vram` na §3.33) pra não repetir o erro já cometido uma
+vez com o int8 (recomendado como padrão, revertido um dia depois).
+
+## 3.52 MiniMax H3 integrado à cadeia de decupagem, e 4 bugs achados testando (2026-09-02/03)
+
+Pedido do usuário: plugar o MiniMax H3 (§3.40/3.41, até aqui um backend
+testado isolado, nunca ligado à `decupagem_ui`) na cadeia real
+`script_pipeline/render_shots.py` -> `render_shots_stage.py` ->
+`run_decupagem.py` -> `decupagem_ui.py`, e testar com uma cena real (Lyra/
+Thoren, fantasia, dois personagens fixos, falas em português dentro do
+prompt) usando os storyboards de 4 motores de imagem diferentes (FLUX,
+SD 3.5, FLUX Krea, FLUX Kontext).
+
+**Integração**: novo parâmetro `engine="ltx"|"minimax"` em `render()`
+(`render_shots.py`), `--engine`/`--video-engine` na CLI (`render_shots_stage.
+py`, `run_decupagem.py`) e dropdown "Motor de vídeo" na `decupagem_ui.py`.
+Diferença de fundo: o MiniMax H3 fala e sincroniza lábios NATIVAMENTE a
+partir do texto do prompt (nenhum áudio de entrada) -- então `build_clips_
+manifest()` força `audio_path=None` pra todo plano minimax, fazendo os
+estágios 6/7 (lipsync/mix) tratarem esses planos como plano de AÇÃO já
+tratava (passthrough, "nada a sincronizar") em vez de tentar resincronizar
+com um WAV de TTS que não tem nada a ver com a voz que o MiniMax gerou.
+
+### Os 4 bugs, todos achados rodando de verdade, não por inspeção de código
+
+1. **A passada `--stills-only` nunca garantia o ComfyUI (FLUX/SD3.5, 8188) no
+   ar.** So a passada de vídeo tinha um `ensure_comfyui_running`. Funcionava
+   por acidente sempre que outro estágio anterior já tinha subido o servidor;
+   numa corrida limpa, `ConnectionRefusedError` na primeira ainda. Corrigido:
+   `render()` agora garante o 8188 no ar sempre que vai gerar QUALQUER still,
+   não só na passada de vídeo.
+
+2. **`engine_defaults(detect_architecture(checkpoint))` quebra pros motores
+   FLUX.1 novos.** `detect_architecture()` devolve a ARQUITETURA ("flux1"),
+   mas `engine_defaults()` espera o nome do MOTOR ("flux-krea"/"flux-
+   kontext") -- os dois motores compartilham arquitetura mas tem steps/
+   guidance/`weight_dtype` diferentes (ver §3.48), e `engine_defaults("flux1")`
+   nem existe (`KeyError`). Corrigido resolvendo pelo NOME DO ARQUIVO do
+   checkpoint contra `IMAGE_ENGINES` primeiro, só caindo pra architecture-
+   guessing se não bater com nenhum motor catalogado. De quebra, `weight_dtype`
+   nunca era passado desta cadeia pra `generate_scene_storyboard` -- o
+   flux-kontext (que PRECISA de `fp8_e4m3fn` pra caber, §3.48) estava
+   carregando o bf16 de 23,8 GB cru. Também corrigido (enfiado em `render()`/
+   `render_shots_stage.py` do mesmo jeito que `clip`/`vae` já eram).
+
+3. **O servidor do MiniMax H3 (8189) nunca era reiniciado entre corridas.**
+   `ensure_server()` só confere se a porta responde e reaproveita -- ao
+   contrário do 8188, que `run_decupagem.py` já reiniciava com disciplina
+   antes de cada estágio de vídeo (`stop_comfyui()`, CLAUDE.md). Rodando 4
+   corridas em sequência sem nunca tocar no servidor do MiniMax, um plano de
+   4,15s (nada de especial) travou **22min34s no PASSO 0** da amostragem antes
+   de destravar sozinho e terminar normal -- mesma assinatura de trava do
+   DynamicVRAM/`aimdo` já documentada pro LTX (§3.41/3.42), nunca medida aqui
+   pro MiniMax. Corrigido: `run_decupagem.py` agora chama `stop_comfyui(port=
+   8189)` antes do estágio de vídeo sempre que `--video-engine minimax`,
+   espelhando a mesma disciplina do 8188.
+
+4. **Falha em cascata dentro da mesma corrida.** Um plano de 16,62s (401
+   frames -- bem além de qualquer duração já validada pro MiniMax, §3.41 já
+   registrava 10s como estresse) estourou o timeout de 2400s. O cliente
+   desistiu, mas a geração ÓRFÃ continuou rodando no servidor por trás; o
+   PRÓXIMO plano viu a porta "up" mas presa, tentou subir um servidor novo e
+   colidiu ("Port 8189 is already in use"), derrubando um plano que não tinha
+   nada de errado. `[5-D video] FALHOU`, 4/6 planos só. Corrigido em duas
+   partes: timeout subiu pra 3600s (o plano de 16,6s fechou em 1041,7s na
+   retentativa -- nem precisou do teto novo, era mesmo estado degradado do
+   servidor, não limite de duração), e qualquer falha no motor minimax agora
+   força `stop_comfyui(8189)` antes do PRÓXIMO plano da mesma corrida, não só
+   entre corridas.
+
+### Resultado: 4/4 corridas fechando 6/6 planos depois dos 4 conserto
+
+Cena Lyra/Thoren, mesmos parse/cast/TTS/decupagem (6 planos, 35,8s), só o
+motor de imagem do storyboard mudando. Tempo do MiniMax H3 somado pelos 6
+planos (exclui a etapa de stills, que é onde os motores de imagem realmente
+diferem em custo):
+
+| motor de imagem | soma MiniMax H3 (6 planos) |
+|---|---|
+| SD 3.5 | 3234,9s (53,9 min) |
+| FLUX | 3272,7s (54,5 min) |
+| FLUX Krea | 3301,0s (55,0 min) |
+| FLUX Kontext | 3655,5s (60,9 min) |
+
+Os 3 primeiros ficam dentro de ~2% um do outro -- ruído, não motor
+vencedor: o MiniMax H3 só recebe a imagem como referência, quem decide o
+tempo é a duração/resolução do plano e a carga do próprio modelo, não qual
+gerador fez o still. O Kontext ficou uns 10-15% mais lento de ponta a ponta
+(inclusive no plano 0, antes de qualquer coisa relacionada ao plano longo),
+mas essa corrida específica vinha de um reinício de servidor forçado pelo
+bug 4 -- não é medição limpa o bastante pra afirmar que o motor de imagem
+importa aqui; só fica registrado como possível efeito, não conclusão.
+
+**Não avaliado**: qualidade/fidelidade da fala em português, sincronia
+labial de verdade (só olhada visual rápida), e se os planos de referência-
+única (MiniMax aceita até 2, só um foi usado) mudariam consistência de
+personagem entre os 6 planos -- os 4 filmes finais foram entregues ao
+usuário pra julgamento visual.
+
+## 3.53 Quatro melhorias de consistência, a partir da comparação visual dos 4 motores (2026-09-03)
+
+O usuário comparou os 4 filmes do §3.52 a olho: SD 3.5 com boa expressão/
+emoção, Krea com boa qualidade de imagem mas alucinou orelha de elfo na
+Lyra, FLUX (o primeiro) segurou melhor a identidade da Lyra -- mas cenário
+não se manteve entre planos, um corte abrupto no SD3.5, e incerteza sobre
+idioma/sincronismo da fala (nunca auditado). Pediu 4 melhorias:
+
+**1. Descritor de personagem mais concreto.** `CAST_SYSTEM_PROMPT`
+(`cast_characters.py`) pedia "1 frase" solta; trocado por uma lista de 4
+categorias OBRIGATÓRIAS (cabelo, rosto/porte, roupa, item distintivo), cada
+uma exigindo um adjetivo/substantivo concreto -- "a young woman"/"simple
+clothes" sozinhos agora são explicitamente proibidos no prompt do sistema.
+Mesma constante serve o caminho `--llm` (Gemma3) e o Ollama (`_enrich_
+descriptors_ollama`), então um lugar só conserta os dois.
+
+**2. Auditoria automática de consistência facial.** Novo módulo `script_
+pipeline/consistency_audit.py`, via `insightface`/buffalo_l (instalado --
+`--dry-run` confirmou que não mexe em numpy/torch/onnxruntime deste venv,
+que já está em numpy 2.4.4 compatível, não no 1.26.4 do Python global que o
+CLAUDE.md documenta). **Validado antes de integrar**: comparando os stills
+da própria cena Lyra/Thoren, mesmo personagem deu 0,85-0,97 de similaridade
+de cosseno, personagens diferentes 0,10-0,12 -- separação limpa. Integrado
+em `_still_for_shot` (`render_shots.py`): com `--consistency-threshold`
+setado, gera até N tentativas extras (seed diferente) quando a similaridade
+contra a referência fica abaixo do limiar, fica com a de MAIOR pontuação.
+Desligado por padrão (custo extra só quem pedir). Flags novas em `render_
+shots_stage.py`, `run_decupagem.py`.
+
+**3. Referência de LOCAÇÃO, não só de personagem.** O dict `refs` em
+`render_shots.py` só guardava still de personagem (por `subject`); todo
+plano SEM sujeito (wide/insert/estabelecimento) nunca tinha imagem de
+referência nenhuma -- causa provável da deriva de cenário. Novo dict
+`location_refs`, chave = índice da cena, populado pelo primeiro plano
+WIDE/FULL (o enquadramento que mais mostra cenário, critério espelhado do
+de personagem que usa close/medium) e usado como referência de planos sem
+sujeito (ou sem referência de personagem ainda).
+
+**4. Aba "Character sheet" na `decupagem_ui`.** Gera UM still com três
+vistas do mesmo personagem lado a lado (frente/3-4/perfil, fundo neutro) --
+âncora de identidade mais forte que um still avulso, sem treinar LoRA.
+Botão "Usar como referência" grava o caminho em `reference_image` no
+`cast.json` que já está na caixa de texto da UI (mesmo campo que
+`generate_scene_storyboard` já sabe consumir). **Testado de ponta a ponta**
+antes de aceitar como pronto -- gerou `LYRA.png` real, entregue ao usuário.
+
+Nenhuma das 4 rodou junto numa cena completa ainda (testadas isoladamente:
+sheet gerou uma imagem real, embedding facial validado com stills já
+existentes, referência de locação e descritor novo só compilam). Próximo
+passo natural é rodar a cena Lyra/Thoren de novo com as 4 ligadas ao mesmo
+tempo e comparar contra os 4 filmes do §3.52.
+
+### Item 5: Fish Speech substitui o XTTS como motor padrão da decupagem
+
+`E:\Users\home\Documents\fish-speech` (instalação própria, venv `uv`,
+`checkpoints\s2-pro`) já veio integrado com a biblioteca de vozes do XTTS
+deste projeto (README_LOCAL.md do próprio fish-speech). Pedido: testar
+funcionalidade em pt-BR/en/ko/zh/ja, depois trocar o motor padrão e ligar a
+emoção automática do parse.
+
+**Achado ao investigar (antes de gastar GPU testando):** encontrei o processo
+do fish-speech já rodando sozinho segurando 20,5 GB de VRAM (confundi com
+"webui do XTTS" pelo nome do comando -- era o `tools/run_webui.py` do
+fish-speech mesmo, `--speakers-dir` apontando pra biblioteca XTTS). Perguntei
+antes de derrubar; usuário encerrou.
+
+**Testado via API** (`tools/api_server.py`, `START_API.ps1`, servidor HTTP
+persistente -- ao contrário de XTTS/Qwen, que carregam modelo por chamada).
+Referências de voz sem transcrição na biblioteca XTTS; transcrevi 2 clipes
+com `faster-whisper` (já instalado neste projeto) pra ter texto real em vez
+de zero-shot.
+
+**5/5 idiomas pedidos funcionaram** (pt-BR, en, ko, zh, ja) -- mas coreano e
+chinês SÓ depois de um bug real achado e corrigido: um `print()` de debug do
+próprio fish-speech (`content_sequence.py::print_in_green`) quebra com
+`UnicodeEncodeError` em texto CJK quando o processo não está em UTF-8 --
+console Windows cai em cp1252 por padrão. `START_API.ps1` não seta
+`PYTHONUTF8`/`PYTHONIOENCODING`; reiniciei o servidor manualmente com as duas
+setadas e coreano/chinês passaram a funcionar sem tocar em código nenhum do
+fish-speech (mesma filosofia do resto deste projeto: contornar de fora, não
+editar o pacote vendorizado). Testado também tags de emoção (`[whisper]`,
+`[shocked]`, `[excited]`) numa fala em pt-BR -- geraram sem erro.
+
+**Integração em `dialogue_tts.py`** (novo motor `"fish"`, ao lado de xtts/
+qwen): novo `script_pipeline/tts_workers/fish_worker.py` (roda no venv
+PRÓPRIO do fish-speech -- `ormsgpack`/`requests` só existem lá; instalei
+`ormsgpack` também no `.venv` principal só pra rodar o `api_client.py` de
+teste direto, mas o worker de produção usa o venv do fish-speech mesmo,
+seguindo a mesma convenção de isolamento do xtts_worker/qwen_worker). Ao
+contrário dos outros dois, o worker NÃO sobe servidor sozinho -- só checa
+`/v1/health` e falha com mensagem clara se não estiver no ar (subir o modelo
+custa ~1 min e ~22 GB, decisão de quando pagar isso fica de quem chama).
+
+**Emoção automática**: `EMOTION_TO_FISH_TAG` traduz os mesmos 17 slugs que
+`emotion_director.py` já escreve por fala (via `job["emotion"]`, que já
+chegava pronto em `synthesize_dialogue.py::build_jobs` -- nenhum código novo
+precisou LER a emoção, só traduzir o vocabulário) para a tag mais próxima da
+Rich Emotion Library (`com_medo`->`[panting]`, `tristeza`->`[sad]`,
+`raiva`->`[angry]`, etc. -- mapeamento por aproximação semântica, não 1:1;
+emoções sem tag equivalente ficam sem marcador, só a clonagem de timbre).
+
+**`synthesize_dialogue.py --engine` mudou o padrão de `auto` para `fish`** --
+mudança de comportamento real, não cosmética: TODA corrida de decupagem a
+partir de agora exige o servidor do fish-speech já no ar, sem auto-start e
+sem fallback (fish fica de propósito FORA da cadeia de fallback do
+`engine="auto"`, que continua só xtts<->qwen -- fish precisa de start manual,
+diferente dos outros dois). `--engine auto`/`xtts` explícito volta ao
+caminho antigo. Documentado em `CLAUDE.md` (seção "Fish Speech").
+
+**Teste de ponta a ponta pelo caminho real** (`dialogue_tts.synthesize_batch
+(engine="fish")`, mesmo formato de job que `synthesize_dialogue.py` produz,
+duas emoções diferentes): as duas falas saíram com a tag certa aplicada
+automaticamente, entregues ao usuário.
+
+**Não avaliado**: qualidade da clonagem comparada ao XTTS (só ouvida rápida),
+robustez das tags de emoção em texto de roteiro real e mais longo (só
+testado com frases soltas), e se `com_medo`->`[panting]` etc. é de fato a
+melhor tradução -- a tabela é um primeiro palpite, não calibrada por ouvido.
+
+## 3.54 Rota de consistência padrão, e o que migrou pro screenplay (2026-09-03)
+
+Duas continuações do mesmo dia:
+
+**Rota de consistência padrão** (a pedido do usuário, em resposta a um insight
+do Gemini sobre pipeline de estúdio -- hero frame -> extração/segmentação ->
+sheet canônica via IPAdapter+PuLID -> LoRA -> vídeo com `subject_reference_
+strength`). **Conferido antes de prometer**: nenhum dos dois ComfyUI deste
+projeto tem GroundingDINO/SAM2/BiRefRAM/IPAdapter/PuLID/treinador de LoRA
+instalado, e o node real `MiniMaxH3ReferenceToVideo` não tem
+`subject_reference_strength` nenhum -- só 3 slots genéricos `ref_image_0/1/2`
+com um `ref_image_size` (match/max), sem peso ajustável. O plano do Gemini é
+o padrão-ouro de estúdio; **implementei uma aproximação com o que já existe**,
+sem instalar nada novo:
+
+- `render()` (`render_shots.py`) ganhou `character_sheets: dict[str,str]`
+  (personagem -> caminho da sheet em `cast.json.reference_image`). Pré-semeia
+  o dict `refs` com ela -- diferente do comportamento antigo (primeiro still
+  de perto vira referência), agora a sheet fica FIXA a corrida inteira,
+  nunca sobrescrita por um still comum.
+- No motor MiniMax, os 2 slots de `ref_images` levam o still DESTE plano
+  (pose/enquadramento) + a sheet (identidade) juntos, quando existir.
+- `render_shots_stage.py` carrega `cast.json` e monta o dict automaticamente
+  -- nenhuma flag nova pra ligar, só depende de o personagem ter
+  `reference_image` setado (pela aba "Character sheet" do §3.53).
+
+**Testado com as DUAS sheets da cena Lyra/Thoren** (geradas ontem, LYRA.png +
+THOREN.png, coladas em `cast.json`): os 6 stills saíram cada um com a
+referência certa (`ref=LYRA.png`/`ref=THOREN.png`/still-de-locação pro plano
+sem sujeito -- confirma que os itens 1/3/4 do §3.53 funcionam JUNTOS, não só
+isolados). Vídeo em andamento no momento de escrever isto; resultado (se
+segurou identidade melhor que os 4 filmes do §3.52) fica pra avaliação visual
+do usuário depois.
+
+### O que migra pros outros pipelines LTX (screenplay, `render_scenes.py`)
+
+Perguntado quais das 5 frentes do §3.53 já valem pro OUTRO caminho de
+produção deste repo (screenplay, orquestrado por `screenplay_to_video.py`,
+não `run_decupagem.py`). Auditei compartilhamento de código real antes de
+responder:
+
+| item | já valia? | por quê |
+|---|---|---|
+| 1. descritor concreto | SIM, de graça | `CAST_SYSTEM_PROMPT` mora em `cast_characters.py`, estágio [2] cast, COMPARTILHADO pelas duas rotas |
+| 4. character sheet | SIM, de graça (pra stills) | `generate_storyboards.py` (estágio storyboard, também compartilhado) já lia `cast[nome]["reference_image"]` ANTES desta sessão -- mecanismo pré-existente, a aba só popula o campo |
+| 3. referência de locação | N/A | o screenplay já resolve por design: 1 storyboard por CENA inteira, reusado em todos os planos dela -- não tem o buraco que o decupagem tinha |
+| 2. auditoria de consistência | NÃO migrava | só existia em `render_shots.py::_still_for_shot`, wrapper específico do decupagem |
+| 5. fish-speech | NÃO migrava | `screenplay_to_video.py` FIXAVA `--tts-engine` em `"auto"` e nem tinha `"fish"` nas choices -- sobrescrevia qualquer default de `synthesize_dialogue.py` |
+
+**Portados os 2 que faltavam** (pedido explícito do usuário):
+- `generate_scene_storyboard_with_consistency()`, nova função em `generate_
+  storyboards.py` (módulo compartilhado) -- mesma lógica de retry por
+  seed que `_still_for_shot`, mas geral o bastante pra servir os dois
+  caminhos de chamada do módulo. `--consistency-threshold`/`--consistency-
+  max-retries` novos na CLI, e em `screenplay_to_video.py` (repassados no
+  estágio storyboard).
+- `screenplay_to_video.py --tts-engine` ganhou `"fish"` nas choices e trocou
+  o default de `auto` para `fish`, espelhando `synthesize_dialogue.py`.
+- De brinde, `--image-engine` do `screenplay_to_video.py` também tinha ficado
+  pra trás (só `flux/sd35/sdxl`) -- corrigido junto, mesmo bug do §3.48/3.52.
+
+**Não testado ainda**: nenhum dos dois portes rodou de ponta a ponta pelo
+`screenplay_to_video.py` real (só compilaram) -- diferente do resto desta
+sessão, que testou tudo antes de dar como pronto. Próximo passo natural se
+for usar essa rota: uma corrida real do screenplay com `--consistency-
+threshold 0.35` e conferir se o servidor do fish-speech precisa estar de pé
+(sim, mesma exigência do decupagem).
+
+**Teste com as sheets rodou completo** (`outputs/minimax_test/run01_lyra_
+thoren`, MESMO run-dir do §3.52 -- sobrescreveu o `final/movie.mp4` antigo,
+a comparação com o FLUX original fica só pelo arquivo já entregue ontem, não
+por disco local): os 6 stills saíram cada um com a referência certa
+(`ref=LYRA.png`/`THOREN.png`/still-de-locação pro plano sem sujeito),
+confirmando que os itens 1/3/4 do §3.53 funcionam JUNTOS. Entregue ao
+usuário pra julgamento visual, não medido por pixel.
+
+### CORREÇÃO à recomendação de limitar duração (§ anterior desta conversa)
+
+Testei a hipótese "limitar duração + encadear é mais rápido e mais
+consistente" com `_test_minimax_duration_cap.py` (script novo, raiz do
+repo): mesmo plano de 16,62s gerado (A) inteiro numa chamada e (B) dividido
+em 3 sub-planos de ~5,5s encadeados (sheet + último frame do anterior como
+os 2 `ref_images`).
+
+**Resultado, e é o OPOSTO do que eu tinha recomendado por teoria:**
+
+| modo | tempo total |
+|---|---|
+| A -- inteiro | 840,7s |
+| B -- dividido (3x) | 1725,2s -- **quase o dobro** |
+
+**Causa, direto do log do servidor**: a amostragem em si (4 passos turbo) é
+RÁPIDA e quase não varia com a duração pedida (8-70s por chamada). O que
+domina o tempo (`Prompt executed in` 449-599s por chamada, inclusive nas de
+5,5s) é algo FORA do loop de amostragem visível no log -- decode de VAE,
+codificação de referência, ou negociação de VRAM, não isolado ainda. Isso é
+**custo fixo por chamada de API**, não custo proporcional à duração de saída.
+Dividir em N chamadas paga esse fixo N vezes; uma chamada só paga uma vez.
+
+**Implicação**: a recomendação de "limitar duração" baseada em velocidade
+estava ERRADA pro MiniMax H3 como é chamado hoje (uma chamada de API por
+plano). O argumento de qualidade/consistência (planos longos degradando
+coerência de movimento) continua não medido -- só visual, nos dois vídeos
+entregues ao usuário. Se a qualidade do dividido não compensar visivelmente,
+dividir vira estritamente pior: mais lento E com uma costura a mais pra
+gerenciar. **Não implementar cap de duração em produção sem essa avaliação
+visual primeiro.**
+
+## 3.55 Auditoria dos scripts/.bat, XTTS não descartado, checkpoint w4a8-v10 (2026-09-03)
+
+Pedido do usuário: auditar scripts e `.bat`, atualizar memoriais, checar
+regressão, conferir se os chamadores de motor de imagem cobrem os modelos
+disponíveis, **não descartar o XTTS** (deixar as duas opções escolhíveis até
+o fish-speech amadurecer), e testar `ltx25DistilledW4A8_v10.safetensors`.
+
+### Auditoria de `.bat` e engine choices desatualizadas
+
+Nenhum `.bat` hardcoda motor de imagem/TTS (todos passam por Python sem flag
+explícita, herdando o default do script chamado) -- os `.bat` em si estão
+limpos. Achei e corrigi **3 listas de choices esquecidas** numa varredura
+`grep` de padrão exato, além das já corrigidas em sessões anteriores hoje:
+
+- `screenplay_ui.py` (a UI DE VERDADE da rota screenplay, portas 7810/7910)
+  -- `tts_engine` Dropdown não tinha `"fish"`. Este era o mais sério dos três:
+  é a UI de produção real, não um CLI de conveniência.
+- `render_shots.py::main()` (CLI própria, usada pelo estágio "R rascunho" do
+  `run_decupagem.py`) -- `--image-engine` sem flux-krea/flux-kontext, e
+  faltava threading de `weight_dtype` pro `render()` (mesmo bug do §3.52,
+  reaparecendo numa terceira cópia da mesma lógica).
+- `continuous_chain.py` (meu, de 2026-09-01) -- `--tts-engine` sem `"fish"`.
+
+Verificado que `storyplay25.py` e `music_maker_ui*`/`web_ui_v4*`/
+`film_maker_ui_v4*` não usam `generate_storyboards.IMAGE_ENGINES`/
+`dialogue_tts` (motor próprio, fora do escopo desta auditoria) -- `storyplay25
+.py` usa Textbox livre pra checkpoint/clip/vae (sem lista de choices pra
+ficar desatualizada) e não faz TTS/diálogo nenhum.
+
+### XTTS não descartado -- correção de rumo
+
+A sessão de ontem/hoje tinha trocado o DEFAULT de `synthesize_dialogue.py` e
+`screenplay_to_video.py` de `"auto"` pra `"fish"` (§3.53). **Revertido pro
+default original `"auto"`** nos dois -- xtts continua o motor primário sem
+setup extra, fish vira OPT-IN explícito (`--engine fish`/dropdown), até
+acumular mais horas de uso sem o bug de CJK e outras arestas que só
+apareceram no primeiro dia de teste. `run_decupagem.py` ganhou `--tts-engine`
+(antes não existia NENHUM jeito de escolher motor de voz por ali, só editando
+`synthesize_dialogue.py` na mão), e `decupagem_ui.py` ganhou o dropdown
+correspondente (`motor_voz`, default `"auto"`).
+
+### Regressão: nenhuma encontrada
+
+Toda mudança de assinatura (`render()`, `_still_for_shot()`,
+`generate_scene_storyboard()`, `TTSStatus`) só ADICIONOU parâmetros com
+default seguro -- conferido que `TTSStatus(...)` só é construído no próprio
+`dialogue_tts.tts_status()`, então o campo novo `fish_available` não quebra
+nenhum outro chamador. `detect_architecture()` só ganha o branch novo
+`"flux1"` pra nomes de arquivo que nenhum checkpoint pré-existente tinha.
+
+### `ltx25DistilledW4A8_v10.safetensors`: registrado, teste pendente (GPU ocupada)
+
+14,88 GiB -- ainda menor que o `redgraft` (17,0 GiB). Diferente do redgraft
+(fork comunitário, proveniência incerta), este tem proveniência confirmada
+no próprio metadata do safetensors: `converted_by="ComfyUI Kitchen W4A8
+INT8-Codebook Converter"`, `converter_url=github.com/Comfy-Org/comfy-kitchen/
+pull/99` -- o MESMO projeto oficial que dá o kernel `asym_w4a8_int8` que o
+`comfy/ops.py` já reconhece nativamente (confirmado ontem, §3.51).
+`gemma_source_checkpoint` no metadata confirma parear com o `gemma4-12b-ltx-
+v1` já instalado -- nenhum encoder novo necessário. Hardlink NTFS criado,
+registrado em `ltx25_backend.VARIANTS["w4a8-v10"]` e no dropdown do
+`storyplay25.py`.
+
+**Testado com sucesso** (pedido do usuário, GPU livre): clipe de 5,04s
+(121 frames, 768x512) -- **292,6s de geração**, sem erro de carga, sem
+travar. Comparável ao `redgraft` (206s pra 4s = ~51,5s/s de conteúdo, contra
+~58s/s deste) -- mesma ordem de grandeza, ambos MUITO abaixo do bf16 padrão
+(353-1751s pra clipes de 4-5s, medido no §3.52). **Incluído como opção de
+geração**, conforme combinado -- disponível via `--variant w4a8-v10`
+(`ltx_pipelines_25`/`continuous_chain.py`) e no dropdown do `storyplay25.py`.
+Qualidade não avaliada por mim -- vídeo entregue ao usuário.
+
+**Pipeline de pós-produção completo testado no clipe** (pedido do usuário,
+antes de ir pra resolução de produção): `upscale_video.ps1` (2x,
+`realesrgan-x4plus` -- não `realesr-animevideov3`, que a §3.18 já mediu pior
+em conteúdo não-anime; 768x512 -> 1536x1024, ~6 min) -> `video_doctor.py
+doctor` (achou 1 defeito LOCAL num frame só, reparado por interpolação;
+tira de revisão entregue ao usuário pra confirmar se era defeito real ou
+movimento legítimo). **Achado de robustez, não bug**: `video_doctor.py doctor`
+não aceita `--no-cut-detection`/`--cuts` (só o subcomando `analyze` tem essas
+flags, já registrado como lacuna conhecida antes desta sessão) -- rodei sem
+elas, aceitável aqui porque o clipe é um plano único sem corte pra confundir
+o detector.
+
+## 3.56 RIFE quadricula acima de ~1024px -- bug real achado pelo usuário, corrigido
+
+O reparo por interpolação (frame 113, §3.55) saiu **quadriculado em blocos**
+no vídeo pós-upscale (1536x1024) -- o usuário pegou visualmente, eu não tinha
+olhado o resultado com atenção antes de dar como pronto.
+
+**Investigação, passo a passo:**
+1. Reproduzi isolado: rodei o MESMO reparo no clipe ANTES do upscale
+   (768x512) -- saiu limpo (usuário confirmou: "o quadriculado não ocorreu").
+   Isola a causa em resolução, não em cut-detection/frame errado/etc.
+2. Extraí o frame quebrado e olhei direto: não é um artefato sutil de
+   costura, é um grid de 12 blocos com conteúdo de POSIÇÕES/FRAMES
+   diferentes espremidos juntos -- assinatura clássica de falha de blend de
+   tiles em inferência ncnn-vulkan.
+3. Testei `-g 0` (forçar a 3090 explicitamente, já que `repair_interpolate_
+   rife()` nunca passava esse flag, só usava o default "auto" do binário) --
+   MESMO resultado quebrado. Não é GPU errada.
+4. Testei `-u` (modo UHD, a flag do próprio binário feita pra frame grande)
+   -- MESMO resultado quebrado. Não é falta de UHD mode.
+5. `nvidia-smi` no momento: 24,5 GB livres na 3090. Não é VRAM.
+
+**Conclusão**: o binário `rife-ncnn-vulkan` (build 20221029, modelo
+`rife-v4.6`, o único instalado em `tools/rife/`) tem um bug genuíno acima de
+um certo tamanho de frame, que nenhuma flag documentada contorna -- devolve
+PNG válido (`returncode 0`, arquivo existe, imagem abre) mas com conteúdo
+corrompido, **silenciosamente**. `768x512` limpo, `1536x1024` quebrado; o
+limiar exato entre os dois não foi medido, só os dois extremos.
+
+**Corrigido em `video_doctor.py`**: `repair_interpolate_rife()` agora recusa
+rodar quando o lado maior do frame passa de `RIFE_MAX_LONG_SIDE = 1024`
+(chute conservador, não o limiar medido -- fica abaixo dos dois pontos
+testados) e devolve `False` -- o chamador (`do_repair`) já tinha fallback
+pro warp bidirecional pra esse caso (`if args.interp == "warp" or not
+repair_interpolate_rife(...)`), só nunca tinha sido exercitado por essa
+razão. Testado: rodando de novo no MESMO vídeo 1536x1024, o log agora mostra
+`"RIFE pulado: frame 1536px..."` e cai pro warp automaticamente, sem
+quadriculado -- entregue ao usuário pra confirmar.
+
+**Recomendação de processo, não só de código**: rodar o `video_doctor`
+**ANTES** do upscale (na resolução de geração), não depois -- é mais seguro
+(RIFE nunca vê um frame grande) e mais barato (RIFE processa menos pixels).
+A ordem que segui hoje (upscale -> doctor) foi a errada; inverter resolve
+sem precisar do guard novo, mas o guard fica como rede de segurança pra
+quem rodar doctor depois do upscale de qualquer forma.
+
+**Não medido**: o limiar exato onde o RIFE começa a quebrar (só sei que é
+entre 768 e 1536 no lado maior), se o warp produz resultado visualmente
+aceitável nesses casos (ficou "sem quadriculado" mas pode ter outros
+artefatos próprios do warp -- oclusão borrada, já documentado como
+limitação dele), e se builds mais recentes do rife-ncnn-vulkan (o daqui é
+de 2022) já corrigem isso.
+
+### 3.56.1 CORREÇÃO (mesmo dia): o diagnóstico acima estava errado -- a culpa é do upscale, não do RIFE
+
+O usuário voltou depois de ver o resultado "corrigido" (fallback pro warp):
+**continuava quadriculado**, e perguntou se seria passos de sampling ou
+tamanho mínimo de cena do checkpoint `w4a8-v10` -- ou seja, questionou o
+diagnóstico inteiro em vez de aceitar o guard como resolvido. Fez bem: o
+guard estava tratando sintoma, não causa.
+
+**Reinvestigação, passo a passo:**
+1. Extraí o frame 113 do vídeo CRU (antes de qualquer upscale/reparo) --
+   limpo, perfeito. Descarta o checkpoint/geração como causa (respondendo
+   diretamente a pergunta do usuário: não é passos nem tamanho de cena).
+2. Extraí o frame 113 do vídeo "corrigido" (que o log confirmava ter caído
+   pro warp, não RIFE) -- **ainda quadriculado**, idêntico ao anterior. Se um
+   algoritmo completamente diferente (warp bidirecional por fluxo óptico,
+   sem tiling nenhum) produz o MESMO grid, o bug não pode ser do RIFE.
+3. Extraí os frames vizinhos direto do vídeo JÁ UPSCALADO, ANTES de
+   qualquer reparo (RIFE ou warp) tocar neles -- **já vinham quadriculados**.
+   O `video_doctor` nunca teve chance de causar isso; só processou entrada
+   já corrompida.
+4. Isolei o `upscale_video.ps1`: reproduzi rodando o `realesrgan-ncnn-vulkan`
+   sozinho, um frame de entrada, um frame de saída. Quadriculou igual.
+5. Testei tile size explícito (`-t 200`, `-t 400`, `-t 2000` = maior que a
+   imagem inteira, ou seja, **um tile só, sem costura nenhuma possível**) --
+   quadriculou nos três, com grids diferentes (12, 4 blocos) mas o MESMO tipo
+   de defeito. Descarta bug de costura de tile.
+6. Testei GPU 0 (3090) e GPU 1 (4070) -- hash idêntico nos dois (o que
+   também sugere que `-g` não está sendo respeitado pelo binário aqui, à
+   parte da questão principal). Descarta GPU errada.
+7. Testei o modelo `realesrgan-x4plus-anime` (mesma família RRDBNet do
+   `x4plus`) -- quebrado também, com outra cara (conteúdo perdido, sem grid
+   desta vez, mas a pessoa sumiu da cena). Testei `realesr-animevideov3`
+   (arquitetura SRVGG, bem mais rasa, é o **padrão original do script antes
+   de eu sobrescrever pra `x4plus` durante os testes desta sessão**) --
+   **saiu perfeito**.
+
+**Causa real**: os modelos `realesrgan-x4plus` e `realesrgan-x4plus-anime`
+(família RRDBNet) devolvem saída determinística sem relação com a entrada
+neste binário/instalação (`tools/realesrgan/realesrgan-ncnn-vulkan.exe`),
+**independente de resolução, tile size ou GPU** -- provavelmente overflow
+numérico em fp16 na rede mais profunda (RRDBNet tem muito mais camadas que a
+SRVGG do `animevideov3`), mas a causa exata dentro do binário não foi
+isolada. O que importa pro pipeline: **`realesrgan-x4plus`/`-anime` não
+servem nesta instalação, ponto** -- não é questão de resolução como eu
+tinha concluído errado no §3.56 original.
+
+**RIFE re-testado, agora com entrada correta**: rodei o binário `rife-
+ncnn-vulkan` direto num par de frames 1536x1024 tirados do vídeo upscalado
+CORRETAMENTE (com `animevideov3`) -- saída perfeita, sem quadriculado, sem
+precisar de `-u` nem GPU específica. **O RIFE nunca teve bug nenhum.** Ele só
+estava recebendo (e fielmente interpolando) entrada já corrompida.
+
+**Corrigido**:
+- `video_doctor.py`: removido o guard `RIFE_MAX_LONG_SIDE = 1024` que
+  desligava o RIFE acima de 1024px -- diagnóstico errado, e o guard só
+  piorava a qualidade do reparo (forçava warp, estritamente mais fraco em
+  oclusão) sem necessidade nenhuma.
+- `upscale_video.ps1`: o padrão do script (`realesr-animevideov3-x2`) já
+  era o caminho seguro -- a quebra só apareceu porque eu passei
+  `-Model realesrgan-x4plus` manualmente pra testar a recomendação antiga do
+  §3.18 ("x4plus é melhor que animevideov3 pra conteúdo não-anime, porque
+  animevideov3 achata gradiente"). **Essa recomendação do §3.18 precisa ser
+  lida com a ressalva desta seção**: `x4plus` pode ser melhor em qualidade
+  quando funciona, mas nesta instalação ele não funciona -- não é uma
+  escolha de trade-off, é lixo determinístico. Não investigado: se
+  reinstalar os arquivos `.bin`/`.param` do x4plus (os atuais têm tamanho
+  plausível, não truncados, mas podem ser de uma versão incompatível com
+  este build do ncnn-vulkan) resolve. Até isso ser testado, **não usar
+  `-Model realesrgan-x4plus` nem `realesrgan-x4plus-anime` neste
+  `upscale_video.ps1`** -- ficar no padrão `animevideov3`.
+
+**Lição de processo**: eu tinha "confirmado" o guard como corrigido só
+porque o log mostrava "RIFE pulado" e o resultado não tinha o grid de RIFE
+-- mas não comparei o frame problema contra a entrada de cada etapa
+individualmente antes de fechar a investigação. O usuário pegou o erro
+porque ele DE FATO olhou o vídeo entregue; eu só tinha olhado o log.
+
+## 3.57 `parse_screenplay`: roteiro em formato "prompt de vídeo" perdia 34 de 35 falas -- corrigido e automatizado (2026-09-04)
+
+Pedido do usuário: rodar a decupagem com um roteiro colado direto no chat, no
+formato que treatments gerados por LLM (Gemini/GPT) costumam usar para IA de
+vídeo -- bloco `[00:00 - 01:15] Bloco 1: Título`, uma lista de personagens
+antes da primeira cena, falas em `NOME\n(parentético)\ntexto`.
+
+**Sintoma**: `parse_screenplay: 1 cena(s), 1 fala(s) detectada(s)` -- de um
+roteiro com 5 cenas e 35 falas. O roteiro inteiro virou `action_text` de uma
+única cena sem `heading_raw`.
+
+**Causa raiz, duas partes:**
+1. Nenhuma das duas regexes de cabeçalho (`SCENE_HEADING_RE` para
+   `INT./EXT.`, `SCENE_HEADING_ALT_RE` para `Cena N -- ...`) reconhece
+   `[timecode] Bloco N: ...`. `parse_structure` devolveria `[]`, o que
+   DEVERIA acionar o reformatador via LLM (`prose_to_screenplay`, feito
+   exatamente pra esse caso -- ver docstring do módulo). Só que...
+2. ...`parse_structure` tem um fallback de PROSA CORRIDA
+   (`_extract_freeform_scene`, pensado pra parágrafo com fala marcada por
+   verbo: `"ela exclama: - Nunca!"`) que roda ANTES de devolver `[]`, e ele
+   encontrou UM falso-positivo (a reticência "...e se a gente otimizar" bateu
+   num dos marcadores de fala). Isso basta pra `scenes` sair não-vazio (1
+   cena), o que **impede o `if not scenes` de acionar o reformatador correto**
+   -- o roteiro, já bem formatado no padrão CABEÇALHO/PERSONAGEM/fala, cai no
+   parser errado (prosa) em vez do certo (estrutura por linha), que já sabia
+   ler esse tipo de conteúdo perfeitamente -- só não reconhecia o cabeçalho.
+
+Efeito colateral do mesmo formato: a lista de personagens ("BEATRIZ (20):
+expressiva, sorridente...") vinha ANTES do primeiro cabeçalho de cena, e
+`parse_structure` **descartava silenciosamente** qualquer linha antes do
+primeiro cabeçalho (`if current is None: continue`) -- exatamente a única
+descrição física concreta dos personagens no roteiro inteiro, perdida antes
+mesmo do `cast_characters` (que desde a auditoria de consistência desta
+sessão, ver §3.53, DEPENDE de descritor concreto no texto pra não inventar
+aparência genérica).
+
+**Corrigido em `parse_screenplay.py`** (não contornado por fora -- é código
+deste projeto, não vendorizado):
+- Nova regex `SCENE_HEADING_BLOCO_RE`, reconhece `[HH:MM - HH:MM] Bloco N:
+  Título` (timecode opcional, "Bloco" com `:`/`-`/`—`), tratada no mesmo
+  lugar que `SCENE_HEADING_ALT_RE` -- roteiro nesse formato agora parseia
+  **inteiramente pela via determinística**, sem precisar do LLM pra
+  reestruturar nada.
+- Texto antes do primeiro cabeçalho não é mais descartado: acumulado em
+  `preamble_lines` e anexado ao `action_text` da CENA 1 assim que ela é
+  criada (`_attach_preamble`), com aviso no log
+  (`"N linha(s) antes do primeiro cabecalho anexadas a cena 1"`). Se o
+  roteiro não tem cabeçalho nenhum (cai no fallback de prosa de verdade), o
+  preâmbulo já ia junto -- esse fallback opera no texto inteiro, não só nas
+  linhas após o primeiro cabeçalho.
+
+**Testado**: rodei `parse_structure()` direto no texto ORIGINAL, sem nenhuma
+edição manual -- `5 cena(s), 35 fala(s)`, personagens corretos por cena
+(`LUCAS`/`BEATRIZ` nas cenas 1/2/4/5, `+MARINA` na 3), e a lista de
+personagens presente no `action_text` da cena 1. Automatizado: colar esse
+formato de roteiro direto não exige mais reescrever cabeçalho nem mover a
+lista de personagens à mão.
+
+**Não corrigido, fora de escopo**: o `_extract_freeform_scene` continua
+podendo produzir 1 falso-positivo isolado quando o texto tem QUALQUER cabeçalho
+reconhecido em algum lugar mas também conteúdo solto que bate um marcador de
+verbo de fala -- não é o caso deste roteiro (0 cabeçalhos reconhecidos antes
+do fix, então o freeform nunca deveria ter rodado primeiro; agora com 3
+formatos de cabeçalho cobertos, a lacuna fica menor, não fechada). Se aparecer
+um quarto estilo de cabeçalho não coberto, o mesmo sintoma pode se repetir.
+
+## 3.58 Decupagem travada 7+ horas: still em 2x a resolução + dynamic VRAM ligado por omissão (2026-09-04)
+
+Rodando o roteiro Beatriz/Lucas (§3.57) direto -- `python -m script_pipeline.
+run_decupagem` chamado na mão, sem passar por `start_decupagem.bat` nem
+`decupagem_ui.py` -- os stills empacaram: só os 2 primeiros planos (as
+âncoras sem imagem de referência) saíram; o plano 2 em diante travou, cada um
+"falhando" só depois de exatamente 600s (o timeout do cliente). `/queue` do
+ComfyUI confirmava: 1 job "rodando" havia HORAS, 43 empacados atrás dele na
+fila -- FIFO de um servidor só, então todo o resto esperava o primeiro nunca
+terminar. GPU o tempo todo em 100%/24,1-24,2 de 24,5 GB.
+
+**Duas causas, achadas em sequência, cada uma mascarando a outra:**
+
+1. `render_shots.py::render()` chamava `_still_for_shot(..., width=width*2,
+   height=height*2, ...)` -- os stills saíam a 1920x1088 quando o pedido era
+   960x544 (dobro em cada eixo, 4x em pixels), **sem nenhum comentário
+   explicando por quê**, e a chamada de vídeo logo abaixo, no mesmo laço, usa
+   `width=width, height=height` (o valor SEM dobrar) para condicionar o LTX --
+   ou seja, o still nunca precisou ser 2x maior que o vídeo que ele condiciona;
+   o multiplicador não tinha função nenhuma a jusante. Confirmado com
+   `git log -L` que não há explicação registrada; e com `Image.open(...).size`
+   nos dois stills que chegaram a terminar -- 1920x1088 nos dois. Corrigido:
+   `width=width, height=height`, sem multiplicador. Grep no repo inteiro por
+   `width\s*\*\s*2|height\s*\*\s*2` confirma que esse era o ÚNICO lugar na
+   cadeia de decupagem/screenplay/continuous_chain com esse padrão -- os dois
+   outros achados (`ltx-pipelines/utils/constants.py`, `ltx-core/.../
+   vocoder.py`) são matemática de upscale/kernel de outros módulos, não
+   relacionados.
+2. Mesmo já em 960x544 (resolução certa), o plano 1 (o primeiro COM imagem de
+   referência -- `LoadImage`+`VAEEncode`+`ReferenceLatent`, o nó que carrega
+   e recodifica a imagem-âncora) ainda travou, de novo com a GPU presa a
+   ~100%/24,2 GB e o log do próprio ComfyUI parado no meio de
+   `"Model Flux2TEModel_ prepared for dynamic VRAM loading. 15622MB
+   Staged."` -- **o mesmo sintoma já documentado no MEMORIAL 3.33 para o
+   estágio de VÍDEO** (o ComfyUI liga "dynamic VRAM" por padrão e engasga ao
+   encenar um modelo grande enquanto outro já ocupa a placa), só que agora no
+   estágio de STILLS, disparado especificamente pela geração COM referência
+   (que precisa recarregar/reencenar o encoder de texto no meio do gráfico).
+   `start_decupagem.bat` e `decupagem_ui.py` JÁ setam `LTX_COMFY_EXTRA_ARGS=
+   --disable-dynamic-vram` antes de chamar a cadeia -- mas só esses dois
+   caminhos faziam isso; qualquer invocação direta (a minha, aqui) ficava com
+   dynamic VRAM ligado por padrão, porque `comfy_launch_args()` em
+   `generate_storyboards.py` lia a variável com fallback `""` (vazio =
+   nada de extra) quando ela não estava setada.
+
+**Corrigido na raiz, não só contornado nesta corrida**: `comfy_launch_args()`
+agora usa `--disable-dynamic-vram` como PADRÃO quando `LTX_COMFY_EXTRA_ARGS`
+não está definida no ambiente -- setar a variável (mesmo vazia, `""`) ainda
+liga dynamic VRAM de volta pra quem quiser comparar, mas o padrão deixou de
+depender de cada chamador lembrar de configurar isso. Essa função é o único
+lugar que monta o comando do servidor ComfyUI para TODA a cadeia de
+storyboard/decupagem (`decupagem_ui.py`, `storyplay25.py`, `render_shots.py`
+×2, a CLI do próprio `generate_storyboards.py`, e `ltx25_backend.py` via
+`comfy_launch_args` importado) -- corrigir aqui corrige todos os chamadores
+de uma vez, incluindo invocação manual futura como a que causou isto.
+`minimax_h3_backend.py` foi checado e NÃO usa essa função -- tem seu próprio
+lançador, já validado sem essa flag (MEMORIAL 3.41: MiniMax funciona sem
+`--lowvram`/`--cpu-vae` com o encoder mandado pra CPU no próprio grafo).
+Sem medição de que precise de `--disable-dynamic-vram`, não mexi lá --
+mudança especulativa sem medição vai contra a disciplina deste projeto.
+
+**Testado**: matei os processos travados (`taskkill /F`), limpei
+`shots/stills`+`shots/clips` parciais, e rodei de novo com as duas correções
+-- plano 0 a 7+ todos terminando em segundos, incluindo os planos COM
+referência (1, 2, 3, 5, 6...) que antes travavam. Custo real do incidente:
+~7 horas de GPU perdidas rodando um job preso, mais uma segunda tentativa
+perdida por só ter corrigido a causa 1 e não a causa 2 -- as duas precisavam
+ser corrigidas juntas pro sintoma sumir de vez.
+
+## 3.59 Câmera/luz por plano decidida por LLM, dentro do Estilo escolhido (2026-09-04)
+
+Usuário mandou um vídeo catalogando vocabulário de câmera/luz/efeito no estilo
+"/dollyin", "/orbit", "/steadicam", "/lowangle", "/freeze", "/rimlight",
+"/volumetric", "/whiptransition" (visual de ferramenta tipo Kling/Sora) e
+perguntou se dava pra usar no LTX/MiniMax. Resposta: sim, mas quase tudo isso
+é **vocabulário de prompt**, não parâmetro de API -- nenhum dos três motores
+tem controle estrutural de câmera. Em seguida perguntou se o LLM poderia
+decidir QUANDO usar cada um, a partir de um Estilo já escolhido -- e esse é o
+padrão certo pra este projeto: `parse_screenplay.py` já separa "estrutura
+determinística primeiro, LLM só enriquece depois"; isto é a mesma ideia
+aplicada a câmera.
+
+**Arquitetura**: `shot_plan.py` ganhou uma passada OPCIONAL,
+`enrich_camera_style()`, que roda DEPOIS de `plan_all()` já ter decidido tudo
+deterministicamente (igual sempre foi). Ela agrupa os planos por CENA, manda
+pro Ollama a lista de planos daquela cena (framing/sujeito/beat/duração) mais
+o VOCABULÁRIO PERMITIDO para o Estilo de cada plano (`CAMERA_STYLE_VOCAB` --
+um subconjunto por estilo, nunca a lista inteira), e só aceita de volta
+`movement`/`lighting`/`post` que estejam LITERALMENTE dentro do permitido --
+validado em código, a resposta do modelo nunca é confiada cegamente. Quando
+muda algo, reconstrói `storyboard_prompt`/`video_prompt` com as MESMAS funções
+`_storyboard_prompt`/`_video_prompt` de sempre (não inventa um caminho de
+prompt paralelo).
+
+**Vocabulário novo em `MOVEMENTS`**: `steadicam`, `crane_up`, `crane_down`,
+`zoom_in` (os 5 originais -- static/push/pull/orbit/handheld -- continuam).
+`LIGHTING` é dict novo, ADITIVO ao `look` do estilo (não substitui): rimlight,
+volumetric, golden_hour, neon. `/dollyin` do vídeo do usuário não virou
+entrada nova -- já é `push` com outro nome; dois textos pro mesmo efeito seria
+duplicação. `/lowangle` também não precisou de nada novo: já existe como
+`ANGLES["low"]`, campo estruturado desde antes desta sessão.
+
+**`/freeze` e `/whiptransition` são efeitos de PÓS-produção, não de geração**
+-- nem LTX nem MiniMax "congela no meio" ou "corta com whip pan" dentro de
+uma única chamada; isso é propriedade de como o CLIPE JÁ PRONTO é usado
+depois. `freeze` está implementado de verdade: `render_shots.py::
+_apply_freeze()` segura o último frame do clipe com `ffmpeg -vf
+tpad=stop_mode=clone` quando o plano tem `"freeze"` em `post_effects`. `whip`
+fica só REGISTRADO no plano por enquanto -- aplicar de verdade trocaria o
+concat-demuxer (stream-copy, rápido) do `assemble_final.py` por
+`filter_complex` com re-encode só nos pares marcados, mudança de arquitetura
+daquele estágio que não fiz sem pedido explícito.
+
+**Guarda-corpo de duração pro orbit**: `ORBIT_MIN_SECONDS = 5.0` -- MEDIDO no
+§3.21 (mesmo módulo) que câmera é destino, não estado; um plano curto não
+termina a volta que "orbit" promete. O LLM nunca vê "orbit" na lista permitida
+se o plano for mais curto que isso, mesmo em estilos que o permitem
+("contemplativo").
+
+**Testado (sem GPU -- só Ollama, que roda na 4070/CPU, não na 3090 que estava
+ocupada com outro serviço)**: rodei `enrich_camera_style` no shot_plan real do
+Beatriz/Lucas (46 planos, estilo intimista, `qwen3.6-35b-a3b:latest`). 15 de
+46 mudaram, todos dentro do vocabulário permitido (`static`/`push`/
+`steadicam` -- intimista não libera mais que isso). As escolhas bateram com o
+conteúdo: planos de estabelecimento (parados) ganharam `push` lento em vez do
+`static` padrão; planos cujo `beat` dizia literalmente "Camera pans slowly
+following... walking" viraram `steadicam`; planos cujo `beat` dizia "stands
+still"/"stands facing" mantiveram/voltaram a `static`. Nenhuma luz nem post-
+effect foi usado nesta cena -- o prompt instrui "só escolha quando o conteúdo
+genuinamente pede", e o modelo foi conservador, dentro do esperado.
+Armadilha encontrada no processo (não é bug do recurso novo): `shot_plan.py`
+chamado com `--run` usa `scenes.json` (sem enriquecimento), enquanto
+`run_decupagem.py` sempre chama com `--scenes scenes_enriched.json`
+explicitamente -- testar com `--run` direto dá `beat` vazio pra tudo e o LLM
+(corretamente) não muda nada por falta de informação. Não é uma inconsistência
+nova, só nunca tinha me mordido antes de eu testar o modulo isolado.
+
+**Ligado em**: `shot_plan.py --camera-llm --engine TAG` (CLI própria),
+`run_decupagem.py --camera-llm` (repassa pro shot_plan), e a UI ganhou o
+checkbox "LLM refina câmera/luz por plano" na aba Motores. Opt-in em todos os
+três níveis -- sem marcar, comportamento 100% igual a antes.
+
+**Não testado ainda (fica para quando a GPU for liberada)**: gerar de verdade
+um clipe com `steadicam`/`push` escolhido pelo LLM e comparar contra o mesmo
+plano com o movimento determinístico antigo -- confirmar que a mudança de
+texto realmente produz uma câmera visualmente diferente no LTX 2.5, não só
+uma frase diferente no prompt. Também não testado: `/freeze` de verdade num
+clipe real (a função ffmpeg foi só lida, não executada), e os estilos
+`tenso`/`nervoso`/`contemplativo` (só `intimista` foi exercitado).
+
+## 3.60 Watchdog compartilhado: fila travada, porta orfã, lixo parcial (2026-09-04)
+
+Pedido do usuário depois de ver a mesma trava se repetir (§3.58, e antes dela
+§3.33/3.41): os lançadores do ComfyUI (LTX 2.3/2.5 e MiniMax H3), incluindo os
+`.bat`, deveriam ter observador próprio -- detectar trava, checar a porta,
+retomar de onde parou, limpar VRAM e produto parcial, e limpar ao sair. Novo
+módulo `script_pipeline/gpu_watchdog.py`, ponto único para as três paradas
+(evita a mesma classe de duplicação que `comfy_launch_args`/`stop_comfyui` já
+resolveram para o comando de subir o servidor).
+
+**`StallWatch`**: thread em segundo plano que consulta `{server}/queue` a
+cada `poll_seconds` (padrão 15s) e mede há quanto tempo o MESMO `prompt_id`
+está "rodando" sem trocar. Acima de `stall_seconds` (padrão 300s = 5min --
+bem abaixo dos 600-3600s de timeout que cada CLIENTE já esperava sozinho, que
+foi o que deixou a trava do §3.58 rodar 7 HORAS sem ninguém notar antes da
+hora), loga um aviso com o estado real da GPU (`nvidia-smi`) junto. Duas
+formas de reagir, escolhidas pelo chamador:
+
+- `auto_recover=True`: reinicia o servidor sozinho (mesmo `free_port` que já
+  era usado na mão nesta sessão inteira) até `max_auto_recoveries` vezes
+  (padrão 2). Na trava seguinte -- ou seja, se reiniciar NÃO resolveu duas
+  vezes seguidas -- **para de tentar e avisa**, em vez de reiniciar pra
+  sempre escondendo um problema mais fundo (VRAM insuficiente pro job, bug
+  no workflow). Isto é o "pode indicar em casos mais graves para o usuário
+  aceitar ou não" da pergunta original: a recuperação de rotina (que já era
+  uma ação seguramente repetida à mão o tempo todo neste projeto) continua
+  automática; a insistência além do razoável vira aviso explícito, não ação
+  silenciosa.
+- `auto_recover=False`: nunca mata nada, só avisa -- para contexto onde
+  quem está olhando prefere decidir na hora.
+
+Ligado com `auto_recover=True` nos dois lançadores compartilhados:
+`generate_storyboards.ensure_comfyui_running` (cobre TUDO que já passa por
+`comfy_launch_args` -- decupagem_ui, storyplay25, render_shots ×2, a CLI do
+próprio generate_storyboards, e o ltx25_backend via import) e
+`minimax_h3_backend.ensure_server` (porta 8189). Um watch por servidor, não
+por chamada -- `_start_stall_watch_once` guarda num dict/global pra não
+empilhar threads vigiando a mesma fila toda vez que um estágio novo chama
+`ensure_comfyui_running` pro mesmo servidor.
+
+**`free_port(port)`**: o netstat+taskkill que já existia em TRÊS lugares
+(`generate_storyboards.stop_comfyui`, `decupagem_ui._free_port`, e agora
+usado também pelo StallWatch) virou UMA implementação -- as duas cópias antigas
+agora delegam pra cá. Exclui o próprio PID do chamador da lista de alvos
+(nunca se auto-mata), detalhe que só existia na versão do `decupagem_ui.py`
+antes e ficaria perdido se eu tivesse copiado só a versão do
+`generate_storyboards.py`.
+
+**`sweep_garbage(run_dir)`**: apaga produto parcial conhecido -- 
+`*.freeze_tmp.mp4` (sobra do `_apply_freeze` se o ffmpeg falhar no meio),
+`*.tentativaN.png` (sobra da auditoria de consistência, §3.53, se o processo
+morrer entre tentativas), e qualquer PNG/MP4/WAV de tamanho ZERO -- com um
+limiar de idade (`max_age_seconds`, padrão 1800s) para nunca mexer em
+arquivo que uma corrida EM ANDAMENTO ainda está escrevendo. Chamado no
+início dos estágios de stills e de vídeo em `run_decupagem.py`.
+
+**`gpu_status()`/`gpu_status_line()`**: leitura de `nvidia-smi` por GPU
+(usado/total/util), sem levantar exceção se a ferramenta não existir --
+alimenta os avisos do StallWatch e serve pra qualquer log futuro que precise
+comparar VRAM antes/depois de uma ação.
+
+**Testado sem tocar a GPU real** (ela estava ocupada com outro serviço
+durante esta sessão): simulei um servidor ComfyUI fake (HTTP em processo,
+porta de teste 18188/18189) com um job "preso" retornando sempre o mesmo
+`prompt_id`. Confirmado: (1) detecção do stall em ~3s com `stall_seconds=3`
+no teste (proporcional ao padrão de 300s em produção); (2) modo
+`auto_recover=False` avisa e nunca mata nada; (3) modo `auto_recover=True`
+tenta `free_port` até o limite e SOME o evento de esgotamento
+(`on_exhausted`) exatamente após a última tentativa, com a contagem certa.
+`sweep_garbage`/`gpu_status` testados direto contra o repo real (sem
+inventar dado): `gpu_status()` leu a 3090 do usuário genuinamente ocupada
+(15,5 GB/100%) durante o teste, confirmando que a leitura é real, não mock.
+
+**O que fica de fora, deliberadamente:**
+- **Kill forçado de fora (`taskkill /F` feito por mim ou por outra pessoa)
+  ainda mata o watchdog junto** -- ele é uma thread DENTRO do processo que
+  está sendo vigiado (o processo que chamou `ensure_comfyui_running`), não
+  um supervisor externo. O ganho real não é "sobreviver a um kill forçado",
+  é DETECTAR a trava em minutos para que ninguém PRECISE mais recorrer ao
+  kill forçado manual -- que é exatamente o que aconteceu (na mão) três
+  vezes documentadas nesta sessão antes deste módulo existir.
+- **Os `.bat` não foram editados individualmente.** Eles só chamam
+  `python.exe algumascript.py`; o watchdog vive no lado Python
+  (`ensure_comfyui_running`/`ensure_server`), então qualquer `.bat` que já
+  invoca esses caminhos (todos os que sobem UI de storyboard/decupagem/
+  screenplay, e os de MiniMax) já herda o comportamento sem precisar de
+  edição própria. O que NÃO herda automaticamente: limpeza garantida quando
+  a JANELA do `.bat` é fechada no X em vez do processo terminar sozinho --
+  isso já dependia de `atexit`, que só roda em saída normal (Ctrl+C inclusive,
+  na maioria dos casos, porque vira `KeyboardInterrupt` em Python) mas NÃO
+  roda se o Windows mata o processo à força. Não escrevi um supervisor
+  externo pra isso -- ficaria como o próximo passo se um `.bat` fechado
+  bruscamente continuar deixando ComfyUI órfão medido na prática.
+- **`whip` (transição de corte) e o teste real de `/freeze`** continuam
+  pendentes do §3.59 -- nenhum dos dois precisa de watchdog, são itens
+  separados da mesma sessão.
+
+## 3.61 `continuous_chain.py --end-keyframe` nunca funcionou na rota 2.5 -- bug achado e corrigido, técnica avaliada (2026-09-04)
+
+Usuário mandou um link de nó do ComfyUI (`LTXVConcatAVLatent`,
+`LTXVAddGuideAdvanced`, workflow "LTX Image to Video with STG, CAPTION & CLIP
+EXTEND" do CivitAI) perguntando se dava pra implementar aqui. Investigação por
+leitura de código (sem GPU, ela estava ocupada com outro serviço):
+
+- **Os dois nós já estavam instalados** -- `LTXVConcatAVLatent` é nó CORE do
+  ComfyUI (`comfy_extras/nodes_lt.py`, nem é do plugin), já em uso em toda
+  geração 2.5 com áudio. `LTXVAddGuideAdvanced` é do plugin
+  `ComfyUI-LTXVideo` e **já estava implementado** em
+  `ltx25_backend.py::_apply_keyframes` (linha 468), com um bug real já
+  encontrado e corrigido ali antes desta sessão: os guides têm que ficar
+  ANTES do `LTXVConcatAVLatent`, não depois (o concat devolve `NestedTensor`,
+  que `LTXVAddGuideAdvanced` não sabe processar).
+
+**Bug real encontrado nesta investigação**: `ltx_pipelines_25.py` (o shim de
+CLI que `continuous_chain.py` usa pra falar com `ltx25_backend.py`) SEMPRE
+colapsava múltiplos `--image` num só, descartando silenciosamente qualquer
+imagem além da de menor índice de frame -- então
+`continuous_chain.py --end-keyframe`, que existe desde antes desta sessão e
+passa DOIS `--image` por chunk (a imagem de encadeamento em frame 0 + a
+âncora de destino no último frame), **nunca teve efeito nenhum na rota 2.5**.
+O log só dizia "imagem(ns) adicional(is) ignorada(s)" -- sem indicar que
+isso invalidava a flag inteira.
+
+**Dois bugs, corrigidos em `ltx_pipelines_25.py`:**
+1. A imagem descartada agora é repassada como `keyframes=` pro
+   `ltx25_backend.generate()`, que já sabia encadear via
+   `_apply_keyframes`/`LTXVAddGuideAdvanced` -- só faltava o shim não jogar
+   fora.
+2. Achado testando: quando só UMA imagem é passada e ela NÃO está no frame 0
+   (caso do chunk 0 com só `--end-keyframe`, sem imagem de encadeamento),
+   o código ainda tratava essa única imagem como `image_path` (condicionamento
+   de PRIMEIRO frame) só por ser a única da lista -- o oposto do frame_idx
+   pedido. Corrigido: só vira `image_path` quando o índice mais baixo É
+   realmente 0; caso contrário todas vão para `keyframes`.
+
+**Testado de ponta a ponta** (3 chunks, cena wuxia, mesmos prompts/seed/
+resolução do teste já validado em §3.50, comparando COM e SEM
+`--end-keyframe` força 0.5): confirmado visualmente que o guide agora
+funciona -- o último frame de cada chunk com `--end-keyframe` fica muito
+próximo da imagem-âncora (mesma pose, composição, personagens), contra a
+progressão livre do baseline.
+
+**Achado importante sobre a TÉCNICA, não só o bug**: com o guide
+genuinamente funcionando, ficou claro que `--end-keyframe` a 0.5 de força
+**domina a cena por completo**, inclusive contra o que o PRÓPRIO PROMPT pede.
+No baseline (sem a flag), o chunk 1 termina na ponte de pedra com lanternas
+(exatamente como o prompt descreve) e o chunk 2 termina num close-up íntimo
+genuíno (também como pedido). Com `--end-keyframe` ligado, os TRÊS chunks
+terminam na MESMA composição -- o casal em plano médio na floresta de bambu,
+igual à âncora -- mesmo quando o chunk 1 pede ponte/lanternas e o chunk 2
+pede close-up. A ferramenta funciona; ela só não serve pra ESTE caso de uso
+(cadeia narrativa que progride por cenários/enquadramentos diferentes) --
+serve para o caso oposto: uma cadeia que deve sempre RETORNAR à mesma
+composição/identidade visual (ex.: um plano-base fixo entre variações).
+**Recomendação**: não usar `--end-keyframe` em cadeias narrativas com
+progressão de cena; é ferramenta pra ancoragem de identidade/local FIXO, não
+pra continuidade solta.
+
+**Não testado**: o mesmo mecanismo com `--two-stage` (o `_apply_keyframes`
+foi validado só no grafo single-stage), e força de `--end-keyframe` menor
+que 0.5 (talvez alguma força intermediária permita a âncora "puxar de volta"
+sem apagar a progressão de cena -- não medido, é hipótese).
+
+## 3.62 Comparativo GGUF/checkpoint em três motores, e um bug de watchdog achado por trás de "crashes" fantasmas (2026-09-06)
+
+Usuário pediu pra testar de verdade se GGUF valia a pena (pesquisa anterior,
+§3.61-adjacente/memória "motores C/C++", tinha achado que `stable-diffusion.
+cpp` não cobria as features de produção -- mas isso não respondia se o
+caminho GGUF DENTRO do ComfyUI, já em uso pro 2.3, valia a pena pro 2.5 e
+pro MiniMax H3).
+
+**LTX-2.5**: baixado `LTX-2.5-Distilled-Q6_K.gguf` (`realrebelai/
+LTX-2.5_GGUFs`, ~18,7 GB). `ltx25_backend.py` ganhou `GGUF_VARIANTS`
+(variante `gguf-q6k`) -- diferente do `VARIANTS` existente (que só troca o
+nome do arquivo no `UNETLoader`), GGUF precisa trocar o NODE inteiro pro
+`UnetLoaderGGUF` (mesma saída MODEL). Duas armadilhas achadas testando:
+
+1. `extra_model_paths.yaml` (seção `ltx_25`) não tinha a categoria `unet`
+   (só `diffusion_models`) -- `UnetLoaderGGUF` lê de `folder_paths.
+   get_full_path("unet", ...)`, categoria diferente. Adicionado
+   `unet: diffusion_models` pra reaproveitar o arquivo já baixado.
+2. O `unet_name` que o ComfyUI espera usa barra INVERTIDA (Windows) mesmo
+   quando o arquivo está num subdiretório -- `"gguf_test/arquivo.gguf"`
+   (barra normal) foi rejeitado como `value_not_in_list`; `"gguf_test\\
+   arquivo.gguf"` funcionou.
+
+**Medido, mesma cena/seed em cada par**: GGUF **37% mais rápido** que bf16
+(440s contra 698s numa cena de teste simples; 265s contra 797s numa cena de
+diálogo de 10s com prompt pesado, ~200 palavras). O GGUF cabe inteiro em
+VRAM sem o offload parcial que o bf16 de 40 GB precisa -- compensa de sobra
+o custo por passo mais alto da dequantização (7,5s/passo contra 5,2s/passo).
+
+`audio_conditioning` foi testado DE PROPÓSITO com `gguf-q6k` (é a feature
+que sustenta o lip-sync da decupagem -- se quebrasse, GGUF seria inútil pra
+produção): funcionou, 430s, sem erro. O código de `_apply_audio_conditioning`
+já lê o `model` a partir do guider, não do loader, então já era
+deliberadamente variant-agnostic antes desta sessão. **Ainda não testado
+com GGUF**: variante `dev`, `--two-stage`, keyframes.
+
+**MiniMax H3**: instalação já vinha com o quantizado mais agressivo
+(`w4a8`, 13 GB) fixo no workflow oficial. Baixados dois pares adicionais pra
+comparar: FP8 (unet, 21 GB) + INT8 (text encoder, 27 GB) da Comfy-Org, e o
+GGUF Q4_K_M comunitário (`vantagewithai/MiniMax-H3-comfyUI-GGUF`, 19,9 GB --
+precisou copiar o node `ComfyUI-GGUF` do LTX pra essa instalação separada,
+que não tinha).
+
+| checkpoint | tempo (cena curta / cena de diálogo 15s) |
+|---|---|
+| w4a8 (original) | 554s / 704s |
+| **FP8+INT8** | **397s / 666s -- vence os dois em toda medição** |
+| GGUF Q4_K_M | 707s / 986s -- perde pros dois |
+
+**Por que o GGUF ganhou no LTX-2.5 mas PERDEU no MiniMax H3**: no 2.5 o
+bf16 de 40 GB genuinamente não cabe em VRAM e paga o preço do offload; o
+GGUF elimina esse offload. No MiniMax H3 o gargalo dominante é outro: o
+encoder de texto de 15-27 GB roda na CPU por design (`clip_on_cpu`,
+§3.41) e consome 5-6 minutos fixos ANTES do transformer nem entrar em
+cena -- nem w4a8 nem FP8 precisam de offload no transformer (cabem
+sozinhos), então o GGUF só soma o custo de dequantização sem eliminar
+nada em troca. **A lição não é "GGUF é melhor" ou "GGUF é pior" -- é "GGUF
+só ganha quando o formato nativo precisava de offload que o GGUF evita";
+sem esse offload pra eliminar, GGUF só custa mais caro por passo.**
+
+**Bug achado no processo, sério e independente dos testes de checkpoint**:
+o MiniMax H3 "morria" 3x seguidas, sempre entre 330-340s, sem traceback
+Python nenhum -- parecia crash nativo (driver, aimdo, kernel customizado).
+Investigado por eliminação: sem evento no Windows Event Log (nem
+Application nem TDR de driver), RAM do processo normal, `--disable-
+dynamic-vram` não mudou nada (testado com e sem). A causa real:
+`gpu_watchdog.StallWatch` (o mesmo mecanismo do §3.60, aqui com
+`stall_seconds=300`) mata o servidor (`taskkill /F`, por isso sem
+traceback) quando o MESMO job fica "rodando" por mais que o limiar --
+e o detector só olha tempo de fila, não GPU ociosa. Um clip com o encoder
+de texto na CPU passa boa parte do tempo com a GPU parada POR DESIGN
+(normal, não é trava), e o job real (5-16 min dependendo do checkpoint e do
+tamanho do prompt) sempre passava dos 300s. Corrigido pra 900s numa
+primeira rodada, e essa AINDA não bastou pra um prompt mais longo (943s) --
+subido de vez pra 1800s. **O mesmo bug existia, idêntico, no watchdog
+compartilhado do LTX** (`generate_storyboards.py::_start_stall_watch_once`,
+300s desde o §3.60) -- corrigido junto, mesmo raciocínio, mesmo valor.
+
+**Lição a guardar**: se um servidor ComfyUI "morrer sem traceback" num
+ponto específico e reproduzível, suspeitar do watchdog ANTES de suspeitar
+de crash nativo/driver -- comparar o timestamp da morte contra
+`stall_seconds` configurado antes de investigar mais a fundo.
+
+## 3.63 TensorRT: VAE do MiniMax H3 compilou e funcionou, mas piorou; o transformer está bloqueado por kernels sem exportação ONNX (2026-09-06)
+
+Depois do §3.62, usuário perguntou se dava pra ir além: TensorRT pro
+transformer inteiro, "unificando a execução na GPU". Duas frentes:
+
+**VAE do MiniMax H3 -- caminho real, existente, testado**: achado
+`ComfyUI-H3VAE_TRT` (github.com/lihaoyun6), node de terceiros que já faz
+TensorRT da VAE de vídeo do MiniMax H3 (não inventado nesta sessão). ONNX
+oficiais de `lihaoyun6/MiniMax-H3-VAE-ONNX` (decoder 4,85 GB + encoder
+361 MB) compilaram em ~40s cada, sem erro (um `UnicodeEncodeError` no
+`print()` de um emoji, cosmético -- o engine já tinha sido escrito em disco
+antes da linha que crashou). `minimax_h3_backend.py` ganhou
+`MINIMAX_H3_TRT_VAE=1`, troca o node 119 (VAELoader) inteiro pro
+`MiniMaxH3TRTVAELoader`.
+
+**Resultado: mais lento, não mais rápido** -- o oposto da promessa do node
+("até 1,7x"). Causa: `ComfyTRTVAE.__init__` registra o TAMANHO DO ARQUIVO
+do engine (~4,85 GB) como orçamento de VRAM que o `TRTModelPatcher` reporta
+pro gerenciador de memória do ComfyUI, mesmo ANTES do engine carregar de
+verdade na GPU (`load_to_gpu()` é lazy). Isso faz o ComfyUI achar que já
+tem 4,85 GB reservados e empurra o TRANSFORMER pro modo lowvram --
+confirmado no log ("loaded partially... lowvram patches: 22" em vez do
+"loaded completely" normal). Modo lowvram com os kernels quantizados
+customizados (`asym_w4a8_int8`/`convrot_w4a4`) é visivelmente mais lento
+(w4a8 + VAE TRT: 864s contra 554-704s sem) ou trava de vez com FP8+INT8
+(que já usa mais VRAM sozinho -- watchdog matou aos 939s, mesmo com o fix
+do §3.62 aplicado). **Não recomendado.**
+
+**Transformer inteiro em TensorRT -- testado de verdade, não só
+pesquisado**: antes de investir em build, o usuário pediu uma checagem de
+viabilidade barata. Primeiro, o hardware: FP8 no TensorRT só acelera em
+Tensor Cores FP8 nativos (Hopper/Ada Lovelace) -- a 3090 é Ampere (compute
+8.6), não tem esse silício. FP8 nem entra em consideração aqui.
+
+Pra FP16: construída uma instância mínima de `comfy.ldm.lightricks.
+av_model.LTXAVModel` (num_layers=1) e tentado `torch.onnx.export()` --
+falhou nos dois exportadores (legado TorchScript e o novo dynamo/torch.
+export) no PRIMEIRO kernel customizado testado, `rms_adaln`:
+
+```
+DispatchError: No ONNX function found for comfy_kitchen.rms_adaln
+Failure message: No decompositions registered for the real-valued input
+```
+
+`comfy.quant_ops.ck.rms_adaln` e `apply_rope` (RoPE) são chamados em TODA
+camada do transformer, inclusive na variante bf16 "sem quantização" --
+não são específicos dos checkpoints quantizados. Registrados como custom
+op do PyTorch (`comfy_kitchen::rms_adaln`), sem função ONNX nem
+decomposição registrada em lugar nenhum. **Não é bloqueio fundamental de
+arquitetura** -- RMS-AdaLN e RoPE são operações padrão, decompor em ops
+ONNX primitivas é factível (outros modelos com RoPE exportam rotineiramente)
+-- mas é trabalho de engenharia real (escrever e validar numericamente a
+decomposição de cada kernel, pelo menos `rms_adaln` e `apply_rope`, mais os
+de quantização se quiser aproveitar os checkpoints comprimidos), não
+configuração. Somado ao risco de orçamento de VRAM já confirmado na VAE
+(§ acima) -- um engine do transformer, a peça MAIOR do grafo, correria o
+mesmo risco em escala maior. **Não recomendado seguir**, dado o retorno já
+obtido do caminho GGUF (§3.62) sem nenhum desse risco.
+
+**C/C++ nativo (stable-diffusion.cpp / ltx.cpp) pro 2.3**: usuário
+perguntou se essas opções (pesquisadas antes desta sessão, ver memória de
+projeto "motores C/C++ pesquisados") já tinham sido testadas de fato --
+não, só pesquisa de documentação, nenhum binário baixado/compilado. Pediu
+pra só guardar a possibilidade, sem executar agora.
+
+## 3.64 Seletor de variante na UI do LTX-2.5, e quase-perda de dados no gerador das UIs 2.5 (2026-09-06/07)
+
+Adicionado um dropdown "Model variant" (lê `ltx25_backend.VARIANTS` +
+`GGUF_VARIANTS` ao vivo, sem lista hardcoded) na UI que `start_webui_25.bat`
+sobe (`web_ui_v4_25.py`). Como esse arquivo é GERADO por `_make_25_uis.py`
+a partir de `web_ui_v4.py` (2.3) via substituição de texto por âncora, a
+mudança foi feita no gerador, não no arquivo final -- editar o `_25.py`
+direto seria sobrescrito na próxima geração.
+
+No processo, duas âncoras do gerador (`demo.launch(...)`, em dois jobs
+diferentes) estavam desatualizadas desde a migração pro Gradio 6 (`theme=`/
+`css=` moveram pro `launch()`) -- o gerador falhou alto, como projetado
+("Every substitution is asserted"), em vez de escrever um arquivo
+silenciosamente errado. Corrigidas as duas âncoras.
+
+**Quase-perda de dados real**: `_make_25_uis.py` regenera as 4 UIs 2.5 de
+uma vez (não só a que estava sendo editada). `music_maker_ui_v2_25.py`
+tinha um seletor de upscale (Real-ESRGAN, modelo+escala, §3.18) feito à
+mão DEPOIS da última geração -- não existe no `music_maker_ui_v2.py` (2.3)
+nem no script gerador. Regenerar apagou 61 linhas dele silenciosamente
+(o gerador só falha alto quando uma ÂNCORA não bate, não quando o
+resultado diverge do que já estava no disco). Só foi pego porque `git diff
+--stat` foi checado por reflexo logo depois; sem isso, a perda passaria
+batida até alguém notar o seletor sumido rodando a UI. Revertido (`git
+checkout -- music_maker_ui_v2_25.py`) só esse arquivo -- os outros dois
+(`music_maker_ui_v3_25.py`, `film_maker_ui_v4_25.py`) foram confirmados
+IDÊNTICOS ao HEAD por `git hash-object` (a marca "M" do `git status` pra
+eles era só um flag de índice desatualizado, não mudança de conteúdo real).
+
+**Lição pra guardar**: depois de QUALQUER `python _make_25_uis.py`, checar
+`git status --short *_25.py` e depois `git diff` de cada arquivo
+modificado (não confiar só no `--stat`, e não confiar só no "M" do status
+sem confirmar por `git diff`/`hash-object` se ficar em dúvida). Reverter
+qualquer arquivo cuja diff não seja exatamente a mudança pretendida.
+
+## 3.65 Variantes testadas em §3.62 ligadas na cadeia de decupagem (2026-09-07)
+
+`web_ui_v4_25.py` (§3.64) já tinha o seletor pro LTX 2.5 sozinho; faltava a
+cadeia de decupagem (`run_decupagem.py`/`decupagem_ui.py`), que usa os DOIS
+motores (LTX 2.5 e MiniMax H3) e não tinha nenhum dos dois seletores.
+
+**`minimax_h3_backend.py`**: `UNET_FILENAME`/`CLIP_FILENAME` liam só
+`MINIMAX_H3_UNET`/`MINIMAX_H3_CLIP` (dois nomes de arquivo, exigindo decorar
+o par certo). Ganhou `MINIMAX_VARIANTS` (`fp8int8`/`w4a8`/`gguf-q4km`),
+nomeando os pares já medidos em §3.62 -- um interruptor só
+(`MINIMAX_H3_VARIANT=w4a8`), mesma ideia do `VARIANTS`/`GGUF_VARIANTS` do
+`ltx25_backend.py`. `MINIMAX_H3_UNET`/`MINIMAX_H3_CLIP` continuam
+funcionando por cima (setar um dos dois direto ainda vence) -- nada quebra
+pra quem já usava a forma antiga.
+
+**`run_decupagem.py`**: `--ltx-variant {distilled,dev,gguf-q6k}` e
+`--minimax-variant {fp8int8,w4a8,gguf-q4km}`, default `distilled`/`fp8int8`
+(o que já era o comportamento sem a flag). Setam `os.environ["LTX25_VARIANT"]`/
+`os.environ["MINIMAX_H3_VARIANT"]` logo antes do `passo("5-D video", ...)` --
+`passo()` roda o subprocesso herdando o `os.environ` atual (não passa `env=`
+próprio), e `ltx25_backend`/`minimax_h3_backend` só leem a variante uma vez,
+na carga do módulo, então setar antes do subprocesso novo é suficiente.
+
+**`decupagem_ui.py`**: dois dropdowns novos na aba Motores, com o mesmo
+texto medido do §3.62 no `info=` (não só o nome da variante -- o número
+justifica a escolha). Testado no navegador: os dois valores chegam certos
+no dropdown e a função `_argv()` monta a linha de comando completa e correta
+(`--ltx-variant gguf-q6k --minimax-variant w4a8`, testado com um dry-run
+direto em Python, sem precisar de GPU).
+
+**Cuidado com o watchdog, verificado**: `gpu_watchdog.StallWatch` (§3.60,
+`stall_seconds` subido pra 1800 no §3.62) já cobre com folga as cinco
+combinações medidas (4min25s a 16min26s) -- nada nesta mudança toca o
+watchdog, só a escolha de QUAL arquivo de checkpoint carrega. Confirmado
+que nenhum valor de timing measured chega perto do limiar de 1800s.
+
+**Não tocado**: os outros 3 UIs geradas por `_make_25_uis.py`
+(`music_maker_ui_v2_25.py`, `music_maker_ui_v3_25.py`,
+`film_maker_ui_v4_25.py`) não usam MiniMax H3 e não pediram o seletor de
+LTX 2.5 nesta rodada -- ficam de fora até serem pedidas, pelo mesmo motivo
+do item 13 da lista de próximas etapas (o seletor de upscale também só foi
+ao v2_25).
+
+## 3.66 Auditoria da corrida `20260907_ltx_distilled` + causa raiz real do HTTP 500 (2026-09-07)
+
+Usuário pediu avaliação crítica do filme montado (vídeo + crítica externa
+colada). Assisti (frames extraídos a cada 3s) e confirmei visualmente: (1)
+duplicação de personagem por volta de 15s -- duas Seo-yeon no mesmo plano,
+limite do design de referência única; (2) cobertura quase 100%
+close-up/extreme-close-up, sem plano aberto nem two-shot depois da abertura
+-- efeito direto do fallback (todo plano vira 1 fala = 1 setup fixo,
+`shot_plan.py` nunca gera plano de ação); (3) borrão/ghosting num quadro por
+volta de 117s, perto do intervalo que a crítica externa apontou. Consertos
+aplicados no mesmo lote:
+
+- **`xtts_worker.py`**: `_LIMPA_PARA_MODELO` só removia reticência antes de
+  mandar o texto pro XTTS -- ponto/exclamação/interrogação continuavam
+  literais, e o XTTS-v2 em pt-BR às vezes vocaliza a pontuação em vez de só
+  pausar (usuário CONFIRMOU ouvindo o áudio). Generalizado pros quatro sinais;
+  a pausa continua vindo 100% de código (`_pausa_apos` lê a frase ORIGINAL).
+- **`parse_screenplay.py`**: 3 tentativas com backoff na chamada Ollama do
+  enriquecimento (antes: uma falha isolada matava a cena pro resto da
+  corrida inteira).
+- **`cast_characters.py`**: nova auditoria de completude do descritor
+  (`_check_descriptor_completeness`, bilíngue PT/EN) -- checa as 4
+  categorias exigidas pelo `CAST_SYSTEM_PROMPT` e, se faltar alguma e houver
+  motor Ollama, faz uma segunda chamada pedindo só o que falta. Resultado
+  grava em `cast.json` (`descriptor_gaps`). Além disso o `CAST_SYSTEM_PROMPT`
+  passou a exigir roupa coerente com papel/cenário (o snippet "novo aluno"
+  já chegava no prompt antes, mas nada mandava usar isso pra roupa -- o
+  Min-jae saiu com moletom de rua numa cena de colégio).
+
+**A causa raiz do HTTP 500 original NÃO era transiente.** Relançar a
+decupagem com essas correções (`20260907_ltx_gguf`, stills novos + variante
+`gguf-q6k`) bateu no MESMO HTTP 500 na etapa de enriquecimento, três vezes
+seguidas (as 3 tentativas do retry novo). Investigação: reproduzi a chamada
+exata fora do pipeline e capturei o corpo real do erro (o pipeline só loga
+`HTTP Error 500`, sem corpo) -- `{"error":"an error was encountered while
+running the model: CUDA error: an illegal memory access was encountered"}`.
+Reiniciar o Ollama não resolveu; `nvidia-smi --gpu-reset -i 0` (suportado
+nesta 3090, que não é a GPU de display) também não. Bisseção por tamanho de
+prompt isolou: **é o `qwen3.6-35b-a3b:latest` especificamente, e só em
+prompt longo** -- curto e médio passam, o prompt real de enriquecimento
+(~8k caracteres) falha sempre. `qwen2.5:32b-instruct-q4_K_M` roda o MESMO
+prompt sem erro (~41s, JSON válido). Ver nota nova em `CLAUDE.md` (seção
+Ollama). Não investigado a fundo: se é bug do llama.cpp com arquitetura MoE
+em contexto longo, ou do GGUF específico desse modelo -- troca de motor foi
+o suficiente pra desbloquear a produção.
+
+**Corrida `20260907_ltx_gguf` interrompida a meio caminho** (etapa de
+stills) a pedido do usuário assim que a causa raiz foi confirmada -- os
+stills gerados até ali usavam o plano de decupagem degradado (mesmo
+fallback da corrida anterior) e foram descartados. Retomar com
+`--engine qwen2.5:32b-instruct-q4_K_M` em run-dir novo.
+
+## 3.67 Travamento do estágio de vídeo GGUF: race condition no offload assíncrono do ComfyUI (2026-09-07)
+
+Continuação do §3.66: com o enriquecimento corrigido, a corrida
+`20260907_ltx_gguf2` (stills reaproveitados, 42 planos) travou de forma
+intermitente na etapa de vídeo -- 3 de 8 planos processados bateram no
+`gpu_watchdog.StallWatch` (`mesmo job rodando ha 1802s`, GPU 100%/23,9-24,2
+de 24,5 GB), sempre no mesmo `stall_seconds=1800`.
+
+**Primeira hipótese, DESCARTADA por medição**: `--disable-dynamic-vram`
+(obrigatório pro bf16, ver seção LTX-2.5 do CLAUDE.md) incompatível com
+GGUF -- o próprio log do ComfyUI avisa na subida ("if you use gguf we
+recommend keeping dynamic vram enabled"). Corrigido em
+`generate_storyboards.py::comfy_launch_args()` (lê `LTX25_VARIANT`/
+`MINIMAX_H3_VARIANT` e omite a flag pra variante `gguf*`) -- mas o MESMO
+travamento se repetiu depois, com o log confirmando "DynamicVRAM support
+detected and enabled" (a flag realmente não foi mais passada). A correção
+ficou (é logicamente correta e documentada pelo próprio ComfyUI-GGUF), mas
+não era a causa raiz sozinha.
+
+**Causa raiz real, isolada no log bruto do ComfyUI (`logs/comfyui_ltx25.log`)**:
+nos planos que travam, aparece `got prompt` e a barra de progresso do
+sampler (`0%| | 0/8 [00:00<?, ?it/s]`) **nunca aparece** -- outro `got
+prompt` chega antes (o watchdog matou e a cadeia reenfileirou o mesmo
+plano). Nos planos que fecham, a barra sempre aparece em segundos (pior
+caso medido: 106s de "Model Initializing") e o job termina entre 115s e
+600s. Ou seja: quando trava, trava ANTES do sampler começar -- durante
+carregamento/dequantização dos pesos GGUF ou VAE -- não durante a geração.
+Isso é assinatura de race condition, não de geração lenta: o próprio
+ComfyUI loga `Using async weight offloading with 2 streams` e
+`comfy-aimdo NVML pressure enabled` na subida -- o sistema de
+offload/dequantização assíncrona do GGUF sob VRAM perto do teto (23,9-24,2
+de 24,5 GB, com a VAE de áudio + VAE de vídeo + still de referência +
+`audio_conditioning` todos concorrendo por espaço) tem uma chance real de
+nunca resolver a dependência entre as duas streams. NÃO É determinístico
+por tamanho de plano (planos de 89-153 frames falharam E completaram em
+tentativas diferentes), mas planos mais longos (281 frames) pareceram mais
+propensos. NÃO INVESTIGADO a fundo por estar dentro do ComfyUI
+core/comfy-aimdo/ComfyUI-GGUF (código vendorizado, fora do escopo de
+correção direta deste projeto -- ver a seção "Bugs do ComfyUI vendorizado"
+do CLAUDE.md).
+
+**Mitigação aplicada** (não é a correção do bug, é reduzir o custo de
+contornar): `generate_storyboards.py::_start_stall_watch_once()` agora usa
+`stall_seconds=900` (não 1800) e `max_auto_recoveries=4` (não 2)
+especificamente quando `LTX25_VARIANT`/`MINIMAX_H3_VARIANT` começa com
+`gguf` -- o pior caso legítimo já medido pro GGUF é ~700s (600s de geração
++ ~106s de init), 900s cobre com folga sem herdar os 1800s de espera morta
+do caso bf16 (que continua em 1800s/2 tentativas, sem mudança -- aquele
+número vem de um job bf16 genuinamente lento, 1087s, não de uma trava).
+Como a race é intermitente (o mesmo plano falhou numa tentativa e fechou
+normal na seguinte, em servidor reiniciado), mais tentativas mais rápidas
+tende a terminar a cena inteira em menos tempo de parede que poucas
+tentativas lentas.
+
+**Se isso continuar sendo um problema**: próximos passos possíveis, não
+tentados ainda -- (1) checar se existe uma flag do ComfyUI pra desligar
+especificamente o offload assíncrono (`--disable-async-offload` ou
+equivalente, não confirmado que exista) mantendo dynamic VRAM ligado; (2)
+abrir uma issue upstream no ComfyUI-GGUF/comfy-aimdo citando a assinatura
+exata (`got prompt` sem barra de progresso); (3) testar se aumentar a
+margem de VRAM livre (menos still de referência, resolução menor, ou
+`--reserve-vram`) reduz a frequência da race, já que ela parece mais
+provável perto do teto de 24GB.
+
+## 3.68 Teste A/B de continuidade: multishot nativo vs. encadeamento por último frame, LTX-2.5 vs. MiniMax H3 (2026-09-08)
+
+Usuário trouxe uma proposta externa (GPT) sobre arquitetura de continuidade
+(blocos contínuos, keyframes de estado, First/Last Frame, "Continuity
+Director"). Antes de redesenhar o pipeline, testei em qualidade de produção
+(960x544, distilled/turbo, áudio real) os dois mecanismos mais concretos e
+baratos de verificar, nos planos 2+3 da cena do Hanul (MIN-JAE close-up →
+SEO-YEON medium, corte de personagem no meio):
+
+**Teste 1 -- multishot nativo (1 geração, corte pedido explicitamente no
+prompt).** Confirmado que o vendorizado aceita: `gemma_t2v_system_prompt.txt`
+diz "no timestamps or cuts ... unless explicitly requested" -- nunca
+tínhamos pedido. Duas imagens de referência condicionando frames diferentes
+(`LTXVAddGuideAdvanced` no LTX; `--ref-image` duplo no MiniMax).
+- **LTX-2.5 distilled**: FUNCIONOU -- corte real de Min-jae para Seo-yeon no
+  frame pedido (112/217). 1097,5s. Degradação visível no frame final (mecha
+  de cabelo com franja avermelhada/distorção) -- mesmo padrão de "qualidade
+  cai com a janela" do §3.49, agora confirmado em janela ainda maior (217
+  frames).
+- **MiniMax H3 turbo**: FUNCIONOU, corte igualmente limpo, SEM a degradação
+  do LTX no frame final, em 481,5s -- menos da metade do tempo.
+
+**Teste 2 -- encadeamento por último frame, trocando de personagem
+(condiciona o plano da Seo-yeon pelo ÚLTIMO FRAME do plano do Min-jae, texto
+pede a mulher).**
+- **LTX-2.5 distilled**: FALHOU de forma limpa e reproduzível -- o vídeo
+  resultante manteve o MIN-JAE, ignorando por completo a descrição textual
+  da Seo-yeon. Confirma e agrava o achado do §3.49 ("vazamento por imagem,
+  não por texto"): aqui a imagem não vazou um detalhe, **sobrepôs a
+  identidade inteira**. 695,4s.
+- **MiniMax H3 turbo**: FUNCIONOU -- gerou a mulher corretamente (o Min-jae
+  aparece desfocado de canto, como reação/two-shot natural), respeitando o
+  texto mesmo condicionado pela imagem do personagem errado. 587s (plano 1)
+  + geração do plano encadeado.
+
+**Leitura**: pra ESTA cena (diálogo shot/reverse-shot entre dois
+personagens), o encadeamento por último frame só é seguro no LTX-2.5 quando
+o próximo plano é do MESMO personagem (ação contínua) -- encadear
+cegamente em corte de personagem quebra a identidade. O MiniMax H3 não tem
+essa limitação nos dois testes feitos aqui (amostra pequena, não
+generalizar sem mais casos). O multishot nativo (Teste 1) é a técnica mais
+robusta dos dois pra corte de personagem dentro de uma cena, nos dois
+motores -- e o MiniMax saiu mais rápido E sem o artefato de degradação
+final do LTX.
+
+**Não testado**: cenas mais longas que 2 cortes numa única geração (limite
+prático desconhecido); áudio de diálogo real no MiniMax (backend não expõe
+`--ref-audio` na CLI, só `--ref-image` -- o grafo aceita `<Audio 1>` citado
+no prompt segundo o próprio docstring do `minimax_h3_backend.py`, mas isso
+nunca foi conectado; os testes MiniMax aqui rodaram SEM áudio de diálogo
+real, só texto+imagem); descarte de rascunho em poucos passos (testado à
+parte, ver abaixo, resultado negativo).
+
+**Descartado no caminho: "rascunho" de poucos passos como preview barato.**
+Tentativa com `--variant dev --steps 3`, resolução reduzida (384x256):
+714,1s (MAIS LENTO que uma geração completa de 8 passos distilled) e só o
+primeiro frame saiu legível -- todo frame com movimento real saiu em
+borrão/mosaico severo, inútil pra avaliar blocking/gesto. CFG real da `dev`
+custa caro demais por passo pra compensar ter só 3. Não vale a pena; se
+quiser preview barato, testar resolução reduzida em `distilled`/`gguf`
+(que já são rápidas), não cortar passos da `dev`.
+
+Arquivos em `outputs/_draft_test/` (pasta de teste, não faz parte de
+nenhuma corrida de produção -- pode ser apagada quando não precisar mais
+comparar).
+
+## 3.69 Mesmo teste em ~20-24s: LTX-2.5 degrada no final, MiniMax H3 não (2026-09-08)
+
+Continuação do §3.68 -- mesma técnica (multishot nativo, corte pedido no
+prompt, 2 imagens de referência condicionando frames diferentes), agora com
+4 planos/3 cortes (MIN-JAE→SEO-YEON→MIN-JAE→SEO-YEON, planos 2-5 da cena do
+Hanul) em vez de 2 planos/1 corte, produção completa (960x544, áudio real
+concatenado das 4 falas).
+
+**LTX-2.5 distilled, 558 frames (~24,4s), 1021s de geração**: os 3 cortes
+funcionam nos pontos certos (identidade troca corretamente a cada vez), mas
+o **último trecho (~10% final do clipe) degrada severamente** -- rosto
+duplicado/fantasma, colar flutuando sobreposto, distorção clara. Mesmo
+padrão do §3.68 (frame final do teste de 9,25s já mostrava franja
+avermelhada), só que MUITO mais grave numa janela maior. Confirma que é
+**teto de duração, não de número de cortes** -- o degrade cresce com o
+comprimento absoluto do clipe.
+
+**MiniMax H3 turbo, ~23,6s, 1240,7s de geração**: os mesmos 3 cortes
+funcionam, E **nenhuma degradação em nenhum ponto do clipe**, incluindo o
+frame final (~23,5s) -- limpo do início ao fim. Detalhe extra: um broche/
+etiqueta no uniforme da Seo-yeon (não pedido, hallucinado pelo modelo)
+apareceu consistentemente nos dois planos dela, sinal de que o MiniMax
+também generaliza bem detalhes não-solicitados entre cortes da mesma
+identidade.
+
+**Leitura**: nesta amostra (2 cenários, ~9s e ~24s), o MiniMax H3 não tem o
+teto de degradação por duração que o LTX-2.5 distilled tem -- questiona se
+`distilled` deveria continuar sendo o motor padrão pra planos/blocos mais
+longos que ~10s. Tempo de geração inverteu entre os dois testes (MiniMax
+mais rápido no de 9s, LTX mais rápido no de 24s) -- não há motor
+uniformemente mais rápido nesta amostra pequena, mudar de motor por
+velocidade sozinha não se sustenta ainda.
+
+**Não testado**: onde exatamente fica o teto de degradação do LTX (entre
+9s e 24s -- não isolado); se o MiniMax também degrada em durações ainda
+maiores (30s+, não tentado); áudio de diálogo real no MiniMax (mesma
+lacuna do §3.68, `--ref-audio` não exposto na CLI).
+
+Arquivos em `outputs/_draft_test/ltx_20s_multishot.mp4` e
+`minimax_20s_multishot.mp4`.
+
+## 3.70 Contact sheet dos 42 stills publicado como Artifact (2026-09-08)
+
+A pedido do usuário ("mostre os stills e os textos que os geraram"),
+publiquei uma galeria HTML (`outputs/_draft_test/stills_gallery.html`,
+thumbnails JPEG re-comprimidos embutidos em base64, ~0,4 MB total) com os
+42 stills da corrida `20260907_ltx_gguf2` lado a lado com o prompt EXATO
+que o `qwen2.5:32b` escreveu pra cada um (descritor de personagem +
+enquadramento), mais enquadramento/ângulo/movimento, seed e score de
+consistência quando existente. Filtro por personagem. Não é um artefato
+de produção -- é ferramenta de auditoria visual, útil pra qualquer revisão
+futura de qualidade de still sem precisar abrir 42 arquivos PNG um a um.
+
+## 3.71 Três lacunas apontadas pelo usuário, verificadas no código (2026-09-08)
+
+**1. O still não recebe ação/gesto -- confirmado no código.**
+`shot_plan.py::_storyboard_prompt()` (linha 374, prompt do STILL) só recebe
+`framing, angle, subject, location, time_of_day, look, descriptor,
+screen_side, interior` -- sem nenhum campo de ação. `_video_prompt()`
+(linha 444) recebe `action` (o `beat_visual` do enriquecimento) e até tem
+uma tabela de gesto por emoção (`EMOCAO_VISIVEL`, ex. "jaw clenched, brow
+furrowed, sharp forceful gestures"), mas isso nunca chega ao still. Efeito
+prático: a imagem que ancora cada plano (referência do I2V) é sempre um
+retrato neutro parado, e o vídeo tem que migrar sozinho, sem pose inicial
+compatível, pro gesto que o prompt de vídeo pede. Fix proposto, não feito:
+`_storyboard_prompt` ganhar um parâmetro de pose leve (derivado do mesmo
+`action`/`beat_visual` que já existe, sem duplicar trabalho de
+enriquecimento).
+
+**2. Falta etapa de consistência real (sheet/LoRA) -- sem novidade, registrado
+formalmente.** Não existe geração de character sheet (múltiplos ângulos) nem
+LoRA de personagem conectados à decupagem. `consistency_audit.py` só AUDITA
+(já ligado nesta corrida, threshold 0.3), não corrige. `character_sheet_
+flux_webui` existe como ferramenta separada, nunca integrada ao
+`cast_characters.py`/`render_shots.py`. Trabalho de implementação real, fora
+do escopo de um teste rápido.
+
+**3. Teste real com Fish Speech** (servidor subido via `START_API.ps1`,
+health-check confirmado antes de gerar). 4 falas sintetizadas com o MESMO
+texto/voz/emoção do XTTS já usado na produção (2 Seo-yeon, 2 Min-jae,
+emoções teasing/playful/confused/embarrassed via `cast.json`). Resultado
+qualitativo (áudio enviado ao usuário, avaliação de expressividade é dele,
+não medida aqui por metrica confiável): Fish saiu consistentemente MAIS
+CURTO que o XTTS na mesma fala (line00: 4,09s contra 5,85s; line01: 2,60s
+contra 4,63s; line05: 1,49s contra 1,90s; só line04, a mais longa, ficou
+igual: 11,33s contra 11,24s) -- sinal de fala mais rápida/pausas mais
+curtas, não avaliado se isso é ganho (mais dinâmico) ou perda (menos
+peso dramático) sem ouvir. Faixa dinâmica (proxy grosseiro, RMS por janela
+de 50ms) saiu menor no Fish em 3 das 4 falas -- não é medida confiável de
+"expressividade", só um sinal técnico bruto.
+
+Arquivos em `outputs/_draft_test/fish_test/`.
+
+**Item 1 implementado e validado visualmente no mesmo dia.**
+`_storyboard_prompt()` ganhou o parâmetro `pose` (primeira frase do mesmo
+`beat_visual`/`acao` já calculado pelo chamador, fraseada como "caught
+mid-gesture: ..."), conectado nos dois pontos que constroem o still
+(`shot_plan.py`, plano normal e o refinamento opcional de câmera via LLM).
+Teste A/B direto (`generate_scene_storyboard`, mesma referência/seed/
+descritor, SD3.5): SEM pose saiu retrato neutro parado, olhar reto, sem
+expressão; COM pose ("Seo-yeon smiles and extends her hand toward Min-jae
+in greeting") saiu sorrindo e com a mão estendida num gesto de
+cumprimento -- exatamente o pedido. Vale só pra próximas gerações de
+stills; a corrida `20260907_ltx_gguf2` já tem os stills antigos em cache
+(chave de cache muda com o prompt, então rodar de novo REGERA os 42 stills,
+não é troca cosmética). Arquivos em `outputs/_draft_test/pose_test/`.
+
+## 3.72 Fase A da consistência de personagem: referência escolhida por centralidade, não por sorte (2026-09-08)
+
+Investiguei `packages/ltx-trainer` (treino de LoRA de vídeo do LTX-2, já
+vendorizado no repo) antes de desenhar esta fase -- **inviável nesta
+máquina**: a própria documentação pede "GPU with sufficient VRAM -- 80GB
+recommended" e "Linux with CUDA -- the trainer requires triton, which is
+Linux-only" (esta máquina: 1x RTX 3090 24,5GB, Windows). LoRA de vídeo fica
+como stretch goal fora de escopo até alguém testar WSL2 ou usar GPU na
+nuvem -- não tentado.
+
+**Fase A implementada em vez disso** (`script_pipeline/character_sheet.py`,
+novo módulo): em vez do `reference_image` de cada personagem vir do
+PRIMEIRO still que aconteceu de sair (design atual do `render_shots.py`,
+sem nenhum critério de qualidade), gera N candidatos (retrato neutro, sem
+ação/cenário, mesma descrição do `cast.json`, seeds diferentes) e escolhe o
+**medoid** -- o candidato com maior similaridade facial MÉDIA aos outros
+(via `consistency_audit.face_embedding`, mesmo motor insightface já
+validado). Intuição: se o modelo produz um cacho e um outlier pro mesmo
+prompt, o cacho é o que ele "quer" gerar consistentemente; ancorar nele
+tende a facilitar as gerações seguintes mais que ancorar num extremo.
+
+**Testado de ponta a ponta** no cast real (`20260907_ltx_gguf2`, FLUX, 4
+candidatos por personagem, 960x544): SEO-YEON 4/4 candidatos com rosto
+detectável, escolhida com similaridade média 0,614 aos outros três;
+MIN-JAE 4/4, escolhido com 0,583. Os 4 candidatos de cada personagem
+saíram visualmente muito parecidos entre si (mesmo traje, mesmo rosto) --
+sinal de que o descritor do `cast.json` já é forte o bastante pra guiar o
+FLUX com consistência alta mesmo sem nenhuma imagem de referência ainda.
+Achado lateral: o Min-jae manteve o mapa nas mãos nos 4 candidatos mesmo
+sem o prompt de referência pedir isso -- vazou do próprio descritor
+("A small, faded map... clutched in his hand"), confirmando que o
+descritor sozinho já carrega bastante peso visual.
+
+Aplicado em `characters/cast.json` desta corrida (substituindo
+`reference_image` pelo escolhido). Como a corrida já tinha os 42 stills
+gerados com a referência antiga, isso NÃO regera retroativamente nada --
+só vale pra uma corrida nova ou pra regenerar os stills a partir daqui.
+
+**Não feito ainda** (ficou fora desta fatia): (1) conectar como estágio
+formal do `run_decupagem.py` (hoje é só CLI standalone,
+`python -m script_pipeline.character_sheet --run-dir DIR --apply`); (2)
+gerar variantes de ÂNGULO (perfil, 3/4) além do frontal único, e fazer
+`render_shots.py` escolher a referência mais próxima do enquadramento do
+plano; (3) LoRA de imagem (Fase B do desenho original) -- ferramenta ainda
+não existe no repo, precisa ser adicionada.
+
+## 3.73 Character-sheet conectado como estágio formal do `run_decupagem.py` (2026-09-08)
+
+Continuação do §3.72 -- `character_sheet.py` era só CLI standalone; virou
+estágio `[C]` opt-in, entre `plano` e `stills` em `PARADAS`
+(`script_pipeline/run_decupagem.py`). Flags novas: `--character-sheet`
+(liga) e `--character-sheet-candidates` (padrão 4). Sem `--character-sheet`,
+zero mudança de comportamento -- é a mesma condição de opt-in dos outros
+recursos desta classe (`--consistency-threshold`, `--camera-llm`).
+
+Resumível como qualquer outro estágio: pula se
+`characters/sheet_report.json` já existir ("ja feito, reaproveitando"),
+mesmo padrão de `parse`/`cast`/`tts`. Não-obrigatório (`passo(...,
+obrigatorio=False)`) -- se falhar (GPU, ComfyUI), a corrida segue com o
+comportamento antigo (primeiro still vira referência), não trava.
+
+**Testado de ponta a ponta pelo caminho REAL** (subprocesso via `passo()`,
+não import direto como o teste do §3.72): `run_decupagem.py --ate sheet
+--character-sheet` na mesma corrida (`20260907_ltx_gguf2`, referência
+movida de lado antes pra forçar regeração). Resultado: reaproveitou parse/
+cast/tts (já prontos), rodou emocao/estrutura/plano de novo (esperado,
+fazem parte de `--ate sheet`), disparou `[C character-sheet]` como etapa
+própria, escolheu EXATAMENTE os mesmos candidatos de antes (seed fixo por
+personagem -- SEO-YEON 0,614, MIN-JAE 0,583, reprodutibilidade confirmada),
+gravou em `cast.json`, e parou limpo em `--ate sheet` sem seguir para
+`stills`. Rodado de novo, pulou corretamente ("ja feito, reaproveitando").
+
+## 3.74 `--ref-audio` implementado no MiniMax H3 + teste A/B de convenção de citação (2026-09-08)
+
+Usuário trouxe https://www.promptsama.ai/models/minimax-h3.html (guia de
+prompt de terceiros). Cruzado com o código real antes de aplicar qualquer
+coisa cegamente.
+
+**Confere com o que já fazíamos**: "uma referência = um trabalho declarado"
+(já era nossa prática, uma imagem por personagem); estrutura de corte por
+faixa de tempo (o que já tínhamos testado ad-hoc no §3.68/3.69).
+
+**Implementado -- áudio de referência real, a lacuna que já tínhamos
+identificado.** O grafo convertido (`base_api()`) confirma: `audio_vae`
+JÁ vem ligado em `MiniMaxH3ReferenceToVideo` (node 120,
+`minimax_h3_audio_vae_fp32.safetensors`, a MESMA VAE que decodifica o
+áudio de saída), mas nenhum `ref_audios.*` estava conectado -- o workflow
+oficial nunca trouxe isso pronto, só os 2 slots de imagem. Adicionado em
+`minimax_h3_backend.py`: `build_workflow()` cria nós `LoadAudio` por job
+(até 2, `N_REF_AUDIO_BASE`) e liga em `ref_audios.ref_audio_{i}`;
+`build_prompt_with_refs()` ganhou `n_audio_refs` (cita `<Audio N>`);
+`generate()`/CLI ganharam `--ref-audio` (0-2, WAV/MP3).
+
+**Teste real**: Seo-yeon, fala exata do roteiro ("Você está procurando a
+sala 2-B...") + `--ref-audio` = o mesmo `.wav` do XTTS já usado na
+produção, mesma referência de imagem (a escolhida por centralidade no
+§3.72/3.73). Rodou sem erro, 5,875s (pedido 5,85s), boca com variação
+clara e ativa entre frames (sinal de fala de verdade, não animação
+genérica) -- **conteúdo da fala (se é português correto/lip-sync
+acertado) não verificado aqui, precisa de ouvido humano**; vídeo enviado
+ao usuário.
+
+**Teste A/B de convenção de citação, `<Picture N>`/`<Audio N>` (padrão
+deste checkout) vs `ImageN`/`AudioN` (documentado na página, provavelmente
+pro produto/API hospedado da MiniMax, não necessariamente o mesmo parsing
+do node local)**: mesma cena, mesmo seed (42), única variável trocada.
+Resultado visual **praticamente idêntico** entre os dois -- mesma
+composição, boca nos mesmos pontos do tempo. Confirma o que o próprio
+código já comentava: a citação em texto é reforço, não o mecanismo
+principal (as referências condicionam pelo INPUT conectado do grafo,
+independente de como são citadas no prompt). **Decisão: manter
+`<Picture N>`/`<Audio N>`** -- sem ganho medido em trocar, e é a
+convenção já validada. Tempo de geração variou entre os dois (613,6s vs
+342,9s) mas isso é ruído de carga de modelo (o segundo já rodou com o
+servidor quente), não da convenção de citação -- não atribuir a diferença
+ao `tag_style`.
+
+**Confirmado pelo usuário, de ouvido** (2026-09-09): áudio e sincronismo
+labial saíram "praticamente iguais" entre as duas convenções -- fecha o
+teste A/B com resultado limpo nas DUAS dimensões (visual E áudio), não só
+visual. Reforça a decisão de manter `<Picture N>`/`<Audio N>`.
+
+**Não verificado**: se `--ref-audio` funciona bem com 2 áudios simultâneos
+(só testado com 1); se o modelo respeita fala em português tão bem quanto
+em inglês (todos os testes anteriores desta sessão com MiniMax usavam
+prompt em inglês; aqui o texto citado na fala é em português, dentro de um
+prompt em inglês -- combinação
+nova).
+
+## 3.75 LoRA nos stills (`decupagem_ui`), retry compartilhado auditado, revisão de character sheet na UI (2026-09-09)
+
+Pedido do usuário depois de portar as melhorias da decupagem para o projeto
+irmão `Storyboard-Director` (`E:\Users\home\Documents\Storyboard-Director`,
+standalone, geração de storyboard SEM vídeo) -- nesse porte, a opção de LoRA
+foi "iniciada" lá primeiro (plumbing pronto, pasta própria, sem LoRA curado
+ainda). Pedido de volta aqui: aplicar o mesmo em `decupagem_ui`, auditar o
+resto do `script_pipeline` por avanços aplicáveis, e implementar.
+
+**LoRA opcional nos STILLS** (nunca no vídeo -- os checkpoints de imagem
+FLUX/FLUX.1/SD3.5/SDXL não têm nada a ver com o transformer do LTX).
+`generate_storyboards.py` ganhou `available_loras_images()` (lista
+`models/loras_images/`, pasta NOVA e PRÓPRIA -- deliberadamente separada de
+`models/loras/`, que são LoRAs de vídeo do LTX e são INCOMPATÍVEIS com estes
+checkpoints de imagem) e `_apply_lora()`, que insere um `LoraLoaderModelOnly`
+entre o loader do checkpoint/UNET e quem consome `model` em cada uma das 5
+arquiteturas de workflow (`flux`, `flux-ref` -- a variante com
+`ReferenceLatent`, `flux1`, `sd35`, `sdxl`), reescrevendo o grafo já
+carregado do template em vez de duplicar JSON por combinação
+arquitetura×LoRA. `generate_scene_storyboard()` ganhou `lora_name`/
+`lora_strength`; a chave de cache em `render_shots.py::_still_key` passou a
+incluir os dois -- sem isso, ligar/desligar um LoRA (ou mudar a força)
+reaproveitaria o still antigo em silêncio, a mesma classe de bug que a
+chave já existia para evitar (motor, prompt, enquadramento).
+
+Threading completo até a UI: `run_decupagem.py --lora/--lora-strength`
+repassa pros dois subprocessos que geram imagem (`render_shots_stage`
+estágio 5-D e `character_sheet` estágio C); `decupagem_ui.py` ganhou um
+dropdown+slider na aba Motores, escaneado de `available_loras_images()` a
+cada boot da UI (pasta vazia hoje -- "iniciar a opção", não entregar um
+LoRA curado, mesma decisão do Storyboard-Director), e os 4 pontos de
+geração de imagem da UI (`rodar`/corrida completa, `regenerar_selecao`,
+`regenerar_still`, `gerar_sheet_personagem`) foram todos ligados ao mesmo
+par de controles.
+
+**Auditoria do resto do `script_pipeline`: retry-with-backoff só cobria
+`parse_screenplay.py`.** O fix de 2026-09-07 (§3.65/3.66 -- 3 tentativas com
+backoff curto contra falha HTTP transiente no Ollama) foi escrito DENTRO do
+loop inline de `parse_screenplay.py`, nunca portado pra função
+compartilhada. Achado ao procurar "quem mais chama Ollama sem retry":
+existem TRÊS implementações inline separadas, e nenhuma das três tinha o
+fix --
+
+- `story_structure.py::_call_ollama` -- a que `cast_characters.py` e
+  `prompt_polish.py` chamam. Uma falha transiente aqui perdia o descritor
+  de personagem (com a auditoria de completude do §3.66.1) ou o polimento
+  de prompt de uma cena inteira.
+- `shot_plan.py::_call_ollama_camera` -- usada por `--camera-llm`
+  (§3.59). Uma falha aqui derrubava o refino de câmera/luz da cena inteira
+  pro vocabulário padrão do estilo, em silêncio.
+- `emotion_director.py::_ollama` -- "uma chamada para o roteiro inteiro"
+  (o próprio docstring), então é onde uma falha transiente custa mais: o
+  ROTEIRO INTEIRO caía no fallback de palavra-chave por causa de UM HTTP
+  500 passageiro.
+
+As três ganharam o mesmo padrão de `parse_screenplay.py`: até 3 tentativas,
+`time.sleep(2)` entre elas, log de qual tentativa succeeded quando não foi
+a primeira. 404 (modelo inexistente) continua saindo direto, sem retry --
+não é falha transiente, tentar de novo não muda o resultado.
+
+**Character sheet automática (`--character-sheet`, §3.72/3.73) nunca tinha
+UI.** Existia no backend desde 2026-09-08 (`run_decupagem.py
+--character-sheet --character-sheet-candidates N`, escreve
+`characters/sheet_report.json` com todos os candidatos + o medoid
+escolhido), mas `decupagem_ui.py` só expunha a ferramenta MANUAL antiga
+(2026-09-03, "3 vistas lado a lado", sem escolha automática) -- a etapa
+nova nunca era alcançável pela UI, e mesmo quem rodasse via CLI não tinha
+como REVISAR ou TROCAR a escolha do medoid sem editar `cast.json` na mão.
+Fechado: checkbox+número na aba Motores liga o estágio; um botão "Revisar
+candidatos da última corrida" na aba Decupagem lê o `sheet_report.json` e
+mostra TODOS os candidatos de TODOS os personagens numa galeria, legendados
+com posição/similaridade/marca do escolhido; clicar num candidato preenche
+os campos do sheet MANUAL já existente (personagem + imagem), que já sabia
+gravar `reference_image` em `cast.json` -- reusa o caminho de escrita
+existente (`usar_sheet_como_referencia`) em vez de duplicar lógica de
+gravação. Testado ponta a ponta contra uma corrida real
+(`20260907_ltx_gguf2`, que já tinha sheet_report de uma sessão anterior):
+8 candidatos carregados, 2 personagens, legendas corretas, clique
+preenchendo os campos certos.
+
+**O que NÃO foi portado do Storyboard-Director** (avaliado, decidido não
+fazer agora): biblioteca de personagem CROSS-RUN (lá, personagens vivem
+fora de qualquer projeto e são reusáveis entre storyboards; aqui,
+`cast.json` é por corrida/filme, sem equivalente cross-run). Seria uma
+mudança estrutural bem maior -- pasta compartilhada fora de `outputs/`,
+UI de import/export entre corridas -- e não foi pedida explicitamente.
+Registrado como possível item futuro, não como lacuna esquecida.
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
 filme montado, do `prompt_polish` e do MiniMax H3. Itens fechados desde
 2026-08-26 foram removidos daqui -- procure pelo número da seção no changelog
-acima se precisar do histórico completo. Item 15 acrescentado em 2026-08-30.)*
+acima se precisar do histórico completo. Item 15 acrescentado em 2026-08-30.
+Item 17 acrescentado em 2026-09-06, depois do comparativo GGUF/checkpoint
+do §3.62. Item 18 acrescentado em 2026-09-07, ideia de API hospedada pro
+enriquecimento (§3.66/§3.67).)*
 
 ### P1 -- maior retorno, prontos para executar
 
@@ -3740,6 +5749,37 @@ outro processo (mesmo em outra placa) está segurando GPU no momento antes de
 declarar bug no pipeline. Duas vezes anteriores o usuário dispensou a
 investigação; se pedir de novo, comece por aqui.
 
+**16. Testar `continuous_chain.py` de verdade** (§3.49). Escrito e compilado
+hoje, nunca rodado. Primeiro teste: 4-6 chunks de ~2s (49 frames, a janela
+que o §3.47 mediu como mais estável) com `--prompt-file` variando a ação aos
+poucos, depois `video_doctor.py analyze --cuts` no resultado. Se o vídeo
+concatenado sair bem, o item real seguinte é decidir se vale escalar para
+minutos de verdade (dezenas de chunks) ou se o drift de identidade aparece
+antes disso e pede o LoRA de personagem mencionado no §3.49.
+
+**17. Testar `gguf-q6k` (LTX-2.5) com variante `dev`, `--two-stage` e
+keyframes** (§3.62). Só validado até agora com T2V/I2V simples e com
+`audio_conditioning`. Antes de trocar o padrão de produção de `distilled`
+pra `gguf-q6k` em qualquer fluxo que use essas três features, testar cada
+uma isoladamente -- o código de `_apply_audio_conditioning` já era
+deliberadamente variant-agnostic, mas isso não garante o mesmo pras outras
+três (STG do `dev`, o upscaler latente do two-stage, `LTXVAddGuideAdvanced`
+dos keyframes).
+
+**18. Avaliar API hospedada (NVIDIA build.nvidia.com, ex.:
+`nemotron-3-ultra-550b-a55b`) como motor de enriquecimento do
+`parse_screenplay`/`cast_characters`/`story_structure`, no lugar do Ollama
+local** (ideia registrada em 2026-09-07, ver §3.66/§3.67). Resolveria de vez
+a classe de problema medida com `qwen3.6-35b-a3b:latest` (crash de CUDA em
+prompt longo) e tira essa carga da mesma GPU que o ComfyUI disputa. Troca
+localizada -- cada um dos três módulos já isola a chamada LLM numa função
+só. Trade-offs a pesar antes de implementar: depende de internet + chave de
+API (custo por token, não confirmado se tem tier gratuito), adiciona
+latência de rede por cena, e manda o texto do roteiro pra um serviço
+terceiro (relevante se o material for proprietário). NÃO resolveria o
+travamento do GGUF no estágio de vídeo (§3.67) -- componente totalmente
+separado (ComfyUI local, não o LLM de enriquecimento).
+
 ### Adiado de propósito, com nota própria em §3.39
 
 Consolidar as 17 UIs duplicadas, trocar estado global por `Job` dataclass,
@@ -3750,13 +5790,26 @@ que já mexeu em quatro frentes sem suíte de UI para pegar regressão. Cada um
 
 ## 8. Como retomar
 
-*(atualizado em 2026-08-30.)*
+*(atualizado em 2026-09-07.)*
 
-**Sessão de 2026-08-30 em uma frase:** integração ChoreoEngine+LTX para cena
-de dança fechou de ponta a ponta (§3.46; detalhe em
-`ChoreoEngine/MEMORIAL.md` §31/§31.1) -- vídeo de ~12s entregue, bug de
-concatenação de áudio corrigido. Nada dos itens P1-P3 abaixo foi tocado hoje;
-a lista de 2026-08-29 continua valendo integralmente, com o item 15 novo.
+**Sessão de 2026-09-06/07 em uma frase:** comparativo real de checkpoint em
+três motores (§3.62-3.64) -- GGUF venceu 37% no LTX-2.5 (audio_conditioning
+confirmado compatível), FP8+INT8 virou o padrão do MiniMax H3 (mais rápido
+E melhor que o w4a8 antigo), TensorRT ficou testado e descartado tanto pra
+VAE (compilou, piorou o tempo) quanto pro transformer (bloqueado por
+kernels sem exportação ONNX, confirmado com um teste real, não só leitura
+de doc), e um bug real de watchdog (matava servidores saudáveis achando
+trava) foi achado e corrigido em dois lugares. Nada dos itens P1-P3 de
+2026-08-29 foi tocado nesta sessão; a lista continua valendo, com o item 17
+novo.
+
+**Se for continuar o trabalho de hoje:** ver §3.62 (item 17 da lista acima)
+pra testar `gguf-q6k` com `dev`/`--two-stage`/keyframes antes de considerar
+trocar o padrão de produção do LTX-2.5. `MINIMAX_H3_VARIANT=fp8int8` já é o
+padrão do MiniMax H3, nada pendente ali além de reavaliar se aparecer
+checkpoint novo. Vídeos de comparação em `outputs/teste_gguf25/`,
+`outputs/teste_minimax/` e `outputs/teste_cena_fantasia/` (cena real com
+diálogo, os 5 motores testados lado a lado).
 
 **Se for continuar a integração de dança:** script em
 `ChoreoEngine/bridge/dance_scene_test.py`, roda sozinho (não depende de UI

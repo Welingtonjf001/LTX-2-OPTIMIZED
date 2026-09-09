@@ -21,6 +21,37 @@ class ImageConditioningInput(NamedTuple):
     crf: int = DEFAULT_IMAGE_CRF
 
 
+class VideoHeadConditioningInput(NamedTuple):
+    """A short real clip (not a single static image) used to open a video with
+    genuine motion history instead of one frame -- unlike ImageConditioningInput,
+    this is encoded as a multi-frame latent so the VAE captures velocity/direction
+    across the frames, not just an appearance snapshot. See VideoHeadAction."""
+    path: str
+    num_frames: int
+    strength: float
+
+
+class VideoHeadAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,  # noqa: ARG002
+        namespace: argparse.Namespace,
+        values: list[str],
+        option_string: str | None = None,  # noqa: ARG002
+    ) -> None:
+        if len(values) != 3:
+            msg = f"{option_string} requires 3 arguments (PATH NUM_FRAMES STRENGTH), got {len(values)}"
+            raise argparse.ArgumentError(self, msg)
+        conditioning = VideoHeadConditioningInput(
+            path=resolve_path(values[0]),
+            num_frames=int(values[1]),
+            strength=float(values[2]),
+        )
+        current = getattr(namespace, self.dest) or []
+        current.append(conditioning)
+        setattr(namespace, self.dest, current)
+
+
 class VideoConditioningAction(argparse.Action):
     def __call__(
         self,
@@ -245,6 +276,22 @@ def basic_arg_parser(
             f"CRF is the optional H.264 compression quality (0=lossless, default: {DEFAULT_IMAGE_CRF}). "
             "Can be specified multiple times. Example: --image path/to/image1.jpg 0 0.8 "
             "--image path/to/image2.jpg 160 0.9 0"
+        ),
+    )
+    parser.add_argument(
+        "--video-head",
+        dest="video_head",
+        action=VideoHeadAction,
+        nargs=3,
+        metavar=("PATH", "NUM_FRAMES", "STRENGTH"),
+        default=[],
+        help=(
+            "PATH is a short video clip, NUM_FRAMES is how many of its frames to encode "
+            "(all three required). Unlike --image at frame_idx 0, this preserves real motion "
+            "(direction/speed/phase) across the encoded frames instead of a single static "
+            "appearance snapshot -- for continuing an action across chained clips. Replaces the "
+            "opening latent frame(s), same slot as --image ... 0 ...; don't combine the two at "
+            "frame_idx 0. Can be specified multiple times."
         ),
     )
     parser.add_argument(

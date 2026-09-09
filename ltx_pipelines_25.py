@@ -31,9 +31,14 @@ LTXVAudioVAEEncode and pinned by a per-modality noise mask, so the video is
 generated on top of the real music instead of one the model invents. See
 ltx25_backend._apply_audio_conditioning and MEMORIAL.md secao 3.15.
 
-Conditioning images: 2.5's single-stage graph takes ONE first-frame image. If
-several `--image` are passed, the one with the lowest latent index is used and
-the rest are reported as skipped.
+Conditioning images: the lowest-index `--image` becomes the first-frame
+condition (image_path/image_strength on ltx25_backend.generate). Any
+ADDITIONAL `--image` are forwarded as `keyframes` -- ltx25_backend chains them
+with LTXVAddGuideAdvanced (see _apply_keyframes there). CORRIGIDO 2026-09-04:
+até então TODO `--image` além do primeiro era silenciosamente descartado aqui
+mesmo com frame_idx != 0 -- ou seja, `continuous_chain.py --end-keyframe`
+nunca teve efeito nenhum na rota 2.5, sem erro nem aviso que dissesse isso
+claramente (só um log genérico "ignorada(s)"). Ver MEMORIAL.md secao 3.61.
 """
 import argparse
 import os
@@ -60,7 +65,8 @@ def main() -> int:
     # the practical selector for a UI run is the LTX25_VARIANT env var (which
     # ltx25_backend.DEFAULT_VARIANT reads); the flag is here for direct CLI use
     # and wins over the env var when given.
-    ap.add_argument("--variant", choices=sorted(ltx25_backend.VARIANTS),
+    ap.add_argument("--variant",
+                    choices=sorted(ltx25_backend.VARIANTS) + sorted(ltx25_backend.GGUF_VARIANTS),
                     default=ltx25_backend.DEFAULT_VARIANT)
     ap.add_argument("--steps", type=int, default=None, help="passos (só dev; padrão 15)")
     ap.add_argument("--video-cfg", type=float, default=ltx25_backend.DEV_VIDEO_CFG)
@@ -123,18 +129,35 @@ def main() -> int:
 
     image_path = None
     image_strength = 1.0
+    keyframes = None
     if args.image:
         ordered = sorted(args.image, key=lambda t: int(float(t[1])))
-        image_path = ordered[0][0]
-        # The caller's third field is the conditioning strength. It used to be
-        # dropped here, which mattered less than it looks: the graph itself was
-        # pinning strength to 0 -- see ltx25_backend, N_IMG2VID.
-        image_strength = max(0.0, min(1.0, float(ordered[0][2])))
-        print(f"[ltx25-shim] imagem de condicionamento (primeiro frame, "
-              f"força {image_strength}): {image_path}", flush=True)
-        if len(ordered) > 1:
-            print(f"[ltx25-shim] {len(ordered)-1} imagem(ns) adicional(is) ignorada(s): "
-                  "o grafo 2.5 single-stage aceita apenas o primeiro frame.", flush=True)
+        resto = ordered
+        # SO usa image_path/image_strength (o caminho "primeiro frame" de
+        # ltx25_backend) quando o item de indice mais baixo esta REALMENTE no
+        # frame 0. CORRIGIDO 2026-09-04 (MEMORIAL 3.61): antes disto, um
+        # unico --image com frame_idx != 0 (ex.: so um --end-keyframe, sem
+        # nenhuma imagem em 0) ainda caia aqui por ser o unico da lista, e
+        # virava condicionamento de PRIMEIRO frame silenciosamente -- o
+        # oposto do que o frame_idx pedia.
+        if int(float(ordered[0][1])) == 0:
+            image_path = ordered[0][0]
+            # O terceiro campo do chamador e a forca do condicionamento.
+            image_strength = max(0.0, min(1.0, float(ordered[0][2])))
+            print(f"[ltx25-shim] imagem de condicionamento (primeiro frame, "
+                  f"força {image_strength}): {image_path}", flush=True)
+            resto = ordered[1:]
+        # CORRIGIDO 2026-09-04 (MEMORIAL 3.61): estas eram descartadas aqui
+        # mesmo. ltx25_backend.generate JA aceita `keyframes` e encadeia via
+        # LTXVAddGuideAdvanced (ltx25_backend._apply_keyframes) -- só faltava
+        # este shim repassar em vez de jogar fora.
+        if resto:
+            keyframes = [(p, int(float(idx)), max(0.0, min(1.0, float(s))))
+                        for p, idx, s in resto]
+            print(f"[ltx25-shim] {len(keyframes)} imagem(ns) encadeada(s) "
+                  f"via LTXVAddGuideAdvanced: "
+                  + ", ".join(f"{p} @frame{idx} (força {s})" for p, idx, s in keyframes),
+                  flush=True)
 
     try:
         out = ltx25_backend.generate(
@@ -148,6 +171,7 @@ def main() -> int:
             seed=args.seed,
             image_path=image_path,
             image_strength=image_strength,
+            keyframes=keyframes,
             disable_audio=args.disable_audio,
             variant=args.variant,
             # On dev the UI's own step count is meaningful (real CFG ramp), so

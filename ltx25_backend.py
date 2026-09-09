@@ -152,8 +152,44 @@ VARIANTS = {
     # entao sobra o `eager` -- que faz o int8 funcionar, mas sem tensor core.
     # `--enable-triton-backend` liga o triton sem reinstalar nada.
     "distilled-int8": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+    # TESTADO 2026-09-02 (pedido do usuario, antes de rodar a cena wuxia): checkpoint
+    # comunitario "RedGraft", 17,0 GiB (menor que o int8 acima, 21,5 GiB). Metadata do
+    # safetensors confirma arquitetura AVTransformer3DModel (mesma do 2.5) e formato de
+    # quantizacao quant_format=="asym_w4a8_int8" -- peso INT4 assimetrico + ativacao
+    # INT8, com escala por grupo (weight_s_rel), escala por canal (weight_s_channel) e
+    # codebook Lloyd-Max opcional (weight_codebook). Esse formato JA e nativo do
+    # comfy/ops.py (linha ~1204-1223), nao precisa de custom node -- mais agressivo que
+    # o "distilled-int8" (que e so int8), nunca medido aqui antes. Arquivo em
+    # models/ (raiz), hardlink NTFS para ca (mesmo volume, custo zero).
+    "redgraft": "redgraftLTX25Fast2K_ltx25Redgraft.safetensors",
+    # TESTADO 2026-09-03 (pedido do usuario): 14,88 GiB, ainda menor que o
+    # redgraft (17,0 GiB). Ao contrario do redgraft (fork comunitario, origem
+    # incerta), este vem do CONVERSOR OFICIAL: metadata do safetensors tem
+    # `converted_by="ComfyUI Kitchen W4A8 INT8-Codebook Converter"` e
+    # `converter_url=github.com/Comfy-Org/comfy-kitchen/pull/99` -- mesmo
+    # projeto que ja da o kernel nativo `asym_w4a8_int8` (comfy/ops.py). Mesma
+    # arquitetura AVTransformer3DModel, `gemma_source_checkpoint` confirma
+    # parear com o mesmo gemma4-12b-ltx-v1 ja instalado (models/2.5/
+    # text_encoders/). Arquivo em models/ (raiz), hardlink NTFS pra ca.
+    "w4a8-v10": "ltx25DistilledW4A8_v10.safetensors",
 }
 DEFAULT_VARIANT = os.environ.get("LTX25_VARIANT", "distilled").strip().lower()
+
+# Teste comparativo 2026-09-06 (pedido do usuario): GGUF do transformer
+# distilled via ComfyUI-GGUF (mesmo node ja usado no 2.3), pra comparar
+# qualidade/velocidade contra o bf16 (40 GiB) sem sair do ComfyUI. Ao
+# contrario de VARIANTS (que so troca o nome do arquivo no UNETLoader
+# existente), GGUF precisa de um node DIFERENTE (UnetLoaderGGUF, saida
+# MODEL identica) -- por isso fica numa tabela separada, tratada abaixo
+# antes do bloco que preenche `unet_name`. Requer a chave `unet:
+# diffusion_models` em ComfyUI/extra_model_paths.yaml (secao ltx_25),
+# senao o UnetLoaderGGUF nao acha o arquivo (ele le da categoria "unet",
+# nao "diffusion_models").
+GGUF_VARIANTS = {
+    # ComfyUI lista o arquivo com barra invertida (Windows) no /object_info --
+    # "gguf_test/..." com barra normal e rejeitado como "value_not_in_list".
+    "gguf-q6k": "gguf_test\\LTX-2.5-Distilled-Q6_K.gguf",
+}
 
 # dev sampling defaults, from the 2.3 Full workflow's dev branch
 DEV_STEPS = 15
@@ -623,20 +659,34 @@ def build_workflow(
     two_stage: bool = TWO_STAGE_DEFAULT,
     log_cb=None,
 ) -> dict:
-    if variant not in VARIANTS:
-        raise ValueError(f"variant deve ser um de {sorted(VARIANTS)}; recebi {variant!r}")
+    if variant not in VARIANTS and variant not in GGUF_VARIANTS:
+        raise ValueError(
+            f"variant deve ser um de {sorted(VARIANTS) + sorted(GGUF_VARIANTS)}; "
+            f"recebi {variant!r}")
     api = base_api(two_stage)
     ids = stage_ids(two_stage)
     n_unet, n_enh = ids["unet"], ids["enhancer_clip"]
 
-    ckpt = VARIANTS[variant]
-    ckpt_path = os.path.join(ROOT, "models", "2.5", "diffusion_models", ckpt)
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(
-            f"Checkpoint da variante '{variant}' não encontrado: {ckpt_path}\n"
-            "Baixe de Lightricks/LTX-2.5 (diffusion_models/) antes de usar esta variante."
-        )
-    api[n_unet]["inputs"]["unet_name"] = ckpt
+    if variant in GGUF_VARIANTS:
+        gguf_rel = GGUF_VARIANTS[variant]
+        gguf_path = os.path.join(ROOT, "models", "2.5", "diffusion_models", gguf_rel)
+        if not os.path.exists(gguf_path):
+            raise FileNotFoundError(
+                f"GGUF da variante '{variant}' não encontrado: {gguf_path}")
+        # Troca o NODE inteiro (nao so unet_name): UnetLoaderGGUF e um class_type
+        # diferente do UNETLoader oficial. Mesma saida (MODEL), entao o resto do
+        # grafo nao percebe a troca.
+        api[n_unet] = {"class_type": "UnetLoaderGGUF",
+                       "inputs": {"unet_name": gguf_rel}}
+    else:
+        ckpt = VARIANTS[variant]
+        ckpt_path = os.path.join(ROOT, "models", "2.5", "diffusion_models", ckpt)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"Checkpoint da variante '{variant}' não encontrado: {ckpt_path}\n"
+                "Baixe de Lightricks/LTX-2.5 (diffusion_models/) antes de usar esta variante."
+            )
+        api[n_unet]["inputs"]["unet_name"] = ckpt
 
     # --- PRECISAO E DEVICE: os dois botoes que a rota 2.5 nunca apertou -------
     #
@@ -899,7 +949,12 @@ def generate(
         _log(f"[ltx25] variante dev: CFG real (vídeo {video_cfg} / áudio {audio_cfg}), "
              f"{steps or DEV_STEPS} passos -- negative prompt ATIVO, mais lento que distilled.", log_cb)
     else:
-        _log("[ltx25] variante distilled: 8 passos, CFG 1 -- rápido, "
+        # Toda variante que nao e "dev" cai no mesmo caminho destilado de 8 passos
+        # (inclusive "redgraft"/"distilled-int8" -- so trocam o ARQUIVO do
+        # checkpoint, nao o schedule de amostragem). A mensagem citava sempre
+        # "distilled" mesmo quando a variante escolhida era outra -- corrigido
+        # 2026-09-02 pra nomear a variante de verdade.
+        _log(f"[ltx25] variante {variant}: 8 passos, CFG 1 -- rápido, "
              "mas o negative prompt não tem efeito nesta variante.", log_cb)
     try:
         files = submit_and_wait(api, log_cb=log_cb, timeout=timeout, expect_node=N_SAVE)
@@ -932,7 +987,8 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--image", default=None, help="first-frame conditioning image (I2V)")
     ap.add_argument("--disable-audio", action="store_true")
-    ap.add_argument("--variant", choices=sorted(VARIANTS), default=DEFAULT_VARIANT,
+    ap.add_argument("--variant", choices=sorted(VARIANTS) + sorted(GGUF_VARIANTS),
+                    default=DEFAULT_VARIANT,
                     help="distilled: 8 passos, CFG 1, rápido (negative prompt inerte). "
                          "dev: CFG real, negative prompt ativo, várias vezes mais lento.")
     ap.add_argument("--steps", type=int, default=None, help="passos (só dev; padrão 15)")

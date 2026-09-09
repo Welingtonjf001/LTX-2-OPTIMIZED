@@ -24,6 +24,14 @@ REM   dev       = transformer nao destilado, CFG real (video 3 / audio 7),
 REM               15 passos. O negative prompt FUNCIONA. Varias vezes mais
 REM               lento (~30 avaliacoes do modelo contra 8).
 set "LTX25_VARIANT=distilled"
+REM
+REM   gguf-q6k  = GGUF Q6_K via ComfyUI-GGUF, 8 passos/CFG 1 igual distilled.
+REM               MEDIDO 2026-09-06: 37 porcento mais rapido que distilled na
+REM               mesma cena (265s contra 797s numa cena de dialogo pesada) --
+REM               `audio_conditioning` CONFIRMADO compativel (testado de
+REM               proposito, e o que sustenta o lip-sync da decupagem). Ainda
+REM               NAO testado: variante dev, upscale de 2 estagios, keyframes
+REM               -- nao trocar se o fluxo usar algum desses.
 
 REM OBRIGATORIO para o estagio de video: sem isto o ComfyUI liga dynamic VRAM
 REM por padrao e engasga encenando o encoder de ~25 GB. MEDIDO: 13 min presos

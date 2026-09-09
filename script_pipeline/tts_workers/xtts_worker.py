@@ -155,11 +155,16 @@ def _split_sentences(text: str) -> list[str]:
 
 # Caracteres que o texto MANTEM para `_pausa_apos` ler o sinal certo, mas que
 # NAO vao para o modelo -- a pausa ja e inserida por codigo (silencio real
-# entre os segmentos), entao pedir para o XTTS "ler" a reticencia tambem e
-# pedir a mesma coisa duas vezes, e a reticencia especificamente (tres
-# caracteres seguidos, sem equivalente comum em fala) e o tipo de sinal que
-# tokenizers de TTS mais erram -- reportado como "vocaliza a pontuacao".
-_LIMPA_PARA_MODELO = [("...", ""), ("…", "")]
+# entre os segmentos), entao pedir para o XTTS "ler" o sinal tambem e pedir a
+# mesma coisa duas vezes. Reticencia foi o primeiro caso corrigido (tres
+# caracteres seguidos, sem equivalente comum em fala, e o tipo de sinal que
+# tokenizers de TTS mais erram -- reportado como "vocaliza a pontuacao"), mas
+# CONFIRMADO 2026-09-07 (ouvido no filme de decupagem, video_doctor/movie_
+# doctor.mp4) que ponto, exclamacao e interrogacao SIMPLES sofrem do mesmo
+# problema no XTTS-v2 em pt-BR -- a limpeza estava so no caso da reticencia e
+# nunca foi generalizada. Removidos aqui; a pausa continua vindo so de codigo
+# (`_pausa_apos`, que le a frase ORIGINAL, antes desta limpeza).
+_LIMPA_PARA_MODELO = [("...", ""), ("…", ""), ("!", ""), ("?", ""), (".", "")]
 
 
 def _texto_para_modelo(sentence: str) -> str:

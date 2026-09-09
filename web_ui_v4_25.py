@@ -24,6 +24,7 @@ import threading
 import time
 import sys
 from collections import deque
+import ltx25_backend
 
 # --- Configuration & Defaults ---
 DEFAULT_CHECKPOINT = "./models/2.5/diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"
@@ -265,6 +266,7 @@ def process_job_logic(job):
             "--frame-rate", str(job['frame_rate']),
             "--num-inference-steps", str(int(job['steps'])),
             "--seed", str(int(chunk_seed)),
+            "--variant", job['variant'],
         ]
 
         if job['enable_fp8']:
@@ -451,6 +453,7 @@ def enqueue_job(
         prompt, preset, num_frames, disable_audio, frame_rate, steps, seed, randomize_seed, enhance_prompt, enable_fp8,
         enable_teacache, teacache_threshold, torch_compile, long_frame_preset, long_video, chunk_frames,
         auto_continue_last_frame,
+        variant,
         checkpoint_path, gemma_path, upsampler_path,
         img1_path, img1_idx, img1_str,
         img2_path, img2_idx, img2_str,
@@ -481,6 +484,7 @@ def enqueue_job(
         "checkpoint_path": checkpoint_path,
         "gemma_path": gemma_path,
         "upsampler_path": upsampler_path,
+        "variant": variant,
         "images": [
             (img1_path, img1_idx, img1_str),
             (img2_path, img2_idx, img2_str),
@@ -611,6 +615,14 @@ with gr.Blocks(title="LTX-2.5 Studio + Queue") as demo:
                 checkpoint_path = gr.Textbox(label="Checkpoint", value=DEFAULT_CHECKPOINT)
                 gemma_path = gr.Textbox(label="Gemma Root", value=DEFAULT_GEMMA)
                 upsampler_path = gr.Textbox(label="Upsampler", value=DEFAULT_UPSAMPLER)
+                variant_dd = gr.Dropdown(
+                    label="Model variant",
+                    choices=sorted(ltx25_backend.VARIANTS) + sorted(ltx25_backend.GGUF_VARIANTS),
+                    value=ltx25_backend.DEFAULT_VARIANT,
+                    info="distilled/dev/etc. rodam o checkpoint safetensors; gguf-* trocam pro "
+                         "UnetLoaderGGUF. Ver MEMORIAL/CLAUDE.md pelas diferencas de velocidade "
+                         "e o que ainda nao foi validado em cada variante.",
+                )
 
         # Right Column: Output & Monitor
         with gr.Column(scale=4):
@@ -680,6 +692,7 @@ with gr.Blocks(title="LTX-2.5 Studio + Queue") as demo:
             prompt, preset, num_frames, disable_audio, fps, steps, seed, random_seed, enhance_prompt, enable_fp8,
             enable_teacache, teacache_threshold, torch_compile, long_frame_preset, long_video, chunk_frames,
             auto_continue_last_frame,
+            variant_dd,
             checkpoint_path, gemma_path, upsampler_path,
             i1_img, i1_idx, i1_str,
             i2_img, i2_idx, i2_str,
@@ -720,7 +733,6 @@ with gr.Blocks(title="LTX-2.5 Studio + Queue") as demo:
                                      container="accordion")
 
 if __name__ == "__main__":
-    # theme/css movidos do Blocks para o launch (Gradio 6): deixados no
-    # construtor viram aviso e sao ignorados, e a UI sobe sem o tema.
+    # theme/css movidos do Blocks para o launch (Gradio 6).
     demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), share=False, server_port=7960,
                 theme=theme, css=css)

@@ -106,6 +106,9 @@ def run_stage(stage: str, run_dir: Path, args: argparse.Namespace, *, log) -> bo
                      "--clip", args.storyboard_clip, "--vae", args.storyboard_vae,
                      "--guidance", str(args.storyboard_guidance),
                      "--per-shot" if args.storyboard_per_shot else "--per-scene"]
+        if args.consistency_threshold is not None:
+            argv += ["--consistency-threshold", str(args.consistency_threshold),
+                     "--consistency-max-retries", str(args.consistency_max_retries)]
     elif stage == "dialogue":
         argv += ["--engine", args.tts_engine, "--language", args.language]
     elif stage == "render":
@@ -175,11 +178,19 @@ def main(argv=None) -> int:
                              "visuais (ex.: qwen3.6-35b-a3b:latest). Melhor e muito mais "
                              "barato que --llm, que carrega o Gemma 3 em processo. "
                              "Ver MEMORIAL.md 3.29.")
-    parser.add_argument("--image-engine", default=None, choices=["flux", "sd35", "sdxl"],
+    parser.add_argument("--image-engine", default=None,
+                        choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext"],
                         help="storyboard: motor de imagem. Sem isto usa os "
                              "--storyboard-* explicitos, que e o comportamento "
                              "validado. sd35 carrega em ~1 min contra ~4 e cabe em "
-                             "~12 GB contra ~24, mas obedece menos o enquadramento.")
+                             "~12 GB contra ~24, mas obedece menos o enquadramento. "
+                             "flux-krea/flux-kontext = FLUX.1, ver MEMORIAL 3.48.")
+    parser.add_argument("--consistency-threshold", type=float, default=None,
+                        help="storyboard: auditoria automatica de consistencia facial "
+                             "(insightface) contra a referencia do personagem/plano -- "
+                             "ver MEMORIAL 3.53/3.54. Sem isto, desligado (comportamento "
+                             "de sempre). 0.35 e ponto de partida razoavel.")
+    parser.add_argument("--consistency-max-retries", type=int, default=2)
 
     # storyboard (kept at 2x the render width/height below, per user instruction --
     #  sharper source to downscale into the video, same aspect ratio)
@@ -209,8 +220,13 @@ def main(argv=None) -> int:
     # scenes"). Keeping gemma3 as the default meant every plain CLI run reproduced that.
     parser.add_argument("--enrich-engine", default="gemma4", choices=["gemma3", "gemma4"])
 
-    # dialogue
-    parser.add_argument("--tts-engine", default="auto", choices=["auto", "xtts", "qwen"])
+    # dialogue -- "fish" disponivel desde 2026-09-03 (MEMORIAL 3.53), mas o
+    # DEFAULT continua "auto" (revertido no mesmo dia, MEMORIAL 3.55): pedido
+    # explicito do usuario pra nao descartar o XTTS enquanto o fish nao
+    # amadurecer (precisa de servidor externo manual, bug de CJK corrigido
+    # hoje mesmo, slot unico de audio de referencia). --tts-engine fish liga
+    # de proposito.
+    parser.add_argument("--tts-engine", default="auto", choices=["auto", "xtts", "qwen", "fish"])
 
     # render
     parser.add_argument("--checkpoint", default="./models/ltx-2.3-22b-distilled-fp8.safetensors")

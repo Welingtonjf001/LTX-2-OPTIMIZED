@@ -797,7 +797,13 @@ with gr.Blocks(title="LTX-2 Screenplay to Video") as demo:
             storyboard_btn = gr.Button("🖼️ 2. Gerar storyboards")
 
             with gr.Accordion("Opcoes de voz (TTS)", open=False):
-                tts_engine = gr.Dropdown(["auto", "xtts", "qwen"], value="auto", label="Motor de TTS")
+                tts_engine = gr.Dropdown(
+                    ["auto", "xtts", "qwen", "fish"], value="auto", label="Motor de TTS",
+                    info="auto/xtts: sem setup extra. fish: qualidade/emocao melhores "
+                         "(Rich Emotion Library), mas precisa do servidor do fish-speech "
+                         "JA NO AR (fish-speech/START_API.ps1, ~1 min de carga, ~22 GB de "
+                         "VRAM) -- sem ele, toda fala falha com mensagem clara. Recente "
+                         "(2026-09-03), ainda nao amadurecido -- ver MEMORIAL 3.53/3.55.")
             dialogue_btn = gr.Button("🗣️ 3. Sintetizar vozes")
 
             with gr.Accordion("Opcoes de render (LTX)", open=False):

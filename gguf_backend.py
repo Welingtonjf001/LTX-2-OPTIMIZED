@@ -138,7 +138,13 @@ def ensure_server(log_cb=None, boot_timeout: int = 120) -> None:
              # produced a reproducible shape-mismatch crash in the sampler when
              # reusing this long-lived server across scenes (see MEMORIAL.md,
              # LTX-2.5 section). Correctness > the iteration-speed benefit here.
-             "--cache-none"],
+             "--cache-none",
+             # MEDIDO 2026-09-04/05 (LTX-2-OPTIMIZED MEMORIAL 3.33/3.58): dynamic
+             # VRAM ligado (o padrao do ComfyUI) trava ao encenar um modelo
+             # grande com outro ja ocupando a placa -- mesma assinatura em 3
+             # backends diferentes deste projeto ate agora. Sem motivo medido
+             # pra deixar ligado aqui.
+             "--disable-dynamic-vram"],
             cwd=COMFY_ROOT, env=env,
             stdout=_server_log_handle, stderr=subprocess.STDOUT,
         )

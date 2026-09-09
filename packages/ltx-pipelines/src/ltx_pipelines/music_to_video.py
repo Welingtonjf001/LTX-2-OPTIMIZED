@@ -35,7 +35,8 @@ from ltx_pipelines.utils.helpers import (
     encode_prompts,
     get_device,
     simple_denoising_func,
-    noise_audio_state
+    noise_audio_state,
+    video_head_conditionings,
 )
 from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.prompt_cache import DEFAULT_PROMPT_CACHE_DIR, prompt_cache_path
@@ -149,6 +150,7 @@ class MusicToVideoPipeline:
             num_frames: int,
             frame_rate: float,
             images: list[tuple[str, int, float]],
+            video_heads: list[tuple[str, int, float]] | None = None,
             audio_input_path: str | None = None,
             tiling_config: TilingConfig | None = None,
             enhance_prompt: bool = False,
@@ -280,16 +282,26 @@ class MusicToVideoPipeline:
         )
 
         stage_1_conditionings = []
-        if images:
+        if images or video_heads:
             video_encoder = self.model_ledger.video_encoder()
-            stage_1_conditionings = combined_image_conditionings(
-                images=images,
-                height=stage_1_output_shape.height,
-                width=stage_1_output_shape.width,
-                video_encoder=video_encoder,
-                dtype=dtype,
-                device=self.device,
-            )
+            if images:
+                stage_1_conditionings = combined_image_conditionings(
+                    images=images,
+                    height=stage_1_output_shape.height,
+                    width=stage_1_output_shape.width,
+                    video_encoder=video_encoder,
+                    dtype=dtype,
+                    device=self.device,
+                )
+            if video_heads:
+                stage_1_conditionings += video_head_conditionings(
+                    video_heads=video_heads,
+                    height=stage_1_output_shape.height,
+                    width=stage_1_output_shape.width,
+                    video_encoder=video_encoder,
+                    dtype=dtype,
+                    device=self.device,
+                )
             torch.cuda.synchronize()
             del video_encoder
             cleanup_memory()
@@ -421,6 +433,15 @@ class MusicToVideoPipeline:
                 dtype=dtype,
                 device=self.device,
             )
+        if video_heads:
+             stage_2_conditionings += video_head_conditionings(
+                video_heads=video_heads,
+                height=stage_2_output_shape.height,
+                width=stage_2_output_shape.width,
+                video_encoder=video_encoder,
+                dtype=dtype,
+                device=self.device,
+            )
 
         torch.cuda.synchronize()
         del video_encoder
@@ -524,6 +545,7 @@ def main() -> None:
         num_frames=args.num_frames,
         frame_rate=args.frame_rate,
         images=args.images,
+        video_heads=args.video_head,
         audio_input_path=args.audio_input_path,
         tiling_config=tiling_config,
         enhance_prompt=args.enhance_prompt,

@@ -39,12 +39,108 @@ CAST_SYSTEM_PROMPT = (
     "As CHAVES de 'descriptors' devem ser EXATAMENTE os nomes de personagem listados "
     "na mensagem do usuario, copiados letra por letra, um item por personagem -- nunca "
     "a palavra NOME, nunca um nome traduzido ou abreviado, nunca dois personagens no "
-    "mesmo item. O VALOR de cada item e um descritor visual curto (1 frase, em ingles, "
-    "estilo prompt de imagem: idade aproximada, aparencia, roupas, tracos marcantes) "
-    "baseado nos trechos de acao fornecidos. Descreva SO como a pessoa e; nao conte o "
-    "que ela faz. Se nao houver informacao suficiente, invente algo plausivel e "
-    "generico, mas nunca deixe vazio."
+    "mesmo item. O VALOR de cada item e um descritor visual CONCRETO (2-3 frases "
+    "curtas, em ingles, estilo prompt de imagem) baseado nos trechos de acao "
+    "fornecidos, cobrindo SEMPRE estas quatro categorias, cada uma com um detalhe "
+    "ESPECIFICO e nunca vago: (1) cabelo -- cor exata, comprimento, estilo/corte; "
+    "(2) rosto/porte -- idade aproximada, formato do rosto ou tracos marcantes, "
+    "compleicao fisica; (3) roupa -- cor exata, material/textura, cada peca visivel "
+    "(nao so 'roupas escuras', diga 'dark-blue wool cloak with a frayed hem'); "
+    "(4) um item ou marca distintiva unica (cicatriz, joia, arma, acessorio) que "
+    "nenhum outro personagem da cena tenha. Frases como 'a young woman' ou "
+    "'simple clothes' sozinhas sao inaceitaveis -- sao desejo, nao ancora visual: "
+    "cada categoria PRECISA de um adjetivo ou substantivo concreto que sobreviva "
+    "sozinho fora de contexto. Descreva SO como a pessoa e; nao conte o que ela faz. "
+    "A ROUPA (categoria 3) tem que ser coerente com o PAPEL e o CENARIO que os "
+    "trechos de acao descrevem -- se o personagem e chamado de aluno/estudante e a "
+    "cena se passa numa escola/colegio, vista uniforme escolar (ou traje "
+    "claramente de estudante daquele lugar), nao roupa de rua generica; se e "
+    "medico, vista jaleco; e assim por diante. So fuja da roupa \"esperada\" se o "
+    "texto disser explicitamente o contrario. "
+    "Se nao houver informacao suficiente, invente algo plausivel e ESPECIFICO "
+    "(nunca generico), mas nunca deixe vazio."
 )
+
+
+# AUDITORIA DE COMPLETUDE DO DESCRITOR -- pergunta feita pelo usuario 2026-09-07
+# ("o script faz auditoria do que ira produzir?"): ate aqui, nao -- o
+# `_default_descriptor` promete cobrir 4 categorias (cabelo, rosto/porte,
+# roupa, item unico) mas nada verificava se o LLM realmente cobriu, e o
+# Min-jae da corrida 20260907_ltx_distilled saiu sem NENHUMA palavra de roupa
+# de uniforme/estudante -- so "moletom cinza largo, calca cargo preta,
+# cadarco vermelho", plausivel para um adolescente generico, mas contradiz o
+# proprio roteiro ("novo aluno"). Heuristica de palavra-chave, nao prova --
+# mas pega exatamente esse caso antes do descritor virar prompt de imagem.
+# Bilingue: o CAST_SYSTEM_PROMPT pede descritor em ingles, mas MEDIDO
+# 2026-09-07 (cast.json de 20260907_ltx_distilled) o Ollama devolveu em
+# portugues mesmo assim -- so checar palavra em ingles deixaria passar
+# descritores em pt-BR completos como se estivessem vazios.
+_DESCRIPTOR_CATEGORY_HINTS = {
+    "cabelo": ("hair", "cabelo", "bald", "careca", "braid", "trança", "cabelos"),
+    "rosto_porte": ("face", "build", "complexion", "skin", "eyes", "cheek", "jaw",
+                     "shoulders", "frame", "-year-old", "years old", "age", "tall",
+                     "short", "slim", "stocky", "rosto", "olhos", "compleição",
+                     "anos", "magro", "alto", "baixa", "porte"),
+    "roupa": ("wearing", "shirt", "jacket", "dress", "uniform", "pants", "trousers",
+              "skirt", "coat", "sweater", "hoodie", "sleeve", "collar", "fabric",
+              "cloth", "blazer", "vest", "tie", "veste", "vestindo", "uniforme",
+              "camisa", "jaqueta", "calça", "saia", "casaco", "suéter", "moletom",
+              "blusa", "gravata"),
+    "item_unico": ("necklace", "scar", "ring", "bracelet", "glasses", "tattoo",
+                   "badge", "pin", "earring", "watch", "bag", "backpack", "pendant",
+                   "locket", "cane", "staff", "colar", "cicatriz", "anel", "pulseira",
+                   "óculos", "tatuagem", "broche", "brinco", "relógio", "mochila",
+                   "pingente", "bolsa"),
+}
+
+
+def _check_descriptor_completeness(descriptor: str) -> list[str]:
+    """Categorias que o `CAST_SYSTEM_PROMPT` exige e que nao tem nenhuma
+    palavra-chave reconhecivel no descritor final."""
+    text = (descriptor or "").lower()
+    return [cat for cat, kws in _DESCRIPTOR_CATEGORY_HINTS.items()
+            if not any(kw in text for kw in kws)]
+
+
+def _audit_and_fix_descriptors(characters: dict, *, model: str | None, log=print) -> dict:
+    """Roda a checagem em todo personagem; para quem tem lacuna E tem um motor
+    Ollama disponivel, faz UMA segunda chamada pedindo so as categorias que
+    faltam (mais barato e mais preciso que regerar o descritor inteiro).
+    Sempre grava o resultado em `info["descriptor_gaps"]` -- vazio quando
+    completo -- para o cast.json carregar a auditoria consigo, nao so o
+    resultado."""
+    from script_pipeline.story_structure import _call_ollama
+
+    gaps_found = 0
+    for name, info in characters.items():
+        gaps = _check_descriptor_completeness(info.get("descriptor", ""))
+        if gaps and model:
+            faltando_pt = ", ".join(gaps)
+            fix_prompt = (
+                f"Personagem: {name}\nDescritor atual: {info['descriptor']}\n"
+                f"Categorias FALTANDO neste descritor: {faltando_pt}. "
+                "Responda APENAS com um objeto JSON {\"descriptors\": {\"" + name +
+                "\": \"...\"}} contendo o descritor COMPLETO reescrito (nao so o "
+                "trecho novo), agora cobrindo TODAS as 4 categorias exigidas "
+                "com detalhe concreto e especifico."
+            )
+            payload = _call_ollama(CAST_SYSTEM_PROMPT, fix_prompt, model, log=log) or {}
+            fixed = _match_descriptor(payload.get("descriptors") or {}, name)
+            if fixed:
+                info["descriptor"] = fixed
+                gaps = _check_descriptor_completeness(fixed)
+        if gaps:
+            gaps_found += 1
+            log(f"[cast_characters] AUDITORIA: {name} ainda sem {', '.join(gaps)} "
+                "no descritor -- confira cast.json antes de gerar stills.")
+        info["descriptor_gaps"] = gaps
+    if gaps_found:
+        log(f"[cast_characters] auditoria de descritor: {gaps_found}/{len(characters)} "
+            "personagem(ns) com categoria(s) faltando (ver acima).")
+    else:
+        log(f"[cast_characters] auditoria de descritor: {len(characters)}/{len(characters)} "
+            "completos (cabelo, rosto/porte, roupa, item unico).")
+    return characters
 
 
 def _load_scenes(run_dir: Path) -> list[dict]:
@@ -470,6 +566,8 @@ def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: d
         for name, info in characters.items():
             info["descriptor"] = _default_descriptor(name, info["snippets"])
 
+    characters = _audit_and_fix_descriptors(characters, model=engine, log=log)
+
     voices = assign_voices(characters)
 
     refs = reference_images or {}
@@ -482,6 +580,9 @@ def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: d
             # None => identity comes from the text descriptor only (the "automatic"
             # mode); a path => that photo anchors this character's look.
             "reference_image": refs.get(name),
+            # Auditoria de completude (ver _check_descriptor_completeness) -- vazio
+            # quando as 4 categorias exigidas estao cobertas.
+            "descriptor_gaps": info.get("descriptor_gaps", []),
         }
     return cast
 

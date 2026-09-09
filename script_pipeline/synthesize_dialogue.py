@@ -110,7 +110,15 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--engine", default="auto", choices=["auto", "xtts", "qwen"])
+    # "fish" ficou disponivel em 2026-09-03 (MEMORIAL 3.53), mas o DEFAULT
+    # voltou a ser "auto" no mesmo dia (MEMORIAL 3.55): fish precisa do
+    # servidor externo ja no ar (START_API.ps1) e ainda e recente/nao
+    # amadurecido aqui (bug de encoding CJK so descoberto e corrigido hoje,
+    # slot unico de audio de referencia, sem fallback automatico). Pedido
+    # explicito do usuario: nao descartar o XTTS, manter as duas opcoes
+    # escolhiveis ate o fish provar mais horas de uso. Peca --engine fish
+    # (ou o dropdown da UI) quando quiser usa-lo de proposito.
+    parser.add_argument("--engine", default="auto", choices=["auto", "xtts", "qwen", "fish"])
     parser.add_argument("--language", default="pt", choices=list(LANGUAGE_MAP))
     args = parser.parse_args(argv)
 

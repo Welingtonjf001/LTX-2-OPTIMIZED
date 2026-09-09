@@ -503,8 +503,12 @@ with gr.Blocks(title="StoryPlay 2.5 - storyboard com quadros intermediarios") as
             v_width = gr.Number(value=768, label="Largura", precision=0)
             v_height = gr.Number(value=512, label="Altura", precision=0)
         with gr.Row():
-            v_variant = gr.Radio([("distilled (rapido)", "distilled"), ("dev (CFG real, lento)", "dev")],
-                                 value="distilled", label="Variante LTX 2.5")
+            v_variant = gr.Radio(
+                [("distilled (rapido)", "distilled"), ("dev (CFG real, lento)", "dev"),
+                 ("distilled-int8 (20 GiB, int8)", "distilled-int8"),
+                 ("redgraft (17 GiB, INT4 comunitario, mais rapido -- MEMORIAL 3.51)", "redgraft"),
+                 ("w4a8-v10 (14,9 GiB, conversor oficial comfy-kitchen -- MEMORIAL 3.55)", "w4a8-v10")],
+                value="distilled", label="Variante LTX 2.5")
             v_strength = gr.Slider(0.0, 1.0, value=0.8, step=0.05,
                                    label="Forca dos keyframes intermediarios")
             v_seed = gr.Number(value=42, label="Seed", precision=0)

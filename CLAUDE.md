@@ -10,7 +10,7 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-08-26.
+Última verificação: 2026-09-07.
 
 ---
 
@@ -85,6 +85,18 @@ render 3D ele **achata** gradiente em bloco de cor chapada — medido pior que
 troca degradê por borda dura. Já é escolhível na UI do `music_maker_ui_v2_25`.
 Ver `MEMORIAL.md` §3.18.
 
+⚠️ **`realesrgan-x4plus` e `realesrgan-x4plus-anime` (família RRDBNet) estão
+QUEBRADOS nesta instalação — não use.** MEDIDO 2026-09-03: `realesrgan-
+ncnn-vulkan.exe -n realesrgan-x4plus` devolve saída determinística sem
+relação com a entrada (grid quadriculado ou perda total do sujeito),
+**independente de resolução, tile size (`-t`) ou GPU** — reproduzido em
+frame isolado, um tile só (`-t` maior que a imagem), nas duas GPUs. Só
+`realesr-animevideov3` (arquitetura mais rasa, SRVGG) sai correto. Isso
+inverte a recomendação do parágrafo acima até alguém reinstalar/validar os
+arquivos `.bin`/`.param` do x4plus — fique no padrão `animevideov3` em
+`upscale_video.ps1`. Ver `MEMORIAL.md` §3.56.1 (a investigação começou com um
+falso-positivo no RIFE, que foi corrigido junto).
+
 ## Ollama: qual instância está no ar importa
 
 Os modelos vivem em `G:\ollama\models`. Se quem subir for o **aplicativo
@@ -105,6 +117,22 @@ Duas armadilhas ao trocar de modelo:
   `deepseek-r1` também.
 - **A instância no ar em 2026-08-25 serve só `qwen3.6-35b-a3b`**, apesar da
   pasta ter vários. É o caso do parágrafo acima.
+
+⚠️ **`qwen3.6-35b-a3b:latest` (MoE) crasha o backend CUDA do Ollama em prompt
+LONGO** -- MEDIDO 2026-09-07: `an error was encountered while running the
+model: CUDA error: an illegal memory access was encountered` (HTTP 500),
+reproduzido de forma determinística com o prompt real de enriquecimento do
+`parse_screenplay` (~8k caracteres) e isolado por bisseção (prompt curto/
+médio ok, prompt longo falha SEMPRE, em qualquer contagem de tentativas).
+Não é corrupção de GPU nem de processo: sobreviveu a reiniciar o Ollama e a
+`nvidia-smi --gpu-reset -i 0`. Isso explica os dois colapsos de decupagem
+consecutivos (20260907_ltx_distilled e a primeira tentativa do
+20260907_ltx_gguf) -- o HTTP 500 na etapa de enriquecimento nunca era
+retentado, e o `shot_plan.py` caía no fallback de scene completa para
+TODOS os planos. `qwen2.5:32b-instruct-q4_K_M` roda o MESMO prompt sem erro
+(~41s, JSON valido) -- use-o para `--engine` em roteiros que gerem prompt de
+enriquecimento grande, ate alguem investigar se e bug do llama.cpp com MoE
+em contexto longo ou do proprio GGUF. Ver `MEMORIAL.md` §3.65.
 
 ## Modelos 2.3 instalados (`models/`)
 
@@ -188,6 +216,25 @@ VRAM/RAM antes e depois.
   herdado de `SDClipModel` já está correto). Sem esse fix, `encode_from_tokens_scheduled`
   falha com `ValueError: not enough values to unpack (expected 4, got 1)` para
   qualquer checkpoint Gemma4 (E2B/E4B/31B/12B), não só o do LTX-2.5.
+- **`encode_prompts([prompt, negative_prompt], ...)` com dois prompts numa
+  chamada só derruba com `torch.OutOfMemoryError`** reportando uma quantidade
+  alocada fisicamente impossível (ex.: "60.73 GiB" numa placa de 24GB).
+  Parece um leak nos hooks de offload do `accelerate` que só aparece
+  codificando um segundo prompt no mesmo processo sem um `cleanup_memory()`
+  no meio — `music_to_video.py`/`distilled.py`/`ic_lora.py` (os caminhos
+  validados) sempre chamaram com UM prompt só, por isso nunca bateram nisso.
+  Corrigido em 2026-09-02 em `keyframe_interpolation.py`,
+  `music_to_video_v2.py`, `ti2vid_one_stage.py` e `ti2vid_two_stages.py`
+  (nenhum desses é chamado por UI ativa neste checkout — bug dormente, não
+  estava afetando produção): cada um agora faz duas chamadas de
+  `encode_prompts()`, uma por prompt. De quebra, `keyframe_interpolation.py`
+  e `ti2vid_one_stage.py` tinham um bug **pré-existente e não relacionado**:
+  chamavam `encode_prompts([prompt], ...)` com um prompt só mas
+  desempacotavam em duas variáveis (`context_p, context_n`) — `ValueError`
+  garantido em qualquer invocação real, e `negative_prompt` nunca era
+  codificado. Investigação completa (incluindo o bug irmão do lado ComfyUI:
+  `av_model.py` exige o conditioning de vídeo+áudio concatenado, 4096+2048
+  canais, pra este checkpoint) documentada em `lora_storyboard_encode.py`.
 
 ### Bugs do ComfyUI vendorizado — contornados de fora, NÃO corrigidos lá
 
@@ -250,10 +297,40 @@ caminho passado na linha de comando.
 
 | variável | padrão | efeito |
 |---|---|---|
-| `LTX25_VARIANT` | `distilled` | `dev` = CFG real, negative prompt funciona, várias vezes mais lento |
+| `LTX25_VARIANT` | `distilled` | `dev` = CFG real, negative prompt funciona, várias vezes mais lento. `gguf-q6k` = ver abaixo |
 | `LTX25_AUDIO_COND` | `1` | condiciona a geração pela trilha; `0` desliga |
 | `LTX25_TWO_STAGE` | `0` | `1` = upscale latente x2 + refino. **Dobra a resolução de saída** |
 | `LTX25_RIFE_MODEL` | `rife-v4.6` | modelo do RIFE no `video_doctor` |
+
+### Variante GGUF do transformer (`gguf-q6k`) — mais rápida, escopo ainda parcial
+
+MEDIDO 2026-09-06: `LTX25_VARIANT=gguf-q6k` troca o `UNETLoader` pelo
+`UnetLoaderGGUF` (node já usado pro 2.3), apontando pro
+`ltx-2.5-22b-distilled-transformer-Q6_K.gguf` (baixado de
+`realrebelai/LTX-2.5_GGUFs`, ~18,7 GB, em `models/2.5/diffusion_models/
+gguf_test/`). **37% mais rápido que o `distilled` bf16 na mesma cena**
+(440s contra 698s numa cena simples; 265s contra 797s numa cena de diálogo
+de 10s) — o GGUF cabe inteiro na VRAM sem o offload parcial que o bf16 de
+40 GB precisa, mesmo custando mais por passo de amostragem (dequantização).
+
+`audio_conditioning` **testado e confirmado compatível** (430s, sem erro) —
+é a feature que sustenta o lip-sync da decupagem, então isso importava. O
+código de `_apply_audio_conditioning` já foi escrito de propósito
+variant-agnostic (pega o `model` do guider, não do loader). **Ainda não
+testado**: variante `dev`, `LTX25_TWO_STAGE=1`, keyframes — não trocar pra
+`gguf-q6k` num fluxo que usa algum desses sem testar primeiro. O padrão
+de produção continua `distilled`; a opção está documentada nos `.bat`
+(`start_webui_25.bat` e os outros 6 que tocam 2.5) e disponível como
+dropdown "Model variant" na UI que `start_webui_25.bat` sobe
+(`web_ui_v4_25.py`, seletor gerado via `_make_25_uis.py`).
+
+⚠️ **`_make_25_uis.py` regenera as 4 UIs 2.5 de uma vez** e reescreve cada
+`_25.py` do zero a partir do original 2.3 + substituições do script —
+qualquer edição manual feita direto num `_25.py` (como o seletor de upscale
+do `music_maker_ui_v2_25.py`, ver `MEMORIAL.md` §3.18) **desaparece sem
+aviso** se o gerador não souber recriá-la. Depois de rodar, sempre
+`git status --short *_25.py` + `git diff` de cada arquivo modificado antes
+de confiar.
 
 ### UIs e portas
 
@@ -350,6 +427,47 @@ movimento não explica, e repara. Usa RIFE (`tools/rife/`) e, opcionalmente,
 RAFT (pesos em cache do torch). **Revise as tiras antes de reparar**: o
 detector acha *mudança*, e movimento rápido legítimo aparece igual a defeito —
 reparar isso apaga o movimento. Ver `MEMORIAL.md` §3.19.
+
+## MiniMax H3 — terceiro motor de vídeo
+
+Instalação de ComfyUI SEPARADA, em `E:\Users\home\Documents\MiniMax-H3`
+(venv próprio, porta 8189). `minimax_h3_backend.py` dirige por HTTP, mesmo
+padrão do `ltx25_backend.py`. Disputa a MESMA 3090 física do LTX — nunca
+rode os dois ao mesmo tempo. Ver `MEMORIAL.md` §3.40-3.42, §3.52.
+
+### Checkpoint: `MINIMAX_H3_VARIANT` (padrão `fp8int8` desde 2026-09-06/07)
+
+| variante | unet | tempo medido | veredito |
+|---|---|---|---|
+| `fp8int8` (padrão) | FP8 pruned + INT8 text encoder | 397-666s | mais rápido E maior qualidade nominal que o w4a8 |
+| `w4a8` | o quantizado mais agressivo (o que o workflow oficial traz fixo) | 554-704s | mais lento, mantido só pra comparação/rollback |
+| `gguf-q4km` | GGUF via `UnetLoaderGGUF` | 707-986s | **mais lento que os dois** — ao contrário do LTX-2.5, GGUF NÃO ganha aqui (o gargalo é o encoder de texto na CPU, fixo independente do formato do transformer) |
+
+Trocar: `MINIMAX_H3_VARIANT=w4a8` (ou `gguf-q4km`). `MINIMAX_H3_UNET`/
+`MINIMAX_H3_CLIP` sozinhos continuam funcionando por cima pra apontar um
+arquivo específico. Ver memória de projeto "MiniMax H3 watchdog bug and
+quality tests" pro detalhe completo dos números.
+
+### VAE TensorRT — compilada, disponível, NÃO recomendada
+
+`MINIMAX_H3_TRT_VAE=1` troca a VAE de vídeo (só a de vídeo; a de áudio não
+tem engine) pelos engines TensorRT compilados (`ComfyUI-H3VAE_TRT`,
+`models/vae/minimax_h3_vae_{decoder,encoder}.engine`, 4,85 GB + 346 MB).
+MEDIDO 2026-09-06: **piora o tempo em vez de melhorar** — o node reserva o
+tamanho do arquivo como orçamento de VRAM antes de carregar de verdade,
+empurrando o transformer pro modo lowvram (mais lento, ou trava de vez
+combinado com `fp8int8`). Deixar desligado.
+
+### Watchdog: `stall_seconds` precisa de folga (1800s, não 300s)
+
+`gpu_watchdog.StallWatch` mata o servidor (`taskkill /F`, sem traceback —
+parece crash) se o mesmo job ficar "rodando" por mais que `stall_seconds`,
+mesmo com a GPU ociosa por design (encoder de texto na CPU). MEDIDO
+2026-09-06: 300s matava jobs saudáveis de 5-16 min; corrigido pra 1800s
+tanto aqui (`minimax_h3_backend.py`) quanto no watchdog compartilhado do
+LTX (`script_pipeline/generate_storyboards.py`, mesmo bug, mesmo fix). Se o
+MiniMax H3 "morrer sem traceback" de novo num ponto específico e
+reproduzível, suspeitar do watchdog ANTES de suspeitar de crash nativo.
 
 ## Roteiro → filme (`script_pipeline/`)
 
@@ -500,6 +618,46 @@ Duas coisas que decidem se um pacote serve: **6s+ por amostra** (Thorsten foi
 rejeitado com 1,6–3,1s) e **fala, não canto** (samples de produção musical não
 servem). Referência em inglês falando português mede **40% mais longa e metade
 da energia** — o que alonga a montagem inteira. Ver `MEMORIAL.md` §3.27.
+
+### Fish Speech — motor de TTS padrão da decupagem (desde 2026-09-03)
+
+`E:\Users\home\Documents\fish-speech`, instalação própria (venv `uv`, `checkpoints\s2-pro`).
+Já lê a MESMA biblioteca de vozes do XTTS acima — `dialogue_tts.py` clona a
+partir do `xtts_speaker_wav` que `emotion_director`/`assign_voices` já escolhem,
+sem precisar de biblioteca de referência própria.
+
+**Precisa estar rodando ANTES de qualquer corrida de decupagem** — ao
+contrário de XTTS/Qwen (carregam o modelo por chamada), o Fish é servidor
+HTTP persistente:
+
+```powershell
+cd E:\Users\home\Documents\fish-speech
+.\START_API.ps1
+```
+
+~1 min de carga, ~22 GB de VRAM (3090 — `CUDA_VISIBLE_DEVICES=1` já vem
+setado no script), fica de pé em `http://127.0.0.1:8080`. Sem isso no ar, a
+etapa 4 (TTS) da decupagem falha fala por fala com mensagem clara — não trava,
+não tenta subir sozinho. `--engine auto`/`xtts` no `synthesize_dialogue.py`
+volta ao caminho antigo sem precisar do servidor.
+
+⚠️ **Sem `PYTHONUTF8=1`/`PYTHONIOENCODING=utf-8` no ambiente do servidor, texto
+em coreano/chinês derruba a geração** com `UnicodeEncodeError` num `print()` de
+debug do próprio fish-speech (`content_sequence.py::print_in_green`, console
+Windows em cp1252) — MEDIDO 2026-09-03, os dois falharam sem a variável e
+funcionaram com ela. `START_API.ps1` ainda não seta isso por padrão; se for
+gerar em CJK, exporte as duas variáveis antes de chamar o script.
+
+**Rich Emotion Library**: tags entre colchetes direto no texto —
+`[whisper]`, `[laughing]`, `[angry]`, `[sad]`, `[excited]`, `[screaming]`,
+etc. `EMOTION_TO_FISH_TAG` em `dialogue_tts.py` traduz sozinho o slug de
+emoção que `emotion_director` já escreve por fala (os mesmos 17 do XTTS)
+para a tag mais próxima — nem toda emoção tem tag equivalente exata.
+
+**Testado nos 5 idiomas do pedido do usuário** (pt-BR, en, ko, zh, ja) + tags
+de emoção em pt-BR, todos com voz clonada de um speaker XTTS — ver
+`MEMORIAL.md` §3.53. Não avaliado: qualidade da clonagem comparada ao XTTS,
+robustez das tags de emoção em roteiro real (só testado com frases soltas).
 
 ## Projeto relacionado
 

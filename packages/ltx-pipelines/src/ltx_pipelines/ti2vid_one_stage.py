@@ -83,12 +83,24 @@ class TI2VidOneStagePipeline:
         stepper = EulerDiffusionStep()
         dtype = torch.bfloat16
 
-        (context_p, context_n) = encode_prompts(
+        # Two SEPARATE encode_prompts() calls, not one call with [prompt,
+        # negative_prompt]: encoding two prompts in a single call throws
+        # `torch.OutOfMemoryError` reporting a physically impossible amount
+        # allocated (looks like a leak in accelerate's CPU-offload hooks that
+        # only shows up encoding a second prompt without a cleanup_memory()
+        # in between -- see lora_storyboard_encode.py for the full
+        # investigation). This also fixes a pre-existing bug here: the
+        # previous single-prompt call [prompt] tried to unpack into
+        # (context_p, context_n) -- two variables from one result -- which
+        # would raise ValueError on any real invocation, and silently never
+        # encoded negative_prompt at all.
+        (context_p,) = encode_prompts(
             [prompt],
             self.model_ledger,
             enhance_first_prompt=enhance_prompt,
             enhance_prompt_image=images[0][0] if len(images) > 0 else None,
         )
+        (context_n,) = encode_prompts([negative_prompt], self.model_ledger)
 
         v_context_p, a_context_p = context_p.video_encoding, context_p.audio_encoding
         v_context_n, a_context_n = context_n.video_encoding, context_n.audio_encoding

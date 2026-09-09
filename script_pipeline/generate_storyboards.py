@@ -45,6 +45,7 @@ WORKFLOW_TEMPLATES = {
     "sdxl": ROOT / "comfyui_workflows" / "storyboard_sdxl_txt2img.json",
     "flux": ROOT / "comfyui_workflows" / "storyboard_flux_txt2img.json",
     "sd35": ROOT / "comfyui_workflows" / "storyboard_sd35_txt2img.json",
+    "flux1": ROOT / "comfyui_workflows" / "storyboard_flux1_txt2img.json",
 }
 
 # Padroes por MOTOR DE IMAGEM, num lugar so. Antes disto `render_shots` fixava
@@ -83,12 +84,76 @@ IMAGE_ENGINES = {
         "steps": 30, "cfg": 7.0, "guidance": 0.0,
         "descricao": "SDXL base -- legado, mantido porque o workflow ja existia",
     },
+    # flux-krea e flux-kontext sao FLUX.1 (nao FLUX.2 Klein como "flux" acima):
+    # precisam de DualCLIPLoader com clip_l+t5xxl, nao do CLIPLoader Qwen3 unico.
+    # CONFIRMADO em 2026-09-01 via /object_info do ComfyUI ao vivo (nomes de
+    # arquivo e nao adivinhados -- MEMORIAL 3.16 ja mostrou que isso morde).
+    "flux-krea": {
+        "checkpoint": "flux1-krea-dev_fp8_scaled.safetensors",
+        "clip": "clip_l.safetensors,t5xxl_fp8_e4m3fn.safetensors",
+        "vae": "vae\\ae.safetensors",
+        # Ja vem fp8-scaled (11,9 GB); "default" carrega como esta salvo --
+        # recastar um checkpoint ja escalado e onde perder qualidade a toa.
+        "weight_dtype": "default",
+        "steps": 28, "cfg": 1.0, "guidance": 4.5,
+        "descricao": "FLUX.1 Krea dev -- estetica menos \"cara de IA\" que o Klein; ja fp8-scaled",
+    },
+    "flux-kontext": {
+        "checkpoint": "flux1-kontext-dev.safetensors",
+        "clip": "clip_l.safetensors,t5xxl_fp8_e4m3fn.safetensors",
+        "vae": "vae\\ae.safetensors",
+        # Peso bf16 de 23,8 GB -- sem cast fp8 nao sobra VRAM pro resto do grafo.
+        "weight_dtype": "fp8_e4m3fn",
+        "steps": 28, "cfg": 1.0, "guidance": 3.5,
+        "descricao": "FLUX.1 Kontext dev -- editor por instrucao; aqui so txt2img "
+                     "(sem imagem de entrada, ver generate_scene_storyboard), bf16 grande",
+    },
 }
 
 # Nomes dos encoders do SD 3.5 quando o chamador nao passa a tripla explicita
 # (por exemplo quem so trocou --image-engine e manteve o --clip do FLUX).
 SD35_CLIPS_PADRAO = ("clip_g.safetensors", "clip_l.safetensors",
                      "t5xxl_fp8_e4m3fn.safetensors")
+
+# LORA opcional nos STILLS -- pedido do usuario 2026-09-09, mesma pasta que o
+# Storyboard-Director (projeto irmao, standalone) ja usa: os `.safetensors` de
+# `models/loras/` sao para o TRANSFORMER DE VIDEO do LTX e sao INCOMPATIVEIS
+# com estes checkpoints de imagem (FLUX/FLUX.1/SD3.5/SDXL). `loras_images/` e
+# uma pasta PROPRIA, separada, e hoje pode estar vazia ate alguem colocar um
+# LoRA treinado para um desses checkpoints -- "iniciar a opcao", nao entregar
+# um LoRA curado. Cada arquitetura tem o node id do LoraLoaderModelOnly e o
+# input que ele precisa rewirar (o que hoje recebe o MODEL do loader direto).
+LORA_IMAGES_DIR = ROOT / "models" / "loras_images"
+
+ARCH_MODEL_CONSUMER = {
+    # arquitetura: (node id do consumidor, chave do input, [node id, slot] original)
+    "flux": ("8", "model", ["1", 0]),
+    "flux-ref": ("11", "model", ["1", 0]),  # character_flux_reference.json
+    "flux1": ("8", "model", ["1", 0]),
+    "sd35": ("8", "model", ["1", 0]),
+    "sdxl": ("3", "model", ["4", 0]),
+}
+
+
+def available_loras_images() -> list[str]:
+    """Lista os `.safetensors` disponiveis em `loras_images/`. Devolve []
+    (sem erro) se a pasta nao existir -- e o estado padrao ate alguem baixar
+    ou treinar um LoRA compativel com estes checkpoints de imagem."""
+    if not LORA_IMAGES_DIR.exists():
+        return []
+    return sorted(p.name for p in LORA_IMAGES_DIR.glob("*.safetensors"))
+
+
+def _apply_lora(workflow: dict, arch_key: str, lora_name: str, lora_strength: float) -> None:
+    """Insere um LoraLoaderModelOnly entre o loader e quem consome MODEL,
+    mutando `workflow` no lugar -- so afeta o transformer, nao o CLIP (LoRA de
+    identidade/estilo nao precisa reescrever o encoder de texto). Node id "90"
+    e livre em todo template hoje (nenhum passa de "13")."""
+    consumer_id, input_key, model_ref = ARCH_MODEL_CONSUMER[arch_key]
+    workflow["90"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+        "model": model_ref, "lora_name": lora_name, "strength_model": float(lora_strength),
+    }}
+    workflow[consumer_id]["inputs"][input_key] = ["90", 0]
 
 
 def engine_defaults(engine: str) -> dict:
@@ -106,6 +171,17 @@ def _sd35_clip_names(clip: str) -> tuple[str, str, str]:
     causa fica ilegivel. Uma entrada que nao seja tripla vira o padrao."""
     partes = [p.strip() for p in (clip or "").split(",") if p.strip()]
     return tuple(partes) if len(partes) == 3 else SD35_CLIPS_PADRAO
+
+
+FLUX1_CLIPS_PADRAO = ("clip_l.safetensors", "t5xxl_fp8_e4m3fn.safetensors")
+
+
+def _flux1_clip_names(clip: str) -> tuple[str, str]:
+    """Mesma logica de _sd35_clip_names, mas para o par clip_l+t5xxl do FLUX.1
+    (DualCLIPLoader) -- diferente do CLIPLoader de encoder unico (Qwen3) do
+    motor "flux" (FLUX.2 Klein)."""
+    partes = [p.strip() for p in (clip or "").split(",") if p.strip()]
+    return tuple(partes) if len(partes) == 2 else FLUX1_CLIPS_PADRAO
 COMFYUI_DIR = ROOT / "ComfyUI"
 COMFYUI_OUTPUT_DIR = COMFYUI_DIR / "output"
 
@@ -178,6 +254,11 @@ def detect_architecture(checkpoint: str) -> str:
     Detectar pelo nome e fragil, mas e o que os tres formatos tem em comum aqui:
     o chamador passa um nome de arquivo, nao um tipo."""
     nome = checkpoint.lower()
+    # "flux1-..." (Krea/Kontext/dev/schnell) precisa vir ANTES do "flux" generico:
+    # os dois nomes contem "flux", mas so o FLUX.2 Klein usa o CLIPLoader Qwen3
+    # unico que o branch "flux" abaixo monta.
+    if "flux1" in nome:
+        return "flux1"
     if "flux" in nome:
         return "flux"
     if "sd3" in nome:
@@ -278,31 +359,17 @@ def stop_comfyui(port: int = 8188, *, log=print) -> bool:
     custou quase uma hora.
 
     Nao usa psutil de proposito: `netstat`+`taskkill` e o que o
-    start_comfyui_ltx.bat ja fazia, e nao acrescenta dependencia."""
-    import re as _re
-    import subprocess as _sp
-    if sys.platform != "win32":
-        log("stop_comfyui: so implementado no Windows; seguindo sem reiniciar.")
-        return False
-    try:
-        saida = _sp.run(["netstat", "-ano"], capture_output=True, text=True).stdout or ""
-    except Exception as e:
-        log(f"stop_comfyui: netstat falhou ({type(e).__name__}); seguindo.")
-        return False
-    pids = set()
-    for linha in saida.splitlines():
-        if f":{port} " in linha and "LISTENING" in linha.upper():
-            m = _re.search(r"(\d+)\s*$", linha.strip())
-            if m:
-                pids.add(m.group(1))
-    if not pids:
-        return False
-    for pid in pids:
-        _sp.run(["taskkill", "/PID", pid, "/T", "/F"],
-                capture_output=True, text=True)
-    log(f"ComfyUI encerrado (pid {', '.join(sorted(pids))}) para o proximo estagio subir limpo.")
-    time.sleep(6)
-    return True
+    start_comfyui_ltx.bat ja fazia, e nao acrescenta dependencia.
+
+    Mecanismo delegado a `gpu_watchdog.free_port` desde 2026-09-04 -- eram
+    duas copias do mesmo netstat+taskkill (esta e `decupagem_ui._free_port`)
+    que podiam divergir; agora ha uma so implementacao."""
+    from script_pipeline import gpu_watchdog
+    derrubou = gpu_watchdog.free_port(port, log=log)
+    if derrubou:
+        log("ComfyUI encerrado para o proximo estagio subir limpo.")
+        time.sleep(4)  # gpu_watchdog.free_port ja espera 2s; folga extra pro SO liberar a porta
+    return derrubou
 
 
 def comfy_launch_args(python_exe: str, *, port: int = 8188, cache_none: bool | None = None,
@@ -340,13 +407,58 @@ def comfy_launch_args(python_exe: str, *, port: int = 8188, cache_none: bool | N
     # Existe porque as flags que decidem se um clipe cabe na placa
     # (--disable-dynamic-vram, --reserve-vram, --vram-headroom, --cuda-device)
     # sao justamente as que a gente precisa medir uma a uma.
-    extra_env = _os.environ.get("LTX_COMFY_EXTRA_ARGS", "").split()
+    #
+    # MEDIDO 2026-09-04: o DEFAULT (sem a variavel setada) costumava ser "" --
+    # dynamic VRAM ligado -- e cada chamador que queria desliga-la tinha que
+    # lembrar de exportar a variavel antes (so `start_decupagem.bat` e
+    # `decupagem_ui.py` faziam isso). Qualquer invocacao direta (CLI, outro
+    # script, ou eu mesmo testando manualmente) ficava com dynamic VRAM ligado
+    # por omissao -- e travou de verdade: um still com imagem de referencia
+    # (LoadImage+VAEEncode+ReferenceLatent, FLUX) ficou "rodando" por 7+ HORAS
+    # sem terminar (GPU 100%, 24,1/24,5 GB, fila do ComfyUI com 43 planos
+    # empacados atras dele), o mesmo sintoma ja documentado pro estagio de
+    # VIDEO no MEMORIAL 3.33. Ate hoje --disable-dynamic-vram so tinha sido
+    # medido necessario pro LTX 2.5; este caso prova que o FLUX dos stills,
+    # com imagem de referencia, tem o mesmo problema. Sem nenhum caso medido
+    # em que dynamic VRAM ligado seja melhor, o padrao agora e DESLIGADO --
+    # setar `LTX_COMFY_EXTRA_ARGS=""` (string vazia, nao ausente) liga de
+    # volta pra quem realmente quiser comparar. Ver MEMORIAL 3.58.
+    if "LTX_COMFY_EXTRA_ARGS" in _os.environ:
+        extra_env = _os.environ["LTX_COMFY_EXTRA_ARGS"].split()
+    else:
+        # EXCECAO GGUF -- MEDIDO 2026-09-07: com --disable-dynamic-vram, um
+        # plano de video em gguf-q6k (decupagem, stills SD3.5 com imagem de
+        # referencia + audio_conditioning) ficou "gerando" por 3 tentativas
+        # seguidas, cada uma morta em exatamente 1802s pelo watchdog, GPU a
+        # 100%/24,1-24,2 de 24,5 GB, historico do ComfyUI SEMPRE vazio --
+        # nunca terminou nem uma vez, independente do numero de frames do
+        # plano (153, ?, 121). O proprio log do ComfyUI-GGUF avisa isso na
+        # subida do servidor ("if you use gguf we recommend keeping dynamic
+        # vram enabled"), so que como texto de log, ninguem olha antes de
+        # travar. O default de 2026-09-04 (`--disable-dynamic-vram` sempre
+        # que a env var nao esta setada) foi medido so com bf16 LTX 2.5 e
+        # FLUX dos stills -- GGUF nunca foi testado nessa combinacao. variant
+        # distilled/dev continuam com a flag (nao mudou nada pra eles).
+        variante = _os.environ.get("LTX25_VARIANT", "") or _os.environ.get("MINIMAX_H3_VARIANT", "")
+        extra_env = [] if variante.startswith("gguf") else ["--disable-dynamic-vram"]
     args += extra_env
     return args
 
 
-def ensure_comfyui_running(server: str, *, log=print, wait_seconds: int = 180) -> bool:
+def ensure_comfyui_running(server: str, *, log=print, wait_seconds: int = 180,
+                           watch_stalls: bool = True) -> bool:
+    """`watch_stalls=True` (padrao) poe um `gpu_watchdog.StallWatch` de olho na
+    fila deste servidor assim que ele sobe -- MEDIDO 2026-09-04: sem isto, um
+    job preso na fila so era descoberto depois que 43 planos, um atras do
+    outro, esperassem o PROPRIO timeout inteiro (7 horas ao todo). O watch
+    detecta em minutos e reinicia sozinho ate 2x; na 3a trava seguida, para de
+    tentar e so avisa (ver gpu_watchdog.StallWatch). `auto_recover=True` aqui
+    porque matar+religar o ComfyUI e uma recuperacao ja usada em varios
+    lugares deste projeto quando o servidor engasga -- nao e uma acao nova ou
+    mais arriscada que o que ja se fazia na mao."""
     if comfy_is_up(server):
+        if watch_stalls:
+            _start_stall_watch_once(server, log=log)
         return True
     log("ComfyUI nao esta respondendo; iniciando (mesmo comando de start_comfyui_ltx.bat)...")
     import os
@@ -383,10 +495,64 @@ def ensure_comfyui_running(server: str, *, log=print, wait_seconds: int = 180) -
     while time.time() < deadline:
         if comfy_is_up(server):
             log("ComfyUI pronto.")
+            if watch_stalls:
+                _start_stall_watch_once(server, log=log)
             return True
         time.sleep(3)
     log(f"ComfyUI nao respondeu em {wait_seconds}s.")
     return False
+
+
+_STALL_WATCHES: dict = {}
+
+
+def _start_stall_watch_once(server: str, *, log=print) -> None:
+    """Um StallWatch por servidor (server URL), nao um por chamada -- varios
+    estagios chamam `ensure_comfyui_running` pro MESMO servidor dentro da
+    mesma corrida, e nao faz sentido empilhar threads vigiando a mesma fila.
+
+    `stall_seconds=1800` (era 300): o MESMO servidor atende tanto os stills
+    (FLUX, ~1min cada, onde 300s ja seria folgado) quanto o estagio de VIDEO
+    do plano de decupagem, que passa longe disso -- MEDIDO no MEMORIAL 3.35
+    ate 1087s pra um unico plano em bf16 lowvram. Um numero curto o
+    suficiente pros stills mata um plano de video legitimo antes de
+    terminar -- exatamente o bug achado e corrigido no MiniMax H3
+    (`minimax_h3_backend._start_stall_watch_once`, 2026-09-06): o
+    detector so olha "mesmo job rodando ha N segundos", nao GPU ociosa, e
+    o watchdog matava o servidor (`taskkill /F`) achando trava onde so
+    havia um plano demorado de verdade. 1800s cobre o pior caso ja medido
+    com folga."""
+    if server in _STALL_WATCHES:
+        return
+    import re as _re
+    import os as _os
+    from script_pipeline import gpu_watchdog
+    m = _re.search(r":(\d+)", server)
+    port = int(m.group(1)) if m else 8188
+    # EXCECAO GGUF -- MEDIDO 2026-09-07: o travamento do GGUF (race condition
+    # no "async weight offloading" do ComfyUI + ComfyUI-GGUF sob VRAM
+    # apertada, ver MEMORIAL 3.66) e categoricamente diferente do caso bf16
+    # que justificou os 1800s -- no bf16 lowvram o job estava genuinamente
+    # rodando devagar (1087s medido, chegou ao fim). No GGUF travado, o log
+    # do proprio ComfyUI mostra "got prompt" e NUNCA sai a barra de progresso
+    # do sampler -- ou seja, quando trava, trava ANTES de comecar a gerar de
+    # verdade, nao durante. Os GGUF que terminam (varios medidos na mesma
+    # corrida) fecham entre 115s e 600s, incluindo ate ~106s de inicializacao
+    # de modelo no pior caso -- 900s cobre isso com folga generosa sem
+    # herdar os 1800s inteiros de espera morta por travamento. bf16
+    # (distilled/dev) continua em 1800s, sem mudanca.
+    variante = _os.environ.get("LTX25_VARIANT", "")
+    is_gguf = variante.startswith("gguf")
+    stall_seconds = 900 if is_gguf else 1800
+    # Mais tentativas no GGUF: cada uma custa metade do tempo (900s vs
+    # 1800s) e a race e intermitente -- MEDIDO na mesma corrida, planos que
+    # travaram na 1a tentativa terminaram normalmente na 2a ou 3a apos o
+    # servidor reiniciar. 4 tentativas a 900s = mesmo teto de tempo que 2
+    # tentativas a 1800s, com mais chances de a race nao repetir.
+    max_recoveries = 4 if is_gguf else 2
+    _STALL_WATCHES[server] = gpu_watchdog.start_stall_watch(
+        server, port, log=log, stall_seconds=stall_seconds, auto_recover=True,
+        max_auto_recoveries=max_recoveries)
 
 
 def submit_and_wait(server: str, workflow: dict, *, timeout: int = 600, log=print) -> Optional[dict]:
@@ -404,7 +570,18 @@ def submit_and_wait(server: str, workflow: dict, *, timeout: int = 600, log=prin
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        history = _http_json(f"{server}/history/{prompt_id}")
+        try:
+            history = _http_json(f"{server}/history/{prompt_id}")
+        except (TimeoutError, OSError, urllib.error.URLError) as exc:
+            # BUGFIX 2026-09-01: _http_json usa timeout de socket fixo (30s), mas o
+            # log do ComfyUI mostra prompts levando ate 320s (troca de modelo em VRAM
+            # -- MEMORIAL.md 3.30/3.35). Nesse trecho sincrono o HTTP do ComfyUI pode
+            # nao responder por mais de 30s sem que o job tenha falhado de verdade.
+            # Sem este except, um UNICO poll lento derrubava o estagio inteiro mesmo
+            # dentro do orcamento de `timeout` (600s por padrao).
+            log(f"/history nao respondeu a tempo ({type(exc).__name__}); tentando de novo.")
+            time.sleep(2)
+            continue
         entry = history.get(prompt_id)
         if entry:
             status = entry.get("status", {})
@@ -443,13 +620,15 @@ def generate_scene_storyboard(
     steps: int, cfg: float, seed: int, out_path: Path, log=print,
     clip: str = "", vae: str = "", guidance: float = 3.5, prompt_override: str | None = None,
     reference_image: str | None = None, art_directed: bool = False,
+    weight_dtype: str = "default", lora_name: str = "", lora_strength: float = 0.8,
 ) -> bool:
     architecture = detect_architecture(checkpoint)
     # A character reference photo routes through the ReferenceLatent graph, which a
     # controlled test in this project showed FLUX.2 Klein genuinely honours: same
     # prompt + same seed produced an unrelated person WITHOUT the reference and the
     # referenced person WITH it. Only FLUX has this path; SDXL falls back to text.
-    if reference_image and architecture == "flux":
+    used_reference_template = bool(reference_image and architecture == "flux")
+    if used_reference_template:
         template = json.loads((ROOT / "comfyui_workflows" / "character_flux_reference.json").read_text(encoding="utf-8"))
     else:
         template = json.loads(WORKFLOW_TEMPLATES[architecture].read_text(encoding="utf-8"))
@@ -466,6 +645,12 @@ def generate_scene_storyboard(
         values["CLIP_NAME"] = clip
         values["VAE_NAME"] = vae
         values["GUIDANCE"] = guidance
+    elif architecture == "flux1":
+        clip_l, clip_t5 = _flux1_clip_names(clip)
+        values["CLIP_L"], values["CLIP_T5"] = clip_l, clip_t5
+        values["VAE_NAME"] = vae
+        values["GUIDANCE"] = guidance
+        values["WEIGHT_DTYPE"] = weight_dtype
     elif architecture == "sd35":
         g, l, t = _sd35_clip_names(clip)
         values["CLIP_G"], values["CLIP_L"], values["CLIP_T5"] = g, l, t
@@ -477,6 +662,10 @@ def generate_scene_storyboard(
             reference_image, f"{scene['index']:02d}_{out_path.stem}"
         )
     workflow = _fill_template(template, values)
+    if lora_name:
+        arch_key = "flux-ref" if used_reference_template else architecture
+        _apply_lora(workflow, arch_key, lora_name, lora_strength)
+        log(f"Cena {scene['index']}: LoRA {lora_name} (forca {lora_strength}).")
     log(f"Cena {scene['index']}: {prompt[:120]}...")
     entry = submit_and_wait(server, workflow, log=log)
     if entry is None:
@@ -489,6 +678,49 @@ def generate_scene_storyboard(
     shutil.copy2(image_path, out_path)
     log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
     return True
+
+
+def generate_scene_storyboard_with_consistency(
+    scene: dict, cast: dict, *, out_path: Path, reference_image: str | None,
+    seed: int, consistency_threshold: float | None, consistency_max_retries: int = 2,
+    log=print, **kwargs,
+) -> bool:
+    """Mesmo `generate_scene_storyboard`, com auditoria de consistencia facial
+    opcional -- porte de `render_shots.py::_still_for_shot` (decupagem, MEMORIAL
+    3.53) pro caminho compartilhado do screenplay (MEMORIAL 3.54, "o que ja
+    migra sozinho"). Sem `reference_image` ou sem `consistency_threshold`, e
+    exatamente uma chamada normal -- custo extra so pra quem pediu."""
+    if not reference_image or consistency_threshold is None:
+        return generate_scene_storyboard(scene, cast, out_path=out_path,
+                                         reference_image=reference_image, seed=seed, log=log, **kwargs)
+
+    from script_pipeline.consistency_audit import check_consistency
+
+    melhor_path, melhor_score = None, None
+    for tentativa in range(consistency_max_retries + 1):
+        seed_tentativa = seed + tentativa * 7919
+        candidato = out_path if tentativa == 0 else out_path.with_suffix(f".tentativa{tentativa}.png")
+        if not generate_scene_storyboard(scene, cast, out_path=candidato,
+                                         reference_image=reference_image, seed=seed_tentativa, log=log, **kwargs):
+            continue
+        ok_cons, score = check_consistency(str(candidato), reference_image, threshold=consistency_threshold)
+        log(f"  consistencia (tentativa {tentativa}, seed {seed_tentativa}): "
+            f"{'sem rosto detectavel' if score is None else f'{score:.3f}'} "
+            f"{'(dentro do limiar)' if ok_cons else '(ABAIXO do limiar)'}")
+        if melhor_score is None or (score is not None and score > (melhor_score or -1)):
+            melhor_path, melhor_score = candidato, score
+        if ok_cons:
+            break
+
+    if melhor_path is None:
+        return False
+    if melhor_path != out_path:
+        melhor_path.replace(out_path)
+    for tentativa in range(1, consistency_max_retries + 1):
+        sobra = out_path.with_suffix(f".tentativa{tentativa}.png")
+        if sobra.exists():
+            sobra.unlink(missing_ok=True)
+    return out_path.exists()
 
 
 def main(argv=None) -> int:
@@ -508,9 +740,24 @@ def main(argv=None) -> int:
     parser.add_argument("--height", type=int, default=1024, help="2x the render stage's --height (512).")
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--cfg", type=float, default=7.0, help="SDXL only (ignored for FLUX, which uses --guidance).")
-    parser.add_argument("--clip", default="Qwen3-8B-FP8-native-bf16.safetensors", help="FLUX only: text encoder filename in ComfyUI/models/text_encoders/.")
-    parser.add_argument("--vae", default="flux2-vae.safetensors", help="FLUX only: VAE filename in ComfyUI/models/vae/.")
-    parser.add_argument("--guidance", type=float, default=3.5, help="FLUX only: FluxGuidance scale.")
+    parser.add_argument("--clip", default="Qwen3-8B-FP8-native-bf16.safetensors",
+                         help="FLUX/FLUX.1 (Krea/Kontext): text encoder filename(s) "
+                              "-- Qwen3 unico para --image-engine flux, ou "
+                              "\"clip_l.safetensors,t5xxl_fp8_e4m3fn.safetensors\" para flux-krea/flux-kontext.")
+    parser.add_argument("--vae", default="flux2-vae.safetensors", help="FLUX/FLUX.1 only: VAE filename in ComfyUI/models/vae/.")
+    parser.add_argument("--guidance", type=float, default=3.5, help="FLUX/FLUX.1 only: FluxGuidance scale.")
+    parser.add_argument("--weight-dtype", default=None, dest="weight_dtype",
+                         choices=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"],
+                         help="FLUX.1 only (flux-krea/flux-kontext): UNETLoader weight_dtype. "
+                              "Sem isto, o motor escolhe (default para flux-krea, ja fp8-scaled; "
+                              "fp8_e4m3fn para flux-kontext, bf16 de 23,8 GB).")
+    parser.add_argument("--consistency-threshold", type=float, default=None,
+                         help="auditoria automatica de consistencia facial (insightface) contra "
+                              "a reference_image do plano/personagem -- MEMORIAL 3.53/3.54. Sem "
+                              "isto, desligado (comportamento de sempre). So se aplica a planos "
+                              "que JA tem reference_image (dialogo com foto/sheet em cast.json); "
+                              "plano sem referencia nao muda.")
+    parser.add_argument("--consistency-max-retries", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--comfy-server", default="http://127.0.0.1:8188")
     parser.add_argument("--no-auto-start", action="store_true")
@@ -541,6 +788,10 @@ def main(argv=None) -> int:
             args.cfg = _padrao["cfg"]
         if "--guidance" not in (argv or sys.argv):
             args.guidance = _padrao["guidance"]
+        if args.weight_dtype is None:
+            args.weight_dtype = _padrao.get("weight_dtype", "default")
+    if args.weight_dtype is None:
+        args.weight_dtype = "default"
 
     from script_pipeline import run_folder
 
@@ -598,12 +849,15 @@ def main(argv=None) -> int:
                     shot_reference = (cast.get(line.get("character", "")) or {}).get("reference_image")
                 shot_out = storyboard_dir / f"scene_{scene['index']:02d}_s{shot_i:03d}.png"
                 seed_counter += 1
-                if not generate_scene_storyboard(
+                if not generate_scene_storyboard_with_consistency(
                     scene, cast, server=args.comfy_server, checkpoint=args.checkpoint,
                     width=args.width, height=args.height, steps=args.steps, cfg=args.cfg,
                     seed=args.seed + seed_counter, out_path=shot_out, log=log,
                     clip=args.clip, vae=args.vae, guidance=args.guidance,
+                    weight_dtype=args.weight_dtype,
                     prompt_override=shot_prompt, reference_image=shot_reference,
+                    consistency_threshold=args.consistency_threshold,
+                    consistency_max_retries=args.consistency_max_retries,
                 ):
                     scene_failures += 1
             failures += scene_failures
@@ -617,6 +871,7 @@ def main(argv=None) -> int:
             width=args.width, height=args.height, steps=args.steps, cfg=args.cfg,
             seed=args.seed + i, out_path=out_path, log=log,
             clip=args.clip, vae=args.vae, guidance=args.guidance,
+            weight_dtype=args.weight_dtype,
             prompt_override=args.prompt_override if args.only_scene is not None else None,
         )
         if not ok:

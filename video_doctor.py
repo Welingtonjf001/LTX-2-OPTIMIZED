@@ -516,6 +516,21 @@ def rife_available() -> bool:
     return os.path.exists(RIFE_EXE)
 
 
+# CORRIGIDO 2026-09-03: a nota anterior aqui ("RIFE quadricula acima de
+# ~1024px") estava ERRADA -- diagnóstico de causa trocada. O quadriculado era
+# do upscale (`upscale_video.ps1` com `-Model realesrgan-x4plus`, RRDBNet):
+# esse modelo devolve lixo determinístico (grid de blocos sem relação com o
+# conteúdo de entrada) neste build do ncnn-vulkan, INDEPENDENTE de resolução,
+# tile size (-t, testado 0/200/400/2000 = 1 tile só) ou GPU (0 e 1, mesmo
+# hash). `realesrgan-x4plus-anime` (mesma família RRDBNet) quebra igual, com
+# outra cara. `realesr-animevideov3` (SRVGG, o padrão original do script,
+# que eu tinha sobrescrito pra testar x4plus) sai limpo. RIFE testado DE NOVO
+# em par de frames 1536x1024 corretamente upscalados (animevideov3): saiu
+# perfeito, sem quadriculado, sem precisar de -u nem gpu específica. Ver
+# MEMORIAL.md 3.56 (correção).
+RIFE_MAX_LONG_SIDE = None  # sem limiar real conhecido; ver nota acima
+
+
 def repair_interpolate_rife(frames: list, a: int, b: int, gpu: str = "auto") -> bool:
     """Reconstrói frames[a..b] com RIFE, que é interpolação APRENDIDA.
 
@@ -527,8 +542,8 @@ def repair_interpolate_rife(frames: list, a: int, b: int, gpu: str = "auto") -> 
     posição fracionária exata entre as duas âncoras, em vez de bisseção
     recursiva -- que só cobriria vãos de 2^k-1 frames.
 
-    Devolve False se o RIFE não estiver instalado ou falhar, para o chamador
-    cair no warp."""
+    Devolve False se o RIFE não estiver instalado ou se falhar, para o
+    chamador cair no warp -- mais fraco em oclusão, mas nunca quadricula."""
     if not rife_available():
         return False
     left, right = a - 1, b + 1

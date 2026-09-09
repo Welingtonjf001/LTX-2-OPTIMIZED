@@ -74,7 +74,7 @@ def parse_indices(spec: str | None, total: int) -> list:
 
 
 def _still_key(shot: dict, reference: str | None, width: int, height: int,
-               checkpoint: str = "") -> str:
+               checkpoint: str = "", lora_name: str = "", lora_strength: float = 0.8) -> str:
     """Chave de cache de um still: tudo o que muda a IMAGEM.
 
     Existe porque reaproveitar por NOME DE ARQUIVO é o mesmo defeito que já
@@ -98,6 +98,10 @@ def _still_key(shot: dict, reference: str | None, width: int, height: int,
         # em silencio -- que e a mesma classe de defeito que esta chave existe
         # para impedir.
         checkpoint or "",
+        # LoRA muda o traço/identidade do mesmo jeito que trocar de motor --
+        # sem isto, ligar/desligar um LoRA (ou trocar a força) reaproveitaria
+        # o still antigo em silêncio.
+        f"{lora_name}@{lora_strength}" if lora_name else "",
     ])
     return hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
 
@@ -141,14 +145,42 @@ def _clip_frames(path: Path) -> int | None:
         return None
 
 
+def _apply_freeze(clip_path: Path, *, extra_seconds: float = 0.6, log=print) -> None:
+    """Segura o ULTIMO FRAME do clipe por `extra_seconds` extra, no fim.
+
+    Efeito "post" do enriquecimento de camera (ver shot_plan.enrich_camera_
+    style / POST_EFFECTS): nem LTX nem MiniMax tem como "congelar no meio" da
+    propria geracao -- e propriedade do CLIPE JA PRONTO, nao do prompt. Usa o
+    filtro `tpad` do ffmpeg (`stop_mode=clone` repete o ultimo frame) e
+    reescreve o arquivo no lugar via um temporario, mesmo padrao do resto
+    deste modulo. Falha aqui NAO derruba o plano -- o clipe sem o freeze ainda
+    e um clipe utilizavel, so sem o acento; ver a mesma filosofia em
+    apply_camera_style (silencioso, acabamento nao e estrutura)."""
+    tmp = clip_path.with_suffix(".freeze_tmp.mp4")
+    cmd = [FFMPEG, "-y", "-v", "error", "-i", str(clip_path),
+           "-vf", f"tpad=stop_mode=clone:stop_duration={extra_seconds}",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", str(tmp)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not tmp.exists():
+        log(f"  freeze: ffmpeg falhou ({r.stderr.strip()[-200:]}); clipe segue sem o efeito.")
+        tmp.unlink(missing_ok=True)
+        return
+    tmp.replace(clip_path)
+    log(f"  freeze aplicado: +{extra_seconds}s segurando o ultimo frame.")
+
+
 def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: int,
                     checkpoint: str, clip: str, vae: str, seed: int,
                     reference: str | None, log=print,
-                    steps: int = 8, cfg: float = 1.0, guidance: float = 3.5) -> Path | None:
+                    steps: int = 8, cfg: float = 1.0, guidance: float = 3.5,
+                    weight_dtype: str = "default",
+                    consistency_threshold: float | None = None,
+                    consistency_max_retries: int = 2,
+                    lora_name: str = "", lora_strength: float = 0.8) -> Path | None:
     import script_pipeline.generate_storyboards as sb
 
     out = out_dir / f"shot{idx:03d}_{shot['framing']}.png"
-    chave = _still_key(shot, reference, width, height, checkpoint)
+    chave = _still_key(shot, reference, width, height, checkpoint, lora_name, lora_strength)
     man = _load_manifest(out_dir)
     guardado = man.get(str(idx)) or {}
     if out.exists() and guardado.get("key") == chave:
@@ -156,20 +188,68 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
         return out
     if out.exists():
         log(f"  still existente foi feito com outro prompt/enquadramento; refazendo")
-    # `scene` é só o que generate_scene_storyboard usa para nomear a saída --
-    # o prompt vem inteiro de prompt_override, que é o ponto.
-    ok = sb.generate_scene_storyboard(
-        {"index": idx}, {}, server="http://127.0.0.1:8188",
-        checkpoint=checkpoint, width=width, height=height, steps=steps, cfg=cfg,
-        seed=seed + idx, out_path=out, clip=clip, vae=vae, guidance=guidance,
-        prompt_override=shot["storyboard_prompt"], reference_image=reference,
-        art_directed=bool(shot.get("art_direction")), log=log)
+
+    def _gerar_uma_vez(dest: Path, seed_usado: int) -> bool:
+        # `scene` é só o que generate_scene_storyboard usa para nomear a saída --
+        # o prompt vem inteiro de prompt_override, que é o ponto.
+        return sb.generate_scene_storyboard(
+            {"index": idx}, {}, server="http://127.0.0.1:8188",
+            checkpoint=checkpoint, width=width, height=height, steps=steps, cfg=cfg,
+            seed=seed_usado, out_path=dest, clip=clip, vae=vae, guidance=guidance,
+            weight_dtype=weight_dtype,
+            prompt_override=shot["storyboard_prompt"], reference_image=reference,
+            art_directed=bool(shot.get("art_direction")), log=log,
+            lora_name=lora_name, lora_strength=lora_strength)
+
+    # AUDITORIA DE CONSISTENCIA (2026-09-03, pedido do usuario -- ver MEMORIAL
+    # 3.53): so faz sentido com referencia (nada pra comparar sem ela) e com
+    # limiar explicito (None = comportamento de sempre, sem custo extra pra
+    # quem nao pediu). Gera ate `consistency_max_retries` tentativas, fica com
+    # a de MAIOR similaridade ao rosto de referencia -- nao so a primeira que
+    # passar, porque a diferenca entre "0,36 e 0,52" ainda importa.
+    if reference and consistency_threshold is not None:
+        from script_pipeline.consistency_audit import check_consistency
+
+        melhor_path, melhor_score, melhor_seed = None, None, None
+        for tentativa in range(consistency_max_retries + 1):
+            seed_tentativa = seed + idx + tentativa * 7919
+            candidato = out if tentativa == 0 else out.with_suffix(f".tentativa{tentativa}.png")
+            if not _gerar_uma_vez(candidato, seed_tentativa):
+                continue
+            ok_cons, score = check_consistency(str(candidato), reference, threshold=consistency_threshold)
+            log(f"  consistencia (tentativa {tentativa}, seed {seed_tentativa}): "
+                f"{'sem rosto detectavel' if score is None else f'{score:.3f}'} "
+                f"{'(dentro do limiar)' if ok_cons else '(ABAIXO do limiar)'}")
+            if melhor_score is None or (score is not None and score > (melhor_score or -1)):
+                melhor_path, melhor_score, melhor_seed = candidato, score, seed_tentativa
+            if ok_cons:
+                break
+        if melhor_path is None:
+            return None
+        if melhor_path != out:
+            melhor_path.replace(out)
+        # Limpa as tentativas descartadas (a vencedora ja foi movida pra `out`).
+        for tentativa in range(1, consistency_max_retries + 1):
+            sobra = out.with_suffix(f".tentativa{tentativa}.png")
+            if sobra.exists():
+                sobra.unlink(missing_ok=True)
+        if not out.exists():
+            return None
+        man[str(idx)] = {"file": out.name, "key": chave,
+                         "prompt": shot["storyboard_prompt"][:300],
+                         "reference": reference, "consistency_score": melhor_score,
+                         "seed": melhor_seed}
+        _save_manifest(out_dir, man)
+        return out
+
+    ok = _gerar_uma_vez(out, seed + idx)
     if not (ok and out.exists()):
         return None
     # Só registra depois de a imagem existir: manifesto apontando para arquivo
     # que não saiu faria o próximo run pular a geração e falhar mais adiante.
     man[str(idx)] = {"file": out.name, "key": chave,
-                     "prompt": shot["storyboard_prompt"][:300]}
+                     "prompt": shot["storyboard_prompt"][:300],
+                     "reference": reference}
     _save_manifest(out_dir, man)
     return out
 
@@ -180,6 +260,13 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
            steps: int | None = None, cfg: float | None = None,
            guidance: float | None = None, only_shots: str | None = None,
            dialogue: dict | None = None, audio_conditioning: bool = True,
+           weight_dtype: str | None = None,
+           consistency_threshold: float | None = None, consistency_max_retries: int = 2,
+           character_sheets: dict[str, str] | None = None,
+           lora_name: str = "", lora_strength: float = 0.8,
+           engine: str = "ltx",
+           minimax_aspect_ratio: str | None = None, minimax_megapixels: float | None = None,
+           minimax_turbo: bool = True,
            log=print) -> list:
     """AGRUPE POR MODELO, NÃO POR PLANO.
 
@@ -194,6 +281,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     do LTX. Duas cargas no total em vez de vinte."""
     import ltx25_backend
     import script_pipeline.generate_storyboards as sb
+    if engine == "minimax":
+        import minimax_h3_backend
 
     stills_dir = out_dir / "stills"
     clips_dir = out_dir / "clips"
@@ -212,18 +301,58 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # A cadeia de decupagem caia nisso porque quem sobe o servidor e o estagio
     # dos STILLS, que roda antes e nao pede a flag -- e os dois `ensure` voltam
     # cedo quando a porta ja responde. Ver MEMORIAL 3.30.
-    if not stills_only:
-        os.environ["LTX_COMFY_CACHE_NONE"] = "1"
-    if not sb.comfy_is_up("http://127.0.0.1:8188"):
+    # BUGFIX 2026-09-02: nada garantia o ComfyUI (FLUX/SD3.5, 8188) no ar antes
+    # da passada de STILLS -- so a passada de video tinha um `ensure`. Na
+    # pratica quase sempre "funcionava" porque outro estagio anterior (ex.:
+    # cast_characters com imagem de referencia) ja tinha subido o servidor por
+    # acidente; numa corrida sem isso, `_still_for_shot` -> generate_scene_
+    # storyboard -> submit_and_wait quebra com ConnectionRefusedError. Preciso
+    # de FLUX no ar sempre que vamos gerar QUALQUER still (stills_only OU o
+    # modo combinado antigo, nao so videos_only).
+    if (stills_only or not videos_only) and not sb.comfy_is_up("http://127.0.0.1:8188"):
         sb.ensure_comfyui_running("http://127.0.0.1:8188", log=log)
+
+    # Motor de video decide qual instancia de ComfyUI sobe -- as duas (LTX 2.5
+    # na 8188, MiniMax H3 na 8189) sao processos INDEPENDENTES mas disputam a
+    # MESMA 3090 fisica; minimax_h3_backend.py e explicito que nunca devem
+    # rodar as duas ao mesmo tempo. O estagio de stills sempre usa FLUX na
+    # 8188 (generate_storyboards.py), entao aqui, na troca pro estagio de
+    # video, e o unico lugar que sabe qual das duas o plano pediu.
+    if not stills_only:
+        if engine == "minimax":
+            if sb.comfy_is_up("http://127.0.0.1:8188"):
+                log("[render] motor=minimax: derrubando o ComfyUI do LTX 2.5 (8188) antes de subir o do MiniMax H3 (8189).")
+                sb.stop_comfyui(8188, log=log)
+            # minimax_h3_backend.generate() sobe o proprio servidor sozinho
+            # (ensure_server, dentro de submit_and_wait) -- nao precisa de
+            # nada aqui alem de garantir que o 8188 nao ficou no ar.
+        else:
+            os.environ["LTX_COMFY_CACHE_NONE"] = "1"
+            if not sb.comfy_is_up("http://127.0.0.1:8188"):
+                sb.ensure_comfyui_running("http://127.0.0.1:8188", log=log)
 
     # Amostragem por MOTOR. `steps=8` era fixo no codigo, e 8 e numero de modelo
     # DESTILADO: apontar este render para o SD 3.5, que usa CFG real, devolveria
     # imagem crua sem nenhum aviso. Quem passou o valor explicitamente manda.
-    padroes = sb.engine_defaults(sb.detect_architecture(checkpoint))
+    #
+    # BUGFIX 2026-09-02: `detect_architecture(checkpoint)` devolve a ARQUITETURA
+    # ("flux1"), nao o nome do MOTOR ("flux-krea"/"flux-kontext") -- os dois
+    # motores FLUX.1 compartilham arquitetura mas tem steps/guidance diferentes,
+    # e `engine_defaults("flux1")` nem existe (KeyError). Resolve pelo nome do
+    # ARQUIVO primeiro (bate exato com um motor conhecido); só cai pra
+    # architecture-guessing se o checkpoint nao for de nenhum motor catalogado.
+    padroes = None
+    nome_checkpoint = Path(checkpoint).name
+    for _eng, _cfg in sb.IMAGE_ENGINES.items():
+        if _cfg.get("checkpoint") == nome_checkpoint:
+            padroes = sb.engine_defaults(_eng)
+            break
+    if padroes is None:
+        padroes = sb.engine_defaults(sb.detect_architecture(checkpoint))
     passos = steps if steps is not None else padroes["steps"]
     escala_cfg = cfg if cfg is not None else padroes["cfg"]
     escala_guidance = guidance if guidance is not None else padroes["guidance"]
+    escala_weight_dtype = weight_dtype if weight_dtype is not None else padroes.get("weight_dtype", "default")
 
     todos = plan["shots"][:limit] if limit else plan["shots"]
     # Pares (indice ORIGINAL, plano). O indice tem de sobreviver ao filtro: ele
@@ -234,14 +363,37 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     if only_shots and len(shots) != len(todos):
         log(f"[render] {len(shots)} de {len(todos)} plano(s): "
             f"{sorted(i for i, _ in shots)}")
-    # Referência por personagem: o primeiro still de alguém guia os próximos.
-    refs: dict[str, str] = {}
+    # Referência por personagem: o primeiro still de alguém guia os próximos --
+    # A MENOS que exista uma character sheet (cast.json, `reference_image`,
+    # gerada pela aba dedicada -- ver decupagem_ui.py). Pré-semear com ela faz
+    # TODO plano do personagem, desde o primeiro, usar a "verdade canônica" em
+    # vez de deixar o primeiro close que calhar de sair virar a referência --
+    # é a rota padrão de consistência pedida pelo usuário 2026-09-03 (MEMORIAL
+    # 3.54): gera-se a cena 0/sheet UMA vez, com curadoria, e todo o resto
+    # clona dela em vez de cada plano reinventar o personagem. Como a chave já
+    # existe, a checagem "sujeito not in refs" mais abaixo nunca a sobrescreve
+    # com um still comum -- a sheet fica fixa a corrida inteira.
+    refs: dict[str, str] = dict(character_sheets or {})
+    # Referência por LOCAÇÃO (nova): mesma ideia, mas para cenário -- sem ela,
+    # todo plano SEM sujeito (wide/insert/estabelecimento) nunca tinha imagem
+    # de referência nenhuma, e o cenário derivava plano a plano dentro da
+    # MESMA cena (achado do usuário, 2026-09-03: "não mantém consistência de
+    # locação"). Chave e o índice da cena (`shot["scene"]") -- é o único
+    # identificador de lugar que sobrevive até aqui; `location` em si só
+    # existe no texto da cena, não em cada plano (ver shot_plan.py). O
+    # primeiro plano WIDE/FULL da cena (o enquadramento que mais mostra
+    # cenário, simétrico ao critério de personagem que usa close/medium)
+    # vira a referência dos planos seguintes sem sujeito.
+    location_refs: dict[int, str] = {}
     feitos = []
 
     for i, shot in shots:
         t0 = time.time()
         sujeito = shot.get("subject") or ""
+        cena_id = shot.get("scene")
         ref = refs.get(sujeito) if (use_reference and sujeito) else None
+        if ref is None and use_reference:
+            ref = location_refs.get(cena_id)
         log(f"\n[plano {i} · {len(shots)} na fila] cena {shot['scene']} · {shot['style']} · "
             f"{shot['framing']}/{shot['angle']}/{shot['movement']} · "
             f"{shot['seconds']}s ({shot['frames']}f)"
@@ -262,10 +414,14 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 log(f"  sem still para o plano {i}; rode --stills-only antes")
                 continue
         else:
-            still = _still_for_shot(shot, i, out_dir=stills_dir, width=width * 2,
-                                    height=height * 2, checkpoint=checkpoint, clip=clip,
+            still = _still_for_shot(shot, i, out_dir=stills_dir, width=width,
+                                    height=height, checkpoint=checkpoint, clip=clip,
                                     vae=vae, seed=seed, reference=ref, log=log,
-                                    steps=passos, cfg=escala_cfg, guidance=escala_guidance)
+                                    steps=passos, cfg=escala_cfg, guidance=escala_guidance,
+                                    weight_dtype=escala_weight_dtype,
+                                    consistency_threshold=consistency_threshold,
+                                    consistency_max_retries=consistency_max_retries,
+                                    lora_name=lora_name, lora_strength=lora_strength)
         if still is None:
             log(f"  still falhou; pulando o plano {i}")
             continue
@@ -274,6 +430,11 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         if use_reference and sujeito and sujeito not in refs and \
                 shot["framing"] in ("close", "extreme_close", "medium", "ots"):
             refs[sujeito] = str(still)
+        # Espelho pra locação: só vira referência o plano ABERTO o bastante
+        # pra mostrar cenário (o inverso do critério de personagem acima).
+        if use_reference and cena_id is not None and cena_id not in location_refs and \
+                shot["framing"] in ("wide", "full"):
+            location_refs[cena_id] = str(still)
 
         if stills_only:
             feitos.append({"shot": i, "still": str(still), "clip": None})
@@ -313,31 +474,81 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             else:
                 log(f"  clipe existente foi gerado com outro audio; refazendo")
         try:
-            ltx25_backend.generate(
-                shot["video_prompt"], str(clip_path),
-                width=width, height=height, num_frames=shot["frames"],
-                frame_rate=fps, seed=seed + i,
-                image_path=str(still), image_strength=1.0,
-                # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
-                # propria, que depois briga com o TTS por baixo da mixagem.
-                # Com isto ele constroi o som em volta da fala real, que e o
-                # que o caminho por FALA ja fazia (render_scenes.py:550).
-                audio_conditioning=wav_cond,
-                # O log do backend ia para o LIXO. Foi assim que o estagio de
-                # video ficou sem diagnostico: qual variante carregou, se o
-                # encoder foi para a CPU, quanto tempo em cada fase -- nada
-                # disso saia. Mesma licao da secao 3.28: silenciar o caminho de
-                # sucesso e razoavel, o de falha nao, e aqui os dois estavam
-                # silenciados. Prefixado para nao se confundir com o log do
-                # proprio render_shots.
-                log_cb=lambda m: log(f"    [ltx25] {m}"), timeout=2400)
+            if engine == "minimax":
+                # MiniMax H3 fala e sincroniza labios NATIVAMENTE a partir do
+                # texto do prompt (o proprio video_prompt do plano ja carrega
+                # a fala, quando o roteiro/decoupage a colocou la) -- nao ha
+                # audio_conditioning aqui, e o TTS/lipsync/mix do pipeline
+                # ficam sem o que fazer para estes planos (ver aviso no
+                # decupagem_ui.py e no CLI). `duration_seconds` e arredondado
+                # pro grid do proprio modelo (5+17k a 24fps), NAO o 8k+1 do
+                # LTX que o shot_plan usou pra calcular `shot["frames"]" --
+                # a duracao final pode divergir um pouco do planejado.
+                # MEDIDO 2026-09-02: um plano de 16,6s (401f) estourou 2400s
+                # (40 min) sem terminar -- bem alem de qualquer duracao ja
+                # validada pro MiniMax H3 (MEMORIAL 3.41 ja registrava 10s
+                # como estresse). 3600s da mais folga sem mascarar uma trava
+                # de verdade (a trava do 3.51/§3.[novo] destravou sozinha em
+                # 1727s -- 3600s cobre esse caso e o dobro dele).
+                # Rota de consistência padrão (MEMORIAL 3.54): quando o
+                # personagem tem sheet canônica, manda os DOIS refs que o
+                # grafo do MiniMax aceita -- o still DESTE plano (pose/
+                # enquadramento) e a sheet (identidade -- a mesma imagem que
+                # já ancorou o still na etapa de FLUX, reforçada aqui de novo
+                # no motor de vídeo). Sem sheet, cai no still sozinho, igual
+                # sempre foi.
+                refs_minimax = [str(still)] if still else []
+                sheet_do_sujeito = (character_sheets or {}).get(sujeito)
+                if sheet_do_sujeito and sheet_do_sujeito not in refs_minimax:
+                    refs_minimax.append(sheet_do_sujeito)
+                minimax_h3_backend.generate(
+                    shot["video_prompt"], str(clip_path),
+                    ref_images=refs_minimax[:2] or None,
+                    aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
+                    megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
+                    duration_seconds=shot["frames"] / fps,
+                    seed=seed + i, turbo=minimax_turbo,
+                    log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
+            else:
+                ltx25_backend.generate(
+                    shot["video_prompt"], str(clip_path),
+                    width=width, height=height, num_frames=shot["frames"],
+                    frame_rate=fps, seed=seed + i,
+                    image_path=str(still), image_strength=1.0,
+                    # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
+                    # propria, que depois briga com o TTS por baixo da mixagem.
+                    # Com isto ele constroi o som em volta da fala real, que e o
+                    # que o caminho por FALA ja fazia (render_scenes.py:550).
+                    audio_conditioning=wav_cond,
+                    # O log do backend ia para o LIXO. Foi assim que o estagio de
+                    # video ficou sem diagnostico: qual variante carregou, se o
+                    # encoder foi para a CPU, quanto tempo em cada fase -- nada
+                    # disso saia. Mesma licao da secao 3.28: silenciar o caminho de
+                    # sucesso e razoavel, o de falha nao, e aqui os dois estavam
+                    # silenciados. Prefixado para nao se confundir com o log do
+                    # proprio render_shots.
+                    log_cb=lambda m: log(f"    [ltx25] {m}"), timeout=2400)
             log(f"  clipe OK em {time.time()-t0:.0f}s -> {clip_path.name}"
-                f"{' (som condicionado pela fala)' if wav_cond else ''}")
+                f"{' (som condicionado pela fala)' if (engine != 'minimax' and wav_cond) else ''}"
+                f"{' (fala nativa do MiniMax H3)' if engine == 'minimax' else ''}")
+            if "freeze" in (shot.get("post_effects") or []):
+                _apply_freeze(clip_path, log=log)
             marca.write_text(chave, encoding="utf-8")
             feitos.append({"shot": i, "still": str(still), "clip": str(clip_path)})
         except Exception as e:
             log(f"  clipe FALHOU: {type(e).__name__}: {str(e).splitlines()[0][:160]}")
             feitos.append({"shot": i, "still": str(still), "clip": None})
+            # MEDIDO 2026-09-02: um TimeoutError no MiniMax H3 nao mata o
+            # servidor -- a geracao orfa continua rodando por tras, e o
+            # PROXIMO plano ve a porta "up" mas presa, tenta subir de novo e
+            # colide ("Port 8189 is already in use"), derrubando um plano que
+            # nao tinha nada de errado. Depois de QUALQUER falha no motor
+            # minimax, forca reinicio antes do proximo plano -- mesma
+            # disciplina do stop_comfyui(8189) que o run_decupagem.py agora
+            # faz entre corridas, so que aqui e DENTRO da mesma corrida.
+            if engine == "minimax":
+                log("  reiniciando o servidor do MiniMax H3 antes do proximo plano (falha pode ter deixado geracao orfa presa na porta).")
+                sb.stop_comfyui(8189, log=log)
     return feitos
 
 
@@ -604,8 +815,9 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=544)
     ap.add_argument("--fps", type=float, default=24.0)
     ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--image-engine", default="flux", choices=["flux", "sd35", "sdxl"],
-                    help='motor de imagem dos stills. flux = melhor adesao a enquadramento e lado de tela e aceita imagem de referencia, mas carrega ~4 min e encosta no teto de VRAM da 3090. sd35 = carrega em ~1 min, cabe em ~12 GB e amostra mais rapido, mas obedece menos o enquadramento e NAO tem referencia. --checkpoint/--clip/--vae explicitos continuam ganhando disto.')
+    from script_pipeline.generate_storyboards import IMAGE_ENGINES as _IMAGE_ENGINES_CLI
+    ap.add_argument("--image-engine", default="flux", choices=sorted(_IMAGE_ENGINES_CLI),
+                    help='motor de imagem dos stills. flux = melhor adesao a enquadramento e lado de tela e aceita imagem de referencia, mas carrega ~4 min e encosta no teto de VRAM da 3090. sd35 = carrega em ~1 min, cabe em ~12 GB e amostra mais rapido, mas obedece menos o enquadramento e NAO tem referencia. flux-krea/flux-kontext = FLUX.1, ver MEMORIAL 3.48. --checkpoint/--clip/--vae explicitos continuam ganhando disto.')
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--clip", default=None)
     ap.add_argument("--vae", default=None)
@@ -678,6 +890,10 @@ def main() -> int:
         args.clip = _motor["clip"]
     if args.vae is None:
         args.vae = _motor["vae"]
+    # BUGFIX 2026-09-03 (mesmo do render_shots_stage.py, MEMORIAL 3.52): sem
+    # isto, flux-kontext carregava o bf16 de 23,8 GB cru, sem o cast fp8_e4m3fn
+    # que precisa pra caber.
+    weight_dtype = _motor.get("weight_dtype", "default")
 
     feitos = render(plan, out_dir, width=args.width, height=args.height, fps=args.fps,
                     checkpoint=args.checkpoint, clip=args.clip, vae=args.vae,
@@ -685,7 +901,7 @@ def main() -> int:
                     videos_only=args.videos_only, steps=args.steps, cfg=args.cfg,
                     only_shots=args.only_shots, dialogue=dialogo,
                     audio_conditioning=not args.no_audio_conditioning,
-                    use_reference=not args.no_reference)
+                    use_reference=not args.no_reference, weight_dtype=weight_dtype)
     if not args.stills_only and dialogo:
         print(f"[render_shots] voz: {len(dialogo)} fala(s) para muxar"
               f"{', com lip-sync' if not args.no_lipsync else ''}")

@@ -25,8 +25,13 @@ from ltx_core.text_encoders.gemma import GemmaTextEncoder
 from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessorOutput
 from ltx_core.tools import AudioLatentTools, LatentTools, VideoLatentTools
 from ltx_core.types import AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
-from ltx_pipelines.utils.args import ImageConditioningInput
-from ltx_pipelines.utils.media_io import decode_image, load_image_conditioning, resize_aspect_ratio_preserving
+from ltx_pipelines.utils.args import ImageConditioningInput, VideoHeadConditioningInput
+from ltx_pipelines.utils.media_io import (
+    decode_image,
+    load_image_conditioning,
+    load_video_conditioning,
+    resize_aspect_ratio_preserving,
+)
 from ltx_pipelines.utils.types import (
     DenoisingFunc,
     DenoisingLoopFunc,
@@ -121,6 +126,39 @@ def combined_image_conditionings(
                 frame_idx=img.frame_idx,
             )
         conditionings.append(conditioning)
+    return conditionings
+
+
+def video_head_conditionings(
+    video_heads: list[VideoHeadConditioningInput],
+    height: int,
+    width: int,
+    video_encoder: VideoEncoder,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> list[ConditioningItem]:
+    """Like combined_image_conditionings but for a REAL multi-frame clip instead of
+    a single static image. load_video_conditioning concatenates the decoded pixel
+    frames along the temporal axis before the VAE encodes them together, so the
+    resulting latent spans multiple latent frames and carries genuine motion
+    (direction, speed, gesture phase) -- not just a repeated appearance snapshot.
+    VideoConditionByLatentIndex.apply_to() writes however many latent frames
+    `latent` spans starting at latent_idx=0, so this fills the opening of the clip
+    with real history instead of one frame."""
+    conditionings = []
+    for head in video_heads:
+        video = load_video_conditioning(
+            video_path=head.path,
+            height=height,
+            width=width,
+            frame_cap=head.num_frames,
+            dtype=dtype,
+            device=device,
+        )
+        encoded = video_encoder(video)
+        conditionings.append(
+            VideoConditionByLatentIndex(latent=encoded, strength=head.strength, latent_idx=0)
+        )
     return conditionings
 
 

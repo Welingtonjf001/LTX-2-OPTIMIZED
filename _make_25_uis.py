@@ -46,8 +46,55 @@ JOBS = [
             ('sys.executable, "-m", "ltx_pipelines.distilled",',
              'sys.executable, "-m", "ltx_pipelines_25",'),
             ('title="LTX-2.3 Studio + Queue"', 'title="LTX-2.5 Studio + Queue"'),
-            ('demo.launch(server_name="0.0.0.0", share=False)',
-             'demo.launch(server_name="0.0.0.0", share=False, server_port=7960)'),
+            # Ancora atualizada 2026-09-06: a linha original mudou desde que
+            # este job foi escrito (LTX_UI_HOST + theme/css moveram pro
+            # launch() na migracao Gradio 6, ver CLAUDE.md); a versao velha
+            # nao batia mais e o gerador falhava alto, como projetado.
+            ('demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), share=False, theme=theme, css=css)',
+             'demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), share=False, server_port=7960,\n'
+             '                theme=theme, css=css)'),
+            # Model-variant selector (2026-09-06): the 2.3 original has no
+            # concept of "variant" (distilled/dev/gguf-q6k are LTX-2.5-only,
+            # see ltx25_backend.VARIANTS/GGUF_VARIANTS), so this whole block
+            # only exists in the generated 2.5 file, never in web_ui_v4.py.
+            # Reads the choice list live off ltx25_backend instead of a
+            # hardcoded copy, so it never drifts from what the backend
+            # actually supports.
+            ('from collections import deque',
+             'from collections import deque\nimport ltx25_backend'),
+            ('                checkpoint_path = gr.Textbox(label="Checkpoint", value=DEFAULT_CHECKPOINT)\n'
+             '                gemma_path = gr.Textbox(label="Gemma Root", value=DEFAULT_GEMMA)\n'
+             '                upsampler_path = gr.Textbox(label="Upsampler", value=DEFAULT_UPSAMPLER)',
+             '                checkpoint_path = gr.Textbox(label="Checkpoint", value=DEFAULT_CHECKPOINT)\n'
+             '                gemma_path = gr.Textbox(label="Gemma Root", value=DEFAULT_GEMMA)\n'
+             '                upsampler_path = gr.Textbox(label="Upsampler", value=DEFAULT_UPSAMPLER)\n'
+             '                variant_dd = gr.Dropdown(\n'
+             '                    label="Model variant",\n'
+             '                    choices=sorted(ltx25_backend.VARIANTS) + sorted(ltx25_backend.GGUF_VARIANTS),\n'
+             '                    value=ltx25_backend.DEFAULT_VARIANT,\n'
+             '                    info="distilled/dev/etc. rodam o checkpoint safetensors; gguf-* trocam pro "\n'
+             '                         "UnetLoaderGGUF. Ver MEMORIAL/CLAUDE.md pelas diferencas de velocidade "\n'
+             '                         "e o que ainda nao foi validado em cada variante.",\n'
+             '                )'),
+            ('        auto_continue_last_frame,\n'
+             '        checkpoint_path, gemma_path, upsampler_path,\n'
+             '        img1_path, img1_idx, img1_str,',
+             '        auto_continue_last_frame,\n'
+             '        variant,\n'
+             '        checkpoint_path, gemma_path, upsampler_path,\n'
+             '        img1_path, img1_idx, img1_str,'),
+            ('            auto_continue_last_frame,\n'
+             '            checkpoint_path, gemma_path, upsampler_path,\n'
+             '            i1_img, i1_idx, i1_str,',
+             '            auto_continue_last_frame,\n'
+             '            variant_dd,\n'
+             '            checkpoint_path, gemma_path, upsampler_path,\n'
+             '            i1_img, i1_idx, i1_str,'),
+            ('        "upsampler_path": upsampler_path,',
+             '        "upsampler_path": upsampler_path,\n        "variant": variant,'),
+            ('            "--seed", str(int(chunk_seed)),\n        ]',
+             '            "--seed", str(int(chunk_seed)),\n'
+             '            "--variant", job[\'variant\'],\n        ]'),
         ],
     ),
     (
@@ -56,8 +103,10 @@ JOBS = [
             ('sys.executable, "-m", "ltx_pipelines.distilled",',
              'sys.executable, "-m", "ltx_pipelines_25",'),
             ('title="LTX-2.3 Film Maker"', 'title="LTX-2.5 Film Maker"'),
-            ('demo.launch(server_name="0.0.0.0")',
-             'demo.launch(server_name="0.0.0.0", server_port=7961)'),
+            # Ancora atualizada 2026-09-06, mesma causa da de web_ui_v4.py
+            # acima (migracao Gradio 6, LTX_UI_HOST).
+            ('demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), theme=theme)',
+             'demo.launch(server_name=os.environ.get("LTX_UI_HOST", "127.0.0.1"), server_port=7961, theme=theme)'),
         ],
     ),
     (

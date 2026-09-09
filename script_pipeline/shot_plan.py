@@ -43,8 +43,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from pathlib import Path as pathlib_Path
 
@@ -123,6 +127,54 @@ MOVEMENTS = {
     "pull":   "the camera pulls back slowly",
     "orbit":  "the camera orbits slowly around the subject",
     "handheld": "handheld camera, subtle unsteady movement",
+    # NOVO 2026-09-04 -- catalogo trazido pelo usuario (video de referencia com
+    # vocabulario tipo "/dollyin", "/orbit", "/steadicam" etc.). Mesma forma dos
+    # 5 originais: chave curta -> frase que entra direto no prompt de video. Nao
+    # sao parametro estrutural de nenhum motor (LTX/MiniMax nao tem API de
+    # camera) -- e so texto testado, igual ao resto. "dollyin" nao virou entrada
+    # nova porque já é `push` com outro nome; manter os dois seria dois textos
+    # pro mesmo efeito.
+    "steadicam": "smooth steadicam movement, gliding alongside the subject",
+    "crane_up": "the camera cranes upward, rising away from the subject",
+    "crane_down": "the camera cranes downward, descending toward the subject",
+    "zoom_in": "the lens zooms in, tightening the frame without the camera moving",
+}
+
+# Vocabulario de LUZ, mesma ideia do MOVEMENTS mas para lighting -- ADITIVO ao
+# `look` de cada estilo (STYLES[...]["look"]), nao substituto: o `look` carrega
+# o humor geral do estilo ("warm soft light" do intimista), e a tag de luz aqui
+# e um acento pontual que o LLM so deveria escolher quando o plano especifico
+# pede algo que o look de base nao ja diz.
+LIGHTING = {
+    "": "",
+    "rimlight": "rim lighting, subject silhouetted against a bright backlight",
+    "volumetric": "volumetric light, visible light rays cutting through haze or smoke",
+    "golden_hour": "warm golden hour sunlight, long soft shadows",
+    "neon": "neon-lit, saturated color reflections, night city glow",
+}
+
+# Efeitos que NAO SAO PROMPT DE GERACAO -- sao instrucao para o POS-processamento
+# (segurar o ultimo frame / cortar com transicao) porque nem LTX nem MiniMax tem
+# como "congelar no meio" ou "cortar com whip pan" dentro de uma unica geracao;
+# isso e propriedade de como o CLIPE PRONTO e usado depois. `freeze` esta
+# implementado (render_shots.py segura o ultimo frame do clipe via ffmpeg
+# tpad). `whip` fica so REGISTRADO no plano por enquanto -- aplicar de verdade
+# exigiria trocar o concat-demuxer (stream-copy, rapido) do assemble_final.py
+# por filter_complex com re-encode so nos pares marcados, o que muda a
+# arquitetura daquele estagio; nao fiz enquanto nao for pedido.
+POST_EFFECTS = {"freeze", "whip"}
+
+# Subconjunto de MOVEMENTS/LIGHTING/POST_EFFECTS que o enriquecimento por LLM
+# (enrich_camera_style) pode escolher DENTRO de cada estilo -- nunca a lista
+# inteira. Existe pra nao deixar o LLM colocar "/freeze" numa cena de dialogo
+# calmo so porque achou o efeito interessante: a permissao já vem cortada pelo
+# estilo que a pessoa escolheu antes de qualquer chamada de LLM.
+CAMERA_STYLE_VOCAB = {
+    "classico":      {"movements": ["static", "push", "pull"], "lighting": [], "post": []},
+    "tenso":         {"movements": ["static", "handheld"], "lighting": ["rimlight"], "post": ["whip"]},
+    "nervoso":       {"movements": ["handheld", "zoom_in", "static"], "lighting": ["neon"], "post": ["whip", "freeze"]},
+    "intimista":     {"movements": ["static", "push", "steadicam"], "lighting": ["rimlight", "golden_hour"], "post": []},
+    "contemplativo": {"movements": ["orbit", "push", "pull", "crane_up", "crane_down"], "lighting": ["volumetric", "golden_hour"], "post": []},
 }
 
 # --------------------------------------------------------------------------
@@ -322,9 +374,19 @@ def frames_for(seconds: float, fps: float) -> int:
 
 def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
                        time_of_day: str, look: str, descriptor: str,
-                       screen_side: str | None, interior: str = "") -> str:
+                       screen_side: str | None, interior: str = "",
+                       pose: str = "") -> str:
     """Prompt do STILL. Carrega enquadramento e ângulo -- que o vídeo não
-    consegue estabelecer no frame 0."""
+    consegue estabelecer no frame 0.
+
+    `pose`: MEDIDO 2026-09-08 (usuário assistiu ao filme e apontou) -- até
+    aqui este prompt não carregava NADA de ação/gesto, só aparência e
+    enquadramento; o still saía sempre um retrato neutro parado, e o vídeo
+    tinha que migrar sozinho, sem pose inicial compatível, pro gesto que o
+    `_video_prompt` pede (`action`/`beat_visual`). `pose` é o MESMO texto de
+    ação já calculado pelo chamador (não duplica enriquecimento) -- aqui
+    entra encurtado e fraseado como um instante congelado, não a ação
+    inteira em curso (que é o que o vídeo descreve)."""
     partes = [FRAMINGS[framing]]
     if ANGLES.get(angle):
         partes.append(ANGLES[angle])
@@ -333,6 +395,12 @@ def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
         if SUBJECT_HINTS.get(framing):
             clausula += f", {SUBJECT_HINTS[framing]}"
         partes.append(clausula)
+    pose_curta = (pose or "").strip().rstrip(".")
+    if pose_curta:
+        # Recorte na primeira frase -- o still e um instante, nao a acao
+        # inteira (que pode cobrir varios segundos de movimento).
+        pose_curta = re.split(r"(?<=[.!?])\s+", pose_curta)[0].rstrip(".")
+        partes.append(f"caught mid-gesture: {pose_curta}")
     if screen_side and framing in ("ots", "close", "medium"):
         partes.append(f"positioned on the {screen_side} of the frame, looking across it")
     # MEDIDO 2026-08-27: "CORREDOR CURVO COLORIDO" sem o INT. do cabecalho virou
@@ -495,6 +563,9 @@ def _plano_de_estabelecimento(scene: dict, style: dict, tensao: float | None,
         "seconds": segundos, "frames": frames_for(segundos, fps),
         "storyboard_prompt": ". ".join(partes) + ".",
         "video_prompt": ". ".join(video) + ".",
+        "look_base": look, "interior": interior, "descriptor": "",
+        "location": scene.get("location", ""), "time_of_day": scene.get("time_of_day", ""),
+        "beat": corpo, "quote": None, "emotion": None, "fallback": corpo,
     }
 
 
@@ -643,12 +714,21 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
                 framing=enquadre, angle=angulo, subject=sujeito,
                 location=scene.get("location", ""), time_of_day=scene.get("time_of_day", ""),
                 look=look, descriptor=descriptors.get(sujeito, ""),
-                screen_side=lado, interior=interior),
+                screen_side=lado, interior=interior, pose=acao),
             "video_prompt": _video_prompt(
                 action=acao, movement=movimento, descriptor=descriptors.get(sujeito, ""),
                 look=look, quote=fala if (include_quotes and fala) else None,
                 subject=sujeito, fallback=scene.get("action_text", ""),
                 emotion=emocao_da_fala),
+            # Ingredientes crus, guardados so para o enriquecimento de camera
+            # opcional (enrich_camera_style) poder RECONSTRUIR os dois prompts
+            # acima depois de trocar movement/look -- sem isto ele teria que
+            # adivinhar de volta a partir do texto ja montado, que e o mesmo
+            # tipo de erro que binding-com-string-parseada sempre da.
+            "look_base": look, "interior": interior, "descriptor": descriptors.get(sujeito, ""),
+            "location": scene.get("location", ""), "time_of_day": scene.get("time_of_day", ""),
+            "beat": acao, "quote": fala if (include_quotes and fala) else None,
+            "emotion": emocao_da_fala, "fallback": scene.get("action_text", ""),
         })
 
     # O estabelecimento vem na frente e so quando a cobertura ainda nao abriu o
@@ -791,6 +871,178 @@ def plan_all(scenes: list, structure: dict | None, *, style_name: str = "classic
             "shots": planos, "total_shots": len(planos), "total_seconds": round(total, 1)}
 
 
+# --------------------------------------------------------------------------
+# enriquecimento por LLM: camera/luz por plano, dentro do vocabulario do estilo
+# --------------------------------------------------------------------------
+# Pedido do usuario 2026-09-04: dado um Estilo já escolhido, deixar o LLM
+# decidir qual movimento de câmera/luz cada PLANO ESPECÍFICO merece -- não
+# trocar o Estilo por outra coisa, refinar dentro dele. `plan_all` continua
+# 100% determinístico (a estrutura não muda); isto é uma passada OPCIONAL
+# depois, que só troca `movement`/`look` quando o LLM escolhe algo do
+# vocabulário PERMITIDO para aquele estilo -- nunca fora dele, e a validação
+# roda em código, não confia na resposta do modelo.
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+
+# MEDIDO 2026-08-26 (MEMORIAL 3.21, ver docstring do módulo): câmera é DESTINO,
+# não estado -- um plano curto não termina o movimento que promete. "orbit" é o
+# mais caro disso (uma volta inteira pede tempo real); planos abaixo deste
+# limiar não recebem orbit do LLM mesmo que o estilo permita, caem no
+# determinístico. Não é chute: 5s é o `shot_seconds` do próprio "contemplativo"
+# menos folga, o único estilo que já usa orbit por padrão hoje.
+ORBIT_MIN_SECONDS = 5.0
+
+
+def _call_ollama_camera(system: str, user: str, model: str, log=print) -> dict | None:
+    payload = {
+        "model": model, "stream": False, "format": "json", "think": False,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "options": {"temperature": 0.2, "num_ctx": 8192},
+    }
+    req_bytes = json.dumps(payload).encode("utf-8")
+    # RETRY (2026-09-09): mesmo fix de parse_screenplay.py (MEMORIAL 3.65)
+    # -- sem isto uma falha HTTP transiente na primeira cena derrubava o
+    # --camera-llm da cena inteira, caindo no vocabulario padrao do estilo em
+    # silencio, mesmo quando a proxima chamada teria funcionado.
+    body = None
+    for tentativa in range(3):
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/chat", data=req_bytes,
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                body = json.load(r)
+            if tentativa:
+                log(f"[camera_style] Ollama ok na tentativa {tentativa + 1}/3.")
+            break
+        except urllib.error.HTTPError as e:
+            log(f"[camera_style] Ollama HTTP {e.code} (tentativa {tentativa + 1}/3).")
+        except Exception as e:
+            log(f"[camera_style] Ollama inacessivel ({type(e).__name__}): {e} (tentativa {tentativa + 1}/3).")
+        if tentativa < 2:
+            time.sleep(2)
+    if body is None:
+        return None
+    content = (body.get("message") or {}).get("content") or ""
+    if not content.strip():
+        log("[camera_style] Ollama devolveu content vazio.")
+        return None
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", content, re.S)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+        log("[camera_style] resposta nao era JSON valido.")
+        return None
+
+
+_CAMERA_SYSTEM_PROMPT = """Voce e um diretor de fotografia. Para cada plano
+listado, escolha OPCIONALMENTE um movimento de camera e/ou uma tag de luz
+DENTRO das listas permitidas para o estilo daquele plano especifico -- nunca
+fora delas. So escolha algo quando o CONTEUDO do plano (o campo "beat")
+genuinamente pede -- a maioria dos planos deve ficar com "movement": null e
+"lighting": null, mantendo a escolha padrao do estilo. Nao repita o mesmo
+movimento nao-default em planos consecutivos da mesma cena sem motivo -- isso
+lê como decisão de câmera, não como tique.
+
+"post" (lista) so quando o plano tem um motivo forte: "freeze" para um
+instante que pede congelar (auge de um salto, revelação chocante), "whip"
+quando o PRÓXIMO plano deveria entrar com corte brusco tipo chicote (mudança
+abrupta de lugar/tempo/energia). Raro -- a maioria dos planos deve ter "post": [].
+
+Devolva JSON: {"choices": [{"position": <int>, "movement": <string ou null>,
+"lighting": <string ou null>, "post": [<string>, ...]}, ...]} -- um item por
+plano recebido, na mesma ordem."""
+
+
+def enrich_camera_style(plan: dict, *, engine: str, log=print) -> int:
+    """Passada OPCIONAL sobre um plano ja construido por `plan_all`: para cada
+    plano, pergunta ao LLM se movimento/luz do vocabulario PERMITIDO pelo
+    estilo daquele plano [CAMERA_STYLE_VOCAB] descrevem melhor a cena do que o
+    padrao determinístico. Muda `shot["movement"]`/`shot["look_base"]` e
+    RECONSTROI os dois prompts só quando a escolha valida (dentro da lista
+    permitida, dentro do limiar de duração pro orbit). Devolve quantos planos
+    mudaram.
+
+    Falha (Ollama fora do ar, resposta invalida) e SILENCIOSA por cena -- essa
+    cena fica com o determinístico de `plan_all`, que já é um resultado
+    utilizável; isto é acabamento, não estrutura."""
+    por_cena: dict[int, list[dict]] = {}
+    for sh in plan.get("shots", []):
+        por_cena.setdefault(sh["scene"], []).append(sh)
+
+    total_mudados = 0
+    for cena_idx, shots in por_cena.items():
+        itens = []
+        for sh in shots:
+            vocab = CAMERA_STYLE_VOCAB.get(sh.get("style"), CAMERA_STYLE_VOCAB["classico"])
+            movs = list(vocab["movements"])
+            if "orbit" in movs and sh.get("seconds", 0) < ORBIT_MIN_SECONDS:
+                movs = [m for m in movs if m != "orbit"]
+            itens.append({
+                "position": sh["position"], "framing": sh.get("framing"),
+                "subject": sh.get("subject") or "(sem sujeito)",
+                "beat": (sh.get("beat") or "")[:200],
+                "seconds": sh.get("seconds"),
+                "movements_permitidos": movs,
+                "lighting_permitida": list(vocab["lighting"]),
+                "post_permitido": list(vocab["post"]),
+            })
+        user = json.dumps({"planos": itens}, ensure_ascii=False)
+        resp = _call_ollama_camera(_CAMERA_SYSTEM_PROMPT, user, engine, log=log)
+        if not resp or not isinstance(resp.get("choices"), list):
+            log(f"[camera_style] cena {cena_idx}: sem resposta valida, mantendo padrao do estilo.")
+            continue
+
+        by_pos = {sh["position"]: sh for sh in shots}
+        allowed_by_pos = {it["position"]: it for it in itens}
+        for escolha in resp["choices"]:
+            pos = escolha.get("position")
+            sh = by_pos.get(pos)
+            allowed = allowed_by_pos.get(pos)
+            if sh is None or allowed is None:
+                continue
+
+            mudou = False
+            novo_mov = escolha.get("movement")
+            if novo_mov and novo_mov in allowed["movements_permitidos"] and novo_mov != sh["movement"]:
+                sh["movement"] = novo_mov
+                mudou = True
+
+            nova_luz = escolha.get("lighting")
+            look_efetivo = sh.get("look_base", "")
+            if nova_luz and nova_luz in allowed["lighting_permitida"] and LIGHTING.get(nova_luz):
+                look_efetivo = ", ".join(p for p in (look_efetivo, LIGHTING[nova_luz]) if p)
+                mudou = True
+
+            post = [p for p in (escolha.get("post") or [])
+                   if p in allowed["post_permitido"] and p in POST_EFFECTS]
+            if post:
+                sh["post_effects"] = post
+                mudou = True
+
+            if mudou:
+                total_mudados += 1
+                sh["storyboard_prompt"] = _storyboard_prompt(
+                    framing=sh["framing"], angle=sh["angle"], subject=sh["subject"],
+                    location=sh.get("location", ""), time_of_day=sh.get("time_of_day", ""),
+                    look=look_efetivo, descriptor=sh.get("descriptor", ""),
+                    screen_side=sh.get("screen_side"), interior=sh.get("interior", ""),
+                    pose=sh.get("beat", ""))
+                sh["video_prompt"] = _video_prompt(
+                    action=sh.get("beat", ""), movement=sh["movement"],
+                    descriptor=sh.get("descriptor", ""), look=look_efetivo,
+                    quote=sh.get("quote"), subject=sh["subject"],
+                    fallback=sh.get("fallback", ""), emotion=sh.get("emotion"))
+    log(f"[camera_style] {total_mudados} plano(s) com camera/luz refinada pelo LLM "
+        f"(de {sum(len(v) for v in por_cena.values())} no total).")
+    return total_mudados
+
+
 def summary(plan: dict) -> str:
     l = [f"estilo base: {plan['style']} -- {plan['style_descricao']}",
          f"{plan['total_shots']} planos, {plan['total_seconds']}s no total"]
@@ -848,6 +1100,13 @@ def main() -> int:
     ap.add_argument("--dialogue", default=None,
                     help="dialogue/lines.json; usa a duracao REAL do TTS por fala")
     ap.add_argument("--out")
+    ap.add_argument("--camera-llm", action="store_true",
+                    help="deixa o LLM refinar movimento/luz por plano, dentro do "
+                         "vocabulario permitido pelo Estilo escolhido (ver "
+                         "CAMERA_STYLE_VOCAB) -- opt-in, custa 1 chamada de Ollama "
+                         "por cena. Sem isto, so o determinístico de sempre.")
+    ap.add_argument("--engine", default="qwen3.6-35b-a3b:latest",
+                    help="tag do Ollama para --camera-llm")
     args = ap.parse_args()
     changes = parse_style_changes(args.style_changes)
 
@@ -890,6 +1149,8 @@ def main() -> int:
     plan = plan_all(scenes, structure, style_name=args.style, fps=args.fps,
                     include_quotes=args.include_quotes, style_changes=changes,
                     descriptors=descritores, durations=duracoes)
+    if args.camera_llm:
+        enrich_camera_style(plan, engine=args.engine, log=print)
     out = Path(args.out) if args.out else sp.parent / "shot_plan.json"
     json.dump(plan, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     print(summary(plan))

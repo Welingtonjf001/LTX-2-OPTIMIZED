@@ -64,6 +64,9 @@ tmp
 /outputs/
 /logs/
 /audios_moving/
+# Saida de teste solta na raiz (mp4 renderizado + script scratch), mesma
+# categoria de /outputs/ acima -- nao e reproduzivel a partir do codigo.
+/scenes/
 *.log
 *.bak*.py
 *_ANTES/
@@ -75,6 +78,11 @@ tmp
 *.old.py
 *.prev.py
 *.before_*.py
+# MEDIDO 2026-09-09: a extensao real destes backups vem DEPOIS do .py
+# (music_maker_ui_v2.py.bak_compile_20260722), nao antes -- o padrao
+# `*.bak*.py` da linha 68 nunca bateu com eles, e git status confirmou os
+# 9 arquivos da familia ainda aparecendo como untracked.
+*.py.bak_*
 
 # Model checkpoints
 *.ckpt

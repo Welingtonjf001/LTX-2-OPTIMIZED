@@ -53,6 +53,7 @@ import json
 import os
 import re
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -199,26 +200,41 @@ def _call_ollama(system: str, user: str, model: str, log=print) -> dict | None:
                      {"role": "user", "content": user}],
         "options": {"temperature": 0.2, "num_ctx": 32768},
     }
-    req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=600) as r:
-            body = json.load(r)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            log(f"[story_structure] modelo '{model}' nao existe nesta instancia do Ollama.")
-            try:
-                tags = json.load(urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=10))
-                log("  servidos: " + ", ".join(m["name"] for m in tags.get("models", [])))
-            except Exception:
-                pass
-        else:
-            log(f"[story_structure] Ollama HTTP {e.code}")
-        return None
-    except Exception as e:
-        log(f"[story_structure] Ollama inacessivel ({type(e).__name__}): {e}")
+    req_bytes = json.dumps(payload).encode("utf-8")
+    # RETRY (2026-09-09, auditoria pos-Storyboard-Director): mesmo fix de
+    # `parse_screenplay.py` (2026-09-07, MEMORIAL 3.65) portado pra ca -- esta
+    # e a implementacao COMPARTILHADA que `cast_characters.py` e
+    # `prompt_polish.py` chamam, e ate agora so o `_call_ollama` PROPRIO do
+    # parse_screenplay tinha retry. Uma falha HTTP transiente na primeira
+    # chamada nao pode custar o descritor de um personagem inteiro se a
+    # segunda tentativa teria funcionado. 3x o timeout de conexao curto, nao
+    # 3x os 600s de geracao.
+    body = None
+    for tentativa in range(3):
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/chat", data=req_bytes,
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                body = json.load(r)
+            if tentativa:
+                log(f"[story_structure] Ollama ok na tentativa {tentativa + 1}/3.")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                log(f"[story_structure] modelo '{model}' nao existe nesta instancia do Ollama.")
+                try:
+                    tags = json.load(urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=10))
+                    log("  servidos: " + ", ".join(m["name"] for m in tags.get("models", [])))
+                except Exception:
+                    pass
+                return None
+            log(f"[story_structure] Ollama HTTP {e.code} (tentativa {tentativa + 1}/3).")
+        except Exception as e:
+            log(f"[story_structure] Ollama inacessivel ({type(e).__name__}): {e} (tentativa {tentativa + 1}/3).")
+        if tentativa < 2:
+            time.sleep(2)
+    if body is None:
         return None
 
     content = (body.get("message") or {}).get("content") or ""

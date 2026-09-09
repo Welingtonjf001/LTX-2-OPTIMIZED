@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,24 @@ SCENE_HEADING_RE = re.compile(
 # location holds the free-text description; time_of_day is left for the LLM
 # enrichment pass to infer from context (never guessed by regex).
 SCENE_HEADING_ALT_RE = re.compile(r"^\s*Cena\s+\d+\s*[—–\-]\s*(.+)$", re.IGNORECASE)
+
+# Terceiro estilo, visto em roteiros gerados por LLM como "prompt de vídeo" (ex.:
+# treatments do Gemini/GPT para LTX/Sora/Runway): cabeçalho com timecode e a
+# palavra "Bloco" em vez de "Cena" -- "[00:00 - 01:15] Bloco 1: A Caminhada Sob
+# as Flores". MEDIDO 2026-09-04: sem isto, nenhuma das duas regexes acima casa
+# nenhuma linha, `parse_structure` devolve [] e cai no fallback de prosa
+# (`_extract_freeform_scene`) -- que existe pra parágrafo corrido com fala
+# marcada por verbo ("ela exclama:"), não pra roteiro já formatado em blocos
+# CABEÇALHO/PERSONAGEM/fala. Resultado real observado: 1 cena, 1 fala
+# detectada de um roteiro com 5 cenas e 35 falas -- o fallback não é uma rede
+# de segurança aqui, é uma armadilha silenciosa. O timecode em si é
+# descartado (não há campo pra ele em Scene); só o texto depois de "Bloco N"
+# vira o título/local bruto, do jeito que SCENE_HEADING_ALT_RE já faz pra
+# "Cena N -- ...".
+SCENE_HEADING_BLOCO_RE = re.compile(
+    r"^\s*(?:\[[\d:]+\s*[—–\-]\s*[\d:]+\]\s*)?Bloco\s+\d+\s*[:\-—–]\s*(.+)$",
+    re.IGNORECASE,
+)
 
 # Períodos do dia reconhecidos no fim de um cabeçalho. Existe porque o
 # cabeçalho de TRÊS partes -- "INT. TORRE DO RELÓGIO - ESCADA - NOITE", formato
@@ -279,6 +298,23 @@ def parse_structure(text: str) -> list[Scene]:
     pending_speaker: Optional[str] = None
     pending_parenthetical: Optional[str] = None
     dialogue_buffer: list[str] = []
+    # Texto antes do primeiro cabeçalho (lista de personagens, nota de locação
+    # etc. -- comum em treatments gerados por LLM). MEDIDO 2026-09-04: esse
+    # bloco costuma carregar a ÚNICA descrição física concreta dos personagens
+    # do roteiro inteiro; descartá-lo (como este parser fazia antes) faz
+    # `cast_characters` inventar aparência do zero, contradizendo o que o
+    # autor já escreveu. Anexado ao action_text da PRIMEIRA cena assim que ela
+    # é criada, em vez de jogado fora -- ver anexação abaixo.
+    preamble_lines: list[str] = []
+
+    def _attach_preamble(scene: Scene) -> None:
+        if preamble_lines and len(scenes) == 1:
+            texto = " ".join(preamble_lines).strip()
+            if texto:
+                scene.action_text = (texto + " " + scene.action_text).strip()
+                print(f"[parse_screenplay] {len(preamble_lines)} linha(s) antes do "
+                      f"primeiro cabecalho anexadas a cena 1 (nao descartadas)",
+                      file=sys.stderr)
 
     def flush_dialogue():
         nonlocal pending_speaker, pending_parenthetical, dialogue_buffer
@@ -311,6 +347,7 @@ def parse_structure(text: str) -> list[Scene]:
                 time_of_day=time_of_day,
             )
             scenes.append(current)
+            _attach_preamble(current)
             continue
 
         heading_alt = SCENE_HEADING_ALT_RE.match(stripped) if stripped else None
@@ -323,13 +360,27 @@ def parse_structure(text: str) -> list[Scene]:
                 time_of_day="",
             )
             scenes.append(current)
+            _attach_preamble(current)
+            continue
+
+        heading_bloco = SCENE_HEADING_BLOCO_RE.match(stripped) if stripped else None
+        if heading_bloco:
+            flush_dialogue()
+            current = Scene(
+                index=len(scenes) + 1,
+                heading_raw=stripped,
+                location=heading_bloco.group(1).strip(),
+                time_of_day="",
+            )
+            scenes.append(current)
+            _attach_preamble(current)
             continue
 
         if current is None:
-            # Content before any scene heading -- ignore (title page / cold open text
-            # without a slugline). A real screenplay always starts with a heading;
-            # if this one doesn't, that's a formatting problem for the user to fix,
-            # not something this parser should guess at.
+            # Content before any scene heading (lista de personagens, nota de
+            # locação etc.) -- guardado, não descartado; ver _attach_preamble.
+            if stripped:
+                preamble_lines.append(stripped)
             continue
 
         if not stripped:
@@ -937,18 +988,44 @@ def enrich_with_llm_ollama(
             "options": {"num_predict": min(1500, 400 + 60 * len(scene.dialogue)),
                         "temperature": 0},
         }
-        req = urllib.request.Request(
-            f"{ollama_url}/api/chat", data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=900) as r:
-                data = json.load(r)
-            raw = (data.get("message") or {}).get("content", "")
+        req_bytes = json.dumps(payload).encode("utf-8")
+        # RETRY 2026-09-07: uma corrida inteira (20260907_ltx_distilled) caiu no
+        # fallback de scene_action_text para as 38 falas porque a PRIMEIRA
+        # chamada ao Ollama devolveu HTTP 500 (aquecimento do modelo?) e nunca
+        # foi tentada de novo -- as chamadas seguintes teriam funcionado (o
+        # cast_characters, que roda logo depois, usou o mesmo Ollama sem erro).
+        # 3 tentativas com backoff curto: cobre falha transiente sem custar
+        # muito quando o servidor esta genuinamente fora do ar (falha rapido,
+        # 3x o timeout de conexao, nao 3x os 900s de geracao).
+        last_error = None
+        raw = ""
+        ok = False
+        for attempt in range(3):
+            req = urllib.request.Request(
+                f"{ollama_url}/api/chat", data=req_bytes,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=900) as r:
+                    data = json.load(r)
+                raw = (data.get("message") or {}).get("content", "")
+                ok = True
+                if attempt:
+                    log(f"[parse_screenplay] cena {scene.index}: Ollama ok na "
+                        f"tentativa {attempt + 1}.")
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    log(f"[parse_screenplay] cena {scene.index}: Ollama falhou "
+                        f"({e}), tentativa {attempt + 1}/3, tentando de novo...")
+                    time.sleep(3)
+        if ok:
             results.append({"id": job_id, "ok": True, "raw_text": raw})
-        except Exception as e:
-            log(f"[parse_screenplay] cena {scene.index}: Ollama falhou ({e}).")
-            results.append({"id": job_id, "ok": False, "error": str(e), "raw_text": ""})
+        else:
+            log(f"[parse_screenplay] cena {scene.index}: Ollama falhou ({last_error}) "
+                "apos 3 tentativas.")
+            results.append({"id": job_id, "ok": False, "error": str(last_error), "raw_text": ""})
 
     for result in results:
         scene, lines_needing_emotion = scene_by_id.get(result["id"], (None, None))
