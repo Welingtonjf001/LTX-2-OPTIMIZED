@@ -123,6 +123,11 @@ def main() -> int:
     ap.add_argument("--minimax-megapixels", type=float, default=None)
     ap.add_argument("--minimax-no-turbo", dest="minimax_turbo", action="store_false", default=True,
                     help="20 passos em vez dos 4 da LoRA turbo -- mais lento, nao medido aqui.")
+    ap.add_argument("--minimax-ref-audio", action="store_true",
+                    help="manda o WAV do TTS ja sintetizado para esta fala como ref_audios do "
+                         "MiniMax H3 (timbre/cadencia reais -- MEMORIAL 3.74). So tem efeito com "
+                         "--engine minimax E dialogue/lines.json disponivel. Opt-in: validado so "
+                         "com uma fala isolada ate agora, nao com a cadeia de producao inteira.")
     ap.add_argument("--consistency-threshold", type=float, default=None,
                     help="auditoria automatica de consistencia facial (insightface) contra a "
                          "imagem de referencia do plano -- ver MEMORIAL 3.53. Sem isto, desligado "
@@ -207,7 +212,7 @@ def main() -> int:
                        lora_name=args.lora, lora_strength=args.lora_strength,
                        engine=args.engine, minimax_aspect_ratio=args.minimax_aspect_ratio,
                        minimax_megapixels=args.minimax_megapixels,
-                       minimax_turbo=args.minimax_turbo, log=log)
+                       minimax_turbo=args.minimax_turbo, minimax_ref_audio=args.minimax_ref_audio, log=log)
     if args.stills_only:
         print(f"[5-D] {sum(1 for f in feitos if f.get('still'))} still(s); "
               "rode de novo com --videos-only para os clipes.")

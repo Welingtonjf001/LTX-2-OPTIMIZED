@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -255,49 +257,233 @@ def carregar_run(nome: str):
             video_de(run))
 
 
-def salvar_cast(nome: str, conteudo: str) -> str:
+def carregar_run_completo(nome: str) -> tuple:
+    """Mesmo que `carregar_run`, mais o que a TELA (nao so os dados) precisa
+    mostrar ao trocar de corrida: mensagem de status, trilha de estagio
+    zerada (nao ha corrida rodando neste momento) e o roteiro em uso limpo
+    -- a corrida carregada ja tem `parse/scenes.json` prprio, entao trazer
+    OUTRO roteiro so faz sentido se a pessoa pedir explicitamente."""
+    auto, cast, plano, enriq, stills, video = carregar_run(nome)
     if not nome:
-        return "Selecione uma corrida primeiro."
+        return (auto, cast, plano, enriq, stills, video,
+                "Nenhuma corrida selecionada. Escolha uma existente e clique \"Carregar corrida "
+                "selecionada\" -- ou, se acabou de clicar \"① Nova corrida\", dê um nome acima e "
+                "clique \"Salvar corrida\".",
+                "", "Passo 2: arraste um .txt OU cole o texto e clique \"Usar texto colado\".",
+                _stage_html(None, -1), "")
+    ja_tem_parse = (RUNS_DIR / nome / "parse" / "scenes.json").exists()
+    aviso_roteiro_txt = (
+        "Roteiro desta corrida já processado (veja \"Parse + enriquecimento\" abaixo). "
+        "Só traga um roteiro aqui se quiser SUBSTITUIR o desta corrida."
+        if ja_tem_parse else
+        "Corrida nova, sem roteiro ainda. Passo 2: arraste um .txt OU cole o texto e clique "
+        "\"Usar texto colado\"."
+    )
+    return (auto, cast, plano, enriq, stills, video,
+            _corrida_status_pronta(nome),
+            "", aviso_roteiro_txt,
+            _stage_html(None, -1), resumo_descriptor_gaps(cast))
+
+
+def resumo_descriptor_gaps(cast_texto: str) -> str:
+    """Aviso destacado quando algum personagem ficou com descritor
+    incompleto (`descriptor_gaps` -- ver `cast_characters.py::
+    _audit_and_fix_descriptors`). Antes so dava pra ver lendo o JSON bruto
+    linha por linha ou rolando o log da corrida -- pedido do usuario
+    2026-09-09."""
+    try:
+        cast = json.loads(cast_texto) if (cast_texto or "").strip() else {}
+    except json.JSONDecodeError:
+        return ""
+    if not cast:
+        return ""
+    incompletos = {nome: info.get("descriptor_gaps") for nome, info in cast.items()
+                  if isinstance(info, dict) and info.get("descriptor_gaps")}
+    if not incompletos:
+        return "✅ Todos os descritores completos (cabelo, rosto/porte, roupa, item único)."
+    linhas = [f"- **{nome}**: faltando {', '.join(gaps)}" for nome, gaps in incompletos.items()]
+    return ("⚠️ **Descritor incompleto** (a aparência pode sair genérica nos stills desse "
+            "personagem):\n" + "\n".join(linhas))
+
+
+def salvar_cast(nome: str, conteudo: str) -> tuple:
+    if not nome:
+        return "Selecione uma corrida primeiro.", gr.update()
     try:
         json.loads(conteudo)          # nao gravar JSON quebrado por cima do bom
     except json.JSONDecodeError as e:
-        return f"JSON invalido, nada gravado: {e}"
+        return f"JSON invalido, nada gravado: {e}", gr.update()
     alvo = RUNS_DIR / nome / "characters" / "cast.json"
     alvo.parent.mkdir(parents=True, exist_ok=True)
     alvo.write_text(conteudo, encoding="utf-8")
     return (f"cast.json gravado. Os stills usam o descritor na chave de cache, "
-            f"entao rodar de novo refaz so os planos afetados.")
+            f"entao rodar de novo refaz so os planos afetados.",
+            resumo_descriptor_gaps(conteudo))
 
 
 # --------------------------------------------------------------------------
-# roteiro colado direto na UI, sem precisar de um .txt em disco antes
+# roteiro: PONTO UNICO de entrada, por arquivo (arrastar/clicar) OU por texto
+# colado -- pedido do usuario 2026-09-09: os dois caminhos existiam como
+# campos separados e confusos ("Roteiro .txt" de um lado, "Texto do roteiro"
+# do outro), sem deixar claro que os dois terminavam no MESMO lugar. Os dois
+# agora convergem em `roteiro_path` (visivel na tela, e o unico valor que
+# `rodar()` de fato usa como `--script`).
 # --------------------------------------------------------------------------
 ROTEIROS_DIR = RUNS_DIR / "_roteiros"
 
 
-def salvar_roteiro_colado(texto: str, novo_nome: str) -> tuple:
-    """Grava o texto colado como .txt em `_roteiros/` e devolve o CAMINHO --
-    preenche o campo "Roteiro .txt" existente em vez de abrir um segundo
-    caminho de execucao. `rodar()` continua so aceitando arquivo (e e o que
-    `run_decupagem --script` espera); isto so poupa a pessoa de salvar o
-    arquivo a mao antes de colar o caminho aqui.
+def _slug(texto: str) -> str:
+    base = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (texto or "").strip())
+    return base or time.strftime("roteiro_%Y%m%d_%H%M%S")
 
-    `_roteiros/` (nome com underscore) ja e ignorado por `listar_runs()` --
-    mesma convencao usada nesta sessao pro roteiro Beatriz/Lucas."""
+
+def usar_arquivo_roteiro(arquivo, nome_run: str) -> tuple:
+    """Dispara sozinho quando um .txt e arrastado ou escolhido -- sem
+    precisar de um botao extra, porque so ha UMA coisa sensata a fazer com
+    um arquivo que acabou de chegar.
+
+    Sem ARQUIVO, NAO MEXE em nada (gr.update() nos dois campos) em vez de
+    mostrar aviso -- este evento tambem dispara quando `usar_texto_colado`
+    limpa a caixa de arquivo de proposito (par com o texto colado), e um
+    aviso aqui apagaria a mensagem de sucesso que aquele acabou de escrever."""
+    if not arquivo:
+        return gr.update(), gr.update()
+    caminho = Path(arquivo)
+    try:
+        linhas = len(caminho.read_text(encoding="utf-8", errors="replace").splitlines())
+    except OSError as e:
+        return "", f"Nao consegui ler o arquivo: {e}"
+    return str(caminho), f"✅ Roteiro pronto (arquivo): {caminho.name} -- {linhas} linha(s). Agora clique Rodar (aba abaixo)."
+
+
+def usar_texto_colado(texto: str, nome_run: str) -> tuple:
+    """Grava o texto colado como .txt em `_roteiros/` e devolve o mesmo
+    formato que `usar_arquivo_roteiro` -- os dois caminhos de entrada
+    terminam no MESMO lugar. Tambem limpa o campo de arquivo (`gr.File`),
+    para o estado na tela nunca sugerir os dois ao mesmo tempo."""
     texto = (texto or "").strip()
     if not texto:
-        return gr.update(), "Cole o texto do roteiro antes de salvar."
+        return gr.update(), "Cole o texto do roteiro antes de clicar aqui.", gr.update()
     ROTEIROS_DIR.mkdir(parents=True, exist_ok=True)
-    base = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (novo_nome or "").strip())
-    if not base:
-        base = time.strftime("roteiro_%Y%m%d_%H%M%S")
+    base = _slug(nome_run)
     caminho = ROTEIROS_DIR / f"{base}.txt"
     n = 2
     while caminho.exists():
         caminho = ROTEIROS_DIR / f"{base}_{n}.txt"
         n += 1
     caminho.write_text(texto, encoding="utf-8")
-    return str(caminho), f"Roteiro salvo em {caminho} -- preenchido no campo acima. Clique Rodar."
+    linhas = len(texto.splitlines())
+    return (str(caminho),
+            f"✅ Roteiro pronto (colado): salvo em {caminho.name} -- {linhas} linha(s). Agora clique Rodar (aba abaixo).",
+            gr.update(value=None))
+
+
+# --------------------------------------------------------------------------
+# gestao de corrida: nova / criar (salvar nome) / apagar
+# --------------------------------------------------------------------------
+def nova_corrida() -> tuple:
+    """"① Nova corrida": so limpa a TELA (roteiro, cast, plano, stills,
+    log, status) e desmarca a corrida selecionada -- nao cria nem apaga nada
+    em disco. Prepara a interface para "Salvar" (que ai sim cria a pasta) ou
+    para carregar outra corrida existente. Pedido do usuario: clicar em Nova
+    tem que deixar a tela pronta pra um roteiro/prompt diferente, sem
+    resquicio da corrida anterior."""
+    auto, cast, plano, enriq, stills, video = carregar_run(None)
+    return (
+        gr.update(value=None),                      # runs: desmarcado
+        "",                                          # novo_nome
+        None,                                        # arquivo_roteiro
+        "",                                          # roteiro_colado
+        "",                                          # roteiro_path
+        "Aguardando: traga o roteiro depois de salvar a corrida (passo 2).",  # aviso_roteiro
+        "Tela limpa. Passo 1: dê um nome acima e clique \"Salvar corrida\".",  # aviso_corrida
+        auto, cast, plano, enriq, stills, video,
+        "",                                          # log
+        _stage_html(None, -1),                       # estagio_html
+        "",                                          # cast_gaps_aviso
+    )
+
+
+def criar_corrida(nome: str) -> tuple:
+    """"Salvar corrida": cria a PASTA da corrida nova (com timestamp, mesmo
+    esquema que `rodar()` já usava para corrida sem nome) e a seleciona --
+    sem isso não havia como ter uma corrida "de verdade" (com nome escolhido
+    pela pessoa) antes de rodar a cadeia inteira."""
+    base = _slug(nome) if (nome or "").strip() else None
+    if base is None:
+        return gr.update(), "Informe um nome antes de clicar \"Salvar corrida\"."
+    nome_final = f"{time.strftime('%Y%m%d_%H%M')}_{base}"
+    run = RUNS_DIR / nome_final
+    if run.exists():
+        return gr.update(), f"Já existe uma corrida chamada '{nome_final}' -- tente outro nome."
+    run.mkdir(parents=True)
+    novas = listar_runs()
+    return (gr.update(choices=novas, value=nome_final),
+            f"✅ Corrida '{nome_final}' criada e selecionada. Passo 3: traga o roteiro abaixo.")
+
+
+def apagar_corrida(nome_run: str, confirmacao: str) -> tuple:
+    """"Apagar corrida": remove a pasta inteira da corrida selecionada. Exige
+    digitar o NOME EXATO da corrida num campo ao lado -- a unica confirmacao
+    disponivel sem um dialogo de confirmar nativo do Gradio, e o suficiente
+    para evitar apagar por clique acidental."""
+    if not nome_run:
+        return "Selecione uma corrida para apagar.", gr.update()
+    if (confirmacao or "").strip() != nome_run:
+        return f"Para confirmar, digite exatamente '{nome_run}' no campo de confirmação e clique de novo.", gr.update()
+    run = RUNS_DIR / nome_run
+    if run.exists():
+        shutil.rmtree(run)
+    novas = listar_runs()
+    return f"🗑️ Corrida '{nome_run}' apagada.", gr.update(choices=novas, value=(novas[0] if novas else None))
+
+
+# --------------------------------------------------------------------------
+# trilha de estagios: "estamos aqui" durante uma corrida (rodar())
+# --------------------------------------------------------------------------
+# As mesmas tags que `run_decupagem.py::passo()` imprime entre colchetes --
+# ver ali (`passo("1 parse", ...)`, etc.). Nomes amigaveis so pra exibicao;
+# a TAG (chave do dict) precisa bater exatamente com o que passo() imprime.
+ESTAGIOS = [
+    ("1 parse", "Ler roteiro"),
+    ("2 cast", "Elenco"),
+    ("E emocao", "Emoção"),
+    ("4 tts", "Voz (TTS)"),
+    ("S estrutura", "Estrutura"),
+    ("P decupagem", "Decupagem"),
+    ("C character-sheet", "Ref. personagem"),
+    ("5-D stills", "Stills"),
+    ("R rascunho", "Animatic"),
+    ("5-D video", "Vídeo"),
+    ("6 lipsync", "Lip-sync"),
+    ("7 mix", "Mixagem"),
+    ("8 montagem", "Montagem"),
+    ("9 verificacao", "Verificação"),
+]
+_ESTAGIO_INDICE = {tag: i for i, (tag, _) in enumerate(ESTAGIOS)}
+_ESTAGIO_RE = re.compile(r"^\[([^\]]+)\]")
+
+
+def _stage_html(atual: int | None, feito_ate: int, falhou: bool = False) -> str:
+    """Uma fileira de "chips": cinza = ainda não chegou, azul = ESTAMOS AQUI,
+    verde = concluído, vermelho = falhou aqui. É a "linha de status" que o
+    usuário pediu -- em vez de só texto, marca visualmente onde a corrida
+    está dentro das 14 etapas possíveis (algumas opcionais/paradas antes)."""
+    chips = []
+    for i, (_, label) in enumerate(ESTAGIOS):
+        if i == atual:
+            estilo = "background:#dc2626;color:#fff;font-weight:600;" if falhou else \
+                     "background:#2563eb;color:#fff;font-weight:600;"
+            marcador = "✗ " if falhou else "▶ "
+        elif i <= feito_ate:
+            estilo, marcador = "background:#15803d;color:#fff;", "✓ "
+        else:
+            estilo, marcador = "background:#e5e7eb;color:#6b7280;", ""
+        chips.append(
+            f'<span style="{estilo}padding:5px 11px;margin:2px;border-radius:6px;'
+            f'display:inline-block;font-size:12px;">{marcador}{label}</span>'
+        )
+    return "<div>" + "".join(chips) + "</div>"
 
 
 # --------------------------------------------------------------------------
@@ -678,7 +864,7 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
           camera_llm: bool = False, ltx_variant: str = "distilled",
           minimax_variant: str = "fp8int8", lora: str = "(nenhum)",
           lora_strength: float = 0.8, character_sheet_on: bool = False,
-          character_sheet_n: int = 4) -> list:
+          character_sheet_n: int = 4, minimax_ref_audio: bool = False) -> list:
     cmd = [PY, "-u", "-m", "script_pipeline.run_decupagem",
            "--run-dir", str(run), "--style", estilo, "--ate", ate,
            "--width", str(int(largura)), "--height", str(int(altura)),
@@ -711,6 +897,8 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
         cmd += ["--lora", lora, "--lora-strength", str(lora_strength)]
     if character_sheet_on:
         cmd += ["--character-sheet", "--character-sheet-candidates", str(int(character_sheet_n))]
+    if minimax_ref_audio and motor_video == "minimax":
+        cmd.append("--minimax-ref-audio")
     return cmd
 
 
@@ -718,13 +906,13 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
           recast, motor_img="flux", motor_video="ltx", motor_voz="auto",
           consistencia=None, camera_llm=False, ltx_variant="distilled",
           minimax_variant="fp8int8", lora="(nenhum)", lora_strength=0.8,
-          character_sheet_on=False, character_sheet_n=4):
+          character_sheet_on=False, character_sheet_n=4, minimax_ref_audio=False):
     """Executa a cadeia transmitindo o stdout. Gerador: a UI recebe cada linha.
 
     O subprocesso e o MESMO que o .bat dispara. A UI nao reimplementa etapa
     nenhuma -- se o orquestrador mudar, isto acompanha."""
     if _PROC["p"] is not None and _PROC["p"].poll() is None:
-        yield "Ja existe uma corrida em andamento. Pare antes de comecar outra.", [], None, ""
+        yield "Ja existe uma corrida em andamento. Pare antes de comecar outra.", [], None, "", _stage_html(None, -1)
         return
 
     if nome_run:
@@ -732,13 +920,14 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
     else:
         base = (novo_nome or "").strip() or (Path(script).stem if script else "")
         if not base:
-            yield "Informe um roteiro (para uma corrida nova) ou selecione uma existente.", [], None, ""
+            yield ("Informe um roteiro (para uma corrida nova) ou selecione uma existente.",
+                   [], None, "", _stage_html(None, -1))
             return
         run = RUNS_DIR / f"{time.strftime('%Y%m%d_%H%M')}_{base}"
 
     if not (run / "parse" / "scenes.json").exists() and not script:
         yield (f"A corrida {run.name} nao tem parse feito e nenhum roteiro foi informado.",
-               [], None, "")
+               [], None, "", _stage_html(None, -1))
         return
 
     run.mkdir(parents=True, exist_ok=True)
@@ -753,9 +942,13 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
     cmd = _argv(run, script, estilo, trocas, largura, altura, ate, motor, recast,
                 motor_img, motor_video, motor_voz, consistencia, camera_llm,
                 ltx_variant, minimax_variant, lora, lora_strength,
-                character_sheet_on, character_sheet_n)
+                character_sheet_on, character_sheet_n, minimax_ref_audio)
     linhas = [f"$ {' '.join(cmd[3:])}", f"(corrida: {run})", ""]
-    yield "\n".join(linhas), stills_com_legenda(run), video_de(run), resumo_do_plano(run)
+    # Rastreio da "trilha de estagios" (a linha de status "estamos aqui" que o
+    # usuario pediu): cada linha `[TAG] ...` que `run_decupagem.py::passo()`
+    # imprime avanca o estagio ATUAL; tudo antes dele vira "concluido".
+    atual, feito_ate = None, -1
+    yield "\n".join(linhas), stills_com_legenda(run), video_de(run), resumo_do_plano(run), _stage_html(atual, feito_ate)
 
     p = subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True,
@@ -765,6 +958,11 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
     try:
         for linha in p.stdout:
             linhas.append(linha.rstrip("\n"))
+            m = _ESTAGIO_RE.match(linha.strip())
+            if m and m.group(1) in _ESTAGIO_INDICE:
+                if atual is not None:
+                    feito_ate = max(feito_ate, atual)
+                atual = _ESTAGIO_INDICE[m.group(1)]
             # A galeria e o plano so sao relidos a cada ~1,5s: um still leva
             # dezenas de segundos, e varrer o disco a cada linha de log so
             # gastaria E/S para mostrar a mesma coisa.
@@ -772,13 +970,18 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
             if agora - ultimo > 1.5:
                 ultimo = agora
                 yield ("\n".join(linhas[-400:]), stills_com_legenda(run), video_de(run),
-                       resumo_do_plano(run))
+                       resumo_do_plano(run), _stage_html(atual, feito_ate))
     finally:
         p.wait()
         _PROC["p"] = None
     linhas.append("")
     linhas.append(f"[fim] codigo de saida {p.returncode}")
-    yield "\n".join(linhas[-400:]), stills_com_legenda(run), video_de(run), resumo_do_plano(run)
+    sucesso = p.returncode == 0
+    if sucesso and atual is not None:
+        feito_ate = len(ESTAGIOS) - 1
+        atual = None
+    yield ("\n".join(linhas[-400:]), stills_com_legenda(run), video_de(run), resumo_do_plano(run),
+           _stage_html(atual, feito_ate, falhou=not sucesso and atual is not None))
 
 
 def parar() -> str:
@@ -792,6 +995,40 @@ def parar() -> str:
         p.kill()
     return ("Corrida encerrada. Os artefatos prontos ficam -- selecione a mesma "
             "corrida e rode de novo para continuar de onde parou.")
+
+
+HELP_TEXT = """
+**A tela funciona em 3 passos, sempre nesta ordem:**
+
+**① Corrida.** Escolha uma corrida existente no menu e clique
+**"Carregar corrida selecionada"** para retomar de onde parou -- OU clique
+**"① Nova corrida"**, digite um nome no campo ao lado e clique **"Salvar
+corrida"** para começar uma do zero. **"Atualizar lista de corridas"** só
+relê a pasta em disco (útil se você criou uma corrida por fora, no
+`start_decupagem.bat`); ele não carrega nada na tela sozinho.
+
+**② Roteiro.** Traga o texto de UM jeito: arraste um `.txt` na caixa (ou
+clique para escolher) -- entra sozinho -- OU cole o texto na caixa de baixo e
+clique **"Usar texto colado"**. Os dois terminam no mesmo lugar: um roteiro
+pronto, mostrado na linha de status logo abaixo da caixa.
+
+**③ Rodar.** Ajuste Estilo / "Ir até" / Motores se quiser (abas acima) e
+clique **"Rodar"**, na aba Stills. A cadeia passa sozinha por: ler/enriquecer
+o roteiro → elenco → emoção das falas → voz (TTS) → estrutura narrativa →
+decupagem (plano por plano) → [opcional] referência de personagem → stills →
+animatic → vídeo → lip-sync → mixagem → montagem final. A **trilha de
+estágios** abaixo do cabeçalho acende em azul o estágio atual e marca em
+verde os já concluídos -- essa é a linha "estamos aqui".
+
+**Antes de deixar rodar até o vídeo**, revise o Elenco (aba Decupagem) e os
+Stills (aba Stills) -- corrigir ali é mais barato que descobrir no filme
+pronto. **"Ir até" = animatic** é o ponto de revisão barato (nada de vídeo
+ainda); rode de novo sem essa trava para seguir até o final.
+"""
+
+
+def _corrida_status_pronta(nome: str) -> str:
+    return f"Corrida '{nome}' carregada. Passo 2: confira o roteiro abaixo (ou traga um novo) e siga para Rodar."
 
 
 # --------------------------------------------------------------------------
@@ -809,6 +1046,14 @@ def build() -> None:
             "Roteiro → cast → voz → decupagem → stills → animatic → filme. "
             "Mesma cadeia do `start_decupagem.bat`, com o log à vista e retomada."
         )
+        with gr.Accordion("❓ Como funciona (leia antes da primeira vez)", open=False):
+            gr.Markdown(HELP_TEXT)
+
+        # Trilha de estagios: "linha de status" pedida pelo usuario -- acende
+        # o estagio ATUAL em azul e marca os concluidos em verde. Visivel o
+        # tempo todo (nao so na aba Stills), porque e a resposta a "em que pe
+        # esta a corrida" nas 3 abas. Fora de qualquer corrida, fica cinza.
+        estagio_html = gr.HTML(_stage_html(None, -1))
 
         # Selecao de corrida: FORA das abas, de proposito -- e o unico estado
         # que as tres abas (Decupagem/Motores/Stills) compartilham.
@@ -817,31 +1062,58 @@ def build() -> None:
                 runs = gr.Dropdown(choices=_runs, label="Corrida existente (para RETOMAR)",
                                    value=_inicial, allow_custom_value=False)
             with gr.Column(scale=1):
-                atualizar = gr.Button("Atualizar lista")
+                atualizar = gr.Button(
+                    "Atualizar lista de corridas",
+                    elem_id="btn-atualizar",
+                )
                 # Botao explicito alem do evento do dropdown: o `change` do
                 # Dropdown depende de uma selecao de verdade e nao dispara
                 # quando o valor chega por outro caminho (restaurar sessao,
                 # teclado, automacao). Um botao sempre dispara.
-                carregar = gr.Button("Carregar", variant="secondary")
+                carregar = gr.Button("Carregar corrida selecionada", variant="secondary")
+
+        # PASSO 1 -- nova corrida ou apagar uma existente. Fica logo abaixo do
+        # seletor de corrida, de proposito: e a mesma area de decisao ("qual
+        # corrida eu uso"), so que para os dois casos que o seletor sozinho
+        # nao cobre (comecar do zero, remover).
+        with gr.Row():
+            nova_btn = gr.Button("① Nova corrida", scale=1)
+            novo_nome = gr.Textbox(label="Nome da corrida (nova ou para renomear a confirmação de exclusão)", scale=2)
+            salvar_nome_btn = gr.Button("Salvar corrida", variant="secondary", scale=1)
+        with gr.Row():
+            apagar_confirma = gr.Textbox(
+                label="Para apagar, digite aqui o NOME EXATO da corrida selecionada acima", scale=2)
+            apagar_btn = gr.Button("🗑 Apagar corrida", variant="stop", scale=1)
+        aviso_corrida = gr.Textbox(
+            label="", interactive=False,
+            value=(_corrida_status_pronta(_inicial) if _inicial else
+                   "Passo 1: carregue uma corrida existente, ou clique \"① Nova corrida\"."))
 
         with gr.Tabs():
             # ---------------------------------------------------------------
             # ABA 1: DECUPAGEM -- roteiro, cast, e o resultado do parse/LLM
             # ---------------------------------------------------------------
             with gr.Tab("Decupagem"):
+                gr.Markdown("### Passo 2 — Traga o roteiro (um jeito só: arquivo OU texto colado)")
                 with gr.Row():
-                    script = gr.Textbox(label="Roteiro .txt (só para corrida NOVA)", scale=3,
-                                        placeholder=r"C:\Users\user\Desktop\roteiro.txt")
-                    novo_nome = gr.Textbox(label="Nome da corrida nova (opcional)", scale=1)
-
-                with gr.Accordion("Ou cole o texto do roteiro aqui (em vez de apontar um arquivo)", open=False):
-                    roteiro_colado = gr.Textbox(
-                        label="Texto do roteiro / prompt audiovisual", lines=10,
-                        placeholder="Cole aqui o roteiro em prosa, formato de cena, ou prompt "
-                                    "audiovisual -- prose_to_screenplay.py cuida da conversão "
-                                    "na primeira etapa, igual a um arquivo carregado.")
-                    salvar_roteiro_btn = gr.Button("Salvar e usar como roteiro desta corrida")
-                    aviso_roteiro = gr.Textbox(label="", interactive=False)
+                    arquivo_roteiro = gr.File(
+                        label="Arraste um .txt aqui, ou clique para escolher", scale=1,
+                        file_types=[".txt"], file_count="single", type="filepath")
+                    with gr.Column(scale=1):
+                        roteiro_colado = gr.Textbox(
+                            label="...ou cole o texto do roteiro / prompt audiovisual aqui", lines=6,
+                            placeholder="Cole aqui o roteiro em prosa, formato de cena, ou prompt "
+                                        "audiovisual -- prose_to_screenplay.py cuida da conversão "
+                                        "na primeira etapa, igual a um arquivo carregado.")
+                        usar_texto_btn = gr.Button("Usar texto colado", variant="secondary")
+                roteiro_path = gr.Textbox(label="Roteiro em uso (preenchido automaticamente)",
+                                          interactive=False)
+                aviso_roteiro = gr.Textbox(
+                    label="", interactive=False,
+                    value=("Roteiro desta corrida já processado (veja \"Parse + enriquecimento\" abaixo). "
+                           "Só traga um roteiro aqui se quiser SUBSTITUIR o desta corrida."
+                           if _inicial and (RUNS_DIR / _inicial / "parse" / "scenes.json").exists() else
+                           "Passo 2: arraste um .txt OU cole o texto e clique \"Usar texto colado\"."))
 
                 with gr.Row():
                     estilo = gr.Dropdown(choices=sorted(STYLES), value="classico", label="Estilo")
@@ -869,6 +1141,7 @@ def build() -> None:
                         "O descritor decide a aparência em **todos** os planos e a voz em "
                         "todas as falas. Corrigir aqui é mais barato que descobrir no filme."
                     )
+                    cast_gaps_aviso = gr.Markdown(value=resumo_descriptor_gaps(_cast0))
                     cast = gr.Textbox(value=_cast0, label="cast.json", lines=16)
                     salvar = gr.Button("Salvar cast.json")
                     aviso = gr.Textbox(label="", interactive=False)
@@ -915,12 +1188,15 @@ def build() -> None:
             with gr.Tab("Motores"):
                 with gr.Row():
                     motor = gr.Dropdown(
-                        choices=["qwen3.6-35b-a3b:latest", "gemma4", "qwen2.5:32b-instruct-q4_K_M",
-                                 "mistral-nemo:12b-instruct-2407-q4_K_M"],
-                        value="qwen3.6-35b-a3b:latest", label="Motor LLM (parse/cast/emoção/estrutura)", scale=2,
+                        choices=["qwen2.5:32b-instruct-q4_K_M", "gemma4",
+                                 "mistral-nemo:12b-instruct-2407-q4_K_M", "qwen3.6-35b-a3b:latest"],
+                        value="qwen2.5:32b-instruct-q4_K_M", label="Motor LLM (parse/cast/emoção/estrutura)", scale=2,
                         allow_custom_value=True,
-                        info="Tag do Ollama (`ollama list` mostra o que já está baixado). "
-                             "Aceita qualquer tag digitada, mesmo fora da lista.")
+                        info="Tag do Ollama (`ollama list` mostra o que já está baixado). Aceita "
+                             "qualquer tag digitada, mesmo fora da lista. ⚠️ qwen3.6-35b-a3b:latest "
+                             "(MoE) crasha o backend CUDA do Ollama em prompt longo -- o próprio "
+                             "enriquecimento do parse -- MEDIDO e documentado no CLAUDE.md/"
+                             "MEMORIAL §3.65; só escolha se souber o que está fazendo.")
                     consistencia = gr.Number(
                         value=0.35, label="Auditoria de consistência facial (limiar)", scale=1,
                         info="InsightFace/ArcFace compara cada still novo ao still de "
@@ -975,6 +1251,16 @@ def build() -> None:
                              "(padrão) 11min6s -- sempre mais rápido que w4a8 (11min44s) e com "
                              "checkpoints menos comprimidos. gguf-q4km 16min26s, o mais lento "
                              "dos três -- só vale se VRAM for o limite.")
+                with gr.Row():
+                    minimax_ref_audio = gr.Checkbox(
+                        value=False, scale=1,
+                        label="MiniMax H3: usar áudio de referência real (voz do TTS)",
+                        info="Manda o WAV já sintetizado para cada fala (timbre/cadência reais) "
+                             "como ref_audios do MiniMax H3, além das imagens de referência -- "
+                             "MEMORIAL 3.74. Só tem efeito com Motor de vídeo = minimax E "
+                             "dialogue/lines.json já gerado (estágio 4 TTS). Opt-in: validado só "
+                             "com uma fala isolada até agora, não com a cadeia de produção "
+                             "inteira -- acompanhe o log do estágio '5-D video' na primeira vez.")
                 with gr.Row():
                     largura = gr.Number(value=960, label="Largura", precision=0)
                     altura = gr.Number(value=544, label="Altura", precision=0)
@@ -1075,17 +1361,36 @@ def build() -> None:
                     container="accordion")
 
         # ---- ligacoes ----
-        atualizar.click(fn=lambda: gr.update(choices=listar_runs()), outputs=runs)
-        runs.change(fn=carregar_run, inputs=runs,
-                    outputs=[auto, cast, plano, enriquecimento, galeria, video])
-        carregar.click(fn=carregar_run, inputs=runs,
-                       outputs=[auto, cast, plano, enriquecimento, galeria, video])
+        # Atualizar SO rele a pasta em disco (nao carrega nada na tela) --
+        # Carregar/selecionar a corrida E' o que traz os dados pra tela.
+        atualizar.click(fn=lambda: (gr.update(choices=listar_runs()),
+                                    "Lista de corridas atualizada -- selecione uma e clique "
+                                    "\"Carregar corrida selecionada\"."),
+                        outputs=[runs, aviso_corrida])
+        runs.change(fn=carregar_run_completo, inputs=runs,
+                    outputs=[auto, cast, plano, enriquecimento, galeria, video,
+                             aviso_corrida, roteiro_path, aviso_roteiro, estagio_html, cast_gaps_aviso])
+        carregar.click(fn=carregar_run_completo, inputs=runs,
+                       outputs=[auto, cast, plano, enriquecimento, galeria, video,
+                                aviso_corrida, roteiro_path, aviso_roteiro, estagio_html, cast_gaps_aviso])
+        nova_btn.click(fn=nova_corrida,
+                       outputs=[runs, novo_nome, arquivo_roteiro, roteiro_colado, roteiro_path,
+                                aviso_roteiro, aviso_corrida, auto, cast, plano, enriquecimento,
+                                galeria, video, log, estagio_html, cast_gaps_aviso])
+        salvar_nome_btn.click(fn=criar_corrida, inputs=novo_nome, outputs=[runs, aviso_corrida])
+        apagar_btn.click(fn=apagar_corrida, inputs=[runs, apagar_confirma],
+                         outputs=[aviso_corrida, runs])
+        arquivo_roteiro.change(fn=usar_arquivo_roteiro, inputs=[arquivo_roteiro, runs],
+                               outputs=[roteiro_path, aviso_roteiro])
+        usar_texto_btn.click(fn=usar_texto_colado, inputs=[roteiro_colado, runs],
+                             outputs=[roteiro_path, aviso_roteiro, arquivo_roteiro])
         btn.click(fn=rodar,
-                  inputs=[runs, script, novo_nome, estilo, trocas, largura, altura,
+                  inputs=[runs, roteiro_path, novo_nome, estilo, trocas, largura, altura,
                           ate, motor, recast, motor_img, motor_video, motor_voz,
                           consistencia, camera_llm, ltx_variant, minimax_variant,
-                          lora, lora_strength, character_sheet_on, character_sheet_n],
-                  outputs=[log, galeria, video, plano])
+                          lora, lora_strength, character_sheet_on, character_sheet_n,
+                          minimax_ref_audio],
+                  outputs=[log, galeria, video, plano, estagio_html])
         # Clicar numa imagem preenche o texto do prompt E o numero da tomada no
         # regenerador -- sem isso a pessoa teria que contar posicao na galeria
         # a mao pra saber que numero digitar.
@@ -1097,9 +1402,7 @@ def build() -> None:
                                             lora, lora_strength],
                                     outputs=[aviso_refazer, galeria])
         btn_parar.click(fn=parar, outputs=aviso)
-        salvar.click(fn=salvar_cast, inputs=[runs, cast], outputs=aviso)
-        salvar_roteiro_btn.click(fn=salvar_roteiro_colado, inputs=[roteiro_colado, novo_nome],
-                                 outputs=[script, aviso_roteiro])
+        salvar.click(fn=salvar_cast, inputs=[runs, cast], outputs=[aviso, cast_gaps_aviso])
         sheet_btn.click(fn=gerar_sheet_personagem,
                         inputs=[runs, sheet_personagem, sheet_descritor, sheet_motor,
                                 lora, lora_strength],

@@ -126,6 +126,10 @@ def main() -> int:
                          "sempre mais rapido que w4a8 (11min44s) e com "
                          "checkpoints menos comprimidos -- gguf-q4km 16min26s, "
                          "o mais lento dos tres, so vale se VRAM for o limite.")
+    ap.add_argument("--minimax-ref-audio", action="store_true",
+                    help="MiniMax H3: manda o WAV do TTS ja sintetizado para cada fala como "
+                         "ref_audios (timbre/cadencia reais -- MEMORIAL 3.74). So com "
+                         "--video-engine minimax. Opt-in, validado so com uma fala isolada.")
     ap.add_argument("--consistency-threshold", type=float, default=None,
                     help="auditoria automatica de consistencia facial dos STILLS "
                          "(insightface) -- ver MEMORIAL 3.53. Sem isto, desligado.")
@@ -329,12 +333,15 @@ def main() -> int:
         # A passada de VIDEO nao gera imagem -- ela le os stills pelo manifesto,
         # por indice. O motor vai junto so para as duas passadas descreverem a
         # mesma corrida no log; nao ha decisao pendurada nele aqui.
-        if not passo("5-D video", ["-m", "script_pipeline.render_shots_stage",
-                                   "--run-dir", str(run), "--width", str(args.width),
-                                   "--height", str(args.height), "--videos-only",
-                                   "--fps", str(args.fps),
-                                   "--image-engine", args.image_engine,
-                                   "--engine", args.video_engine]):
+        cmd_video = ["-m", "script_pipeline.render_shots_stage",
+                    "--run-dir", str(run), "--width", str(args.width),
+                    "--height", str(args.height), "--videos-only",
+                    "--fps", str(args.fps),
+                    "--image-engine", args.image_engine,
+                    "--engine", args.video_engine]
+        if args.video_engine == "minimax" and args.minimax_ref_audio:
+            cmd_video.append("--minimax-ref-audio")
+        if not passo("5-D video", cmd_video):
             return 1
 
     if ate("lipsync"):

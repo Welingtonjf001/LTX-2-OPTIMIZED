@@ -266,7 +266,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
            lora_name: str = "", lora_strength: float = 0.8,
            engine: str = "ltx",
            minimax_aspect_ratio: str | None = None, minimax_megapixels: float | None = None,
-           minimax_turbo: bool = True,
+           minimax_turbo: bool = True, minimax_ref_audio: bool = False,
            log=print) -> list:
     """AGRUPE POR MODELO, NÃO POR PLANO.
 
@@ -501,9 +501,16 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 sheet_do_sujeito = (character_sheets or {}).get(sujeito)
                 if sheet_do_sujeito and sheet_do_sujeito not in refs_minimax:
                     refs_minimax.append(sheet_do_sujeito)
+                # ref_audios (MEMORIAL 3.74, 2026-09-08): opt-in -- so testado
+                # ate agora com UMA fala isolada, nao com a cadeia de producao
+                # inteira. `wav_cond` (calculado acima, mesma fala que o LTX
+                # usaria como audio_conditioning) e o timbre/cadencia REAIS
+                # do TTS pra ESTE plano -- reusa em vez de recalcular.
+                audio_refs_minimax = [wav_cond] if (minimax_ref_audio and wav_cond) else None
                 minimax_h3_backend.generate(
                     shot["video_prompt"], str(clip_path),
                     ref_images=refs_minimax[:2] or None,
+                    ref_audios=audio_refs_minimax,
                     aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
                     megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
                     duration_seconds=shot["frames"] / fps,

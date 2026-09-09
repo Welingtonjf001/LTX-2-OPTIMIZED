@@ -5644,6 +5644,63 @@ mudança estrutural bem maior -- pasta compartilhada fora de `outputs/`,
 UI de import/export entre corridas -- e não foi pedida explicitamente.
 Registrado como possível item futuro, não como lacuna esquecida.
 
+## 3.76 Redesenho da aba Decupagem em wizard + auditoria da webui contra os avanços de §3.72-3.75 (2026-09-09)
+
+Pedido do usuário depois de usar a UI redesenhada: "não verifiquei via webui as
+mudanças de consistência/continuidade -- ou ações aplicadas aos stills". Duas
+partes: (1) reorganizar a aba Decupagem como fluxo guiado; (2) auditar se os
+avanços de ontem/hoje realmente aparecem na webui, não só no código.
+
+**Redesenho ①②③.** `decupagem_ui.py` ganhou: trilha de 14 estágios sempre
+visível (`gr.HTML`, azul = estágio atual, verde = concluído -- alimentada
+fazendo parse das linhas `[TAG]` que `run_decupagem.py::passo()` já imprime,
+sem duplicar lógica de orquestração); "① Nova corrida" (limpa a TELA sem
+tocar disco) + campo de nome + "Salvar corrida" (cria a pasta e seleciona) +
+"Apagar corrida" (exige digitar o nome exato como confirmação); "Atualizar
+lista de corridas"/"Carregar corrida selecionada" renomeados para deixar
+claro o que cada um faz; entrada de roteiro unificada (`gr.File` com
+drag&drop + colar texto, ambos convergindo num único `roteiro_path`). Dois
+bugs de cascata de evento do Gradio (um handler limpando o campo de outro e
+apagando a mensagem de status) só apareceram testando no browser de
+verdade, não lendo o código -- corrigidos fazendo o handler "vazio" devolver
+`gr.update()` (no-op) em vez de uma mensagem de aviso genérica.
+
+**Auditoria: rodei um roteiro de teste pela cadeia real** (não só li código)
+para confirmar dois avanços de antes de hoje que nunca tinham sido
+verificados contra uma corrida nova:
+- `shot_plan.py`: a cláusula `"caught mid-gesture: ..."` (§3.[pose], pedido
+  do usuário 2026-09-08) apareceu nos 4 planos do `shot_plan.json` gerado.
+- `cast_characters.py`: os dois personagens saíram com descritor de 4
+  categorias e `descriptor_gaps: []` (auditoria de completude, §3.66.1).
+
+**Três gaps reais achados e corrigidos:**
+1. **O dropdown "Motor LLM" da UI tinha `qwen3.6-35b-a3b:latest` -- o
+   MoE que CRASHA o Ollama em prompt longo (§3.65) -- como PADRÃO.** Mesmo
+   depois de documentado e corrigido no Storyboard-Director, o default
+   local nunca foi atualizado. Trocado para `qwen2.5:32b-instruct-q4_K_M`;
+   o modelo perigoso continua na lista (alguém pode escolher de propósito)
+   mas com aviso explícito no `info=` do campo.
+2. **`descriptor_gaps` só existia enterrado no JSON bruto ou no log.**
+   Acrescentado `resumo_descriptor_gaps()` -- um aviso Markdown acima da
+   caixa "cast.json" ("⚠️ MIN-JAE: faltando item_unico" ou "✅ Todos os
+   descritores completos"), recalculado ao carregar corrida, salvar cast, e
+   ao clicar "① Nova corrida". Testado contra `20260907_ltx_gguf2` (tinha
+   um personagem real com lacuna) e um cast sintético completo -- as duas
+   mensagens saíram certas.
+3. **`--ref-audio` do MiniMax H3 (§3.74) nunca chegava na cadeia de
+   produção** -- só existia no CLI standalone de `minimax_h3_backend.py`.
+   Fechado: `render_shots.py` já calcula `wav_cond` (o WAV do TTS para a
+   fala DESTE plano, usado pelo LTX como audio_conditioning) -- o branch do
+   MiniMax passou a reusar o MESMO wav como `ref_audios` quando um novo
+   flag opt-in (`minimax_ref_audio`) está ligado, evitando resolver o
+   timbre duas vezes. Threading completo:
+   `render()` → `render_shots_stage.py --minimax-ref-audio` →
+   `run_decupagem.py --minimax-ref-audio` (só ativa quando
+   `--video-engine minimax`) → checkbox na aba Motores do `decupagem_ui`.
+   Continua opt-in e sem validação de produção (§3.74 só testou UMA fala
+   isolada) -- primeira corrida real com isso ligado deve ter o log do
+   estágio "5-D video" acompanhado de perto.
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
