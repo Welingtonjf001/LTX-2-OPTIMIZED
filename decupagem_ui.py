@@ -257,12 +257,24 @@ def carregar_run(nome: str):
             video_de(run))
 
 
-def carregar_run_completo(nome: str) -> tuple:
+def carregar_run_completo(nome: str, roteiro_path_atual: str = "") -> tuple:
     """Mesmo que `carregar_run`, mais o que a TELA (nao so os dados) precisa
     mostrar ao trocar de corrida: mensagem de status, trilha de estagio
-    zerada (nao ha corrida rodando neste momento) e o roteiro em uso limpo
-    -- a corrida carregada ja tem `parse/scenes.json` prprio, entao trazer
-    OUTRO roteiro so faz sentido se a pessoa pedir explicitamente."""
+    zerada (nao ha corrida rodando neste momento) -- a corrida carregada ja
+    tem `parse/scenes.json` proprio, entao trazer OUTRO roteiro so faz
+    sentido se a pessoa pedir explicitamente.
+
+    BUG CORRIGIDO 2026-09-09 (achado pelo usuario testando de verdade): esta
+    funcao tambem dispara via `runs.change` quando "Salvar corrida" seleciona
+    a corrida recem-criada -- e SEMPRE zerava `roteiro_path`, mesmo quando a
+    pessoa ja tinha clicado "Usar texto colado" ANTES de salvar o nome da
+    corrida. Resultado: "Rodar" via nome_run preenchido mas script vazio, e
+    a mensagem "corrida sem parse e nenhum roteiro informado" -- roteiro que
+    a pessoa acabou de trazer, perdido em silencio. Agora recebe o
+    `roteiro_path` ATUAL como input e so o zera se essa corrida especifica
+    JA tem parse proprio (nesse caso, sim, faz sentido limpar -- trazer outro
+    roteiro so por pedido explicito); caso contrario preserva o que estava
+    preparado."""
     auto, cast, plano, enriq, stills, video = carregar_run(nome)
     if not nome:
         return (auto, cast, plano, enriq, stills, video,
@@ -272,16 +284,32 @@ def carregar_run_completo(nome: str) -> tuple:
                 "", "Passo 2: arraste um .txt OU cole o texto e clique \"Usar texto colado\".",
                 _stage_html(None, -1), "")
     ja_tem_parse = (RUNS_DIR / nome / "parse" / "scenes.json").exists()
-    aviso_roteiro_txt = (
-        "Roteiro desta corrida já processado (veja \"Parse + enriquecimento\" abaixo). "
-        "Só traga um roteiro aqui se quiser SUBSTITUIR o desta corrida."
-        if ja_tem_parse else
-        "Corrida nova, sem roteiro ainda. Passo 2: arraste um .txt OU cole o texto e clique "
-        "\"Usar texto colado\"."
-    )
+    # So preserva se a corrida foi criada AGORA (ultimos 2 min) -- cobre o
+    # caso real do bug ("Usar texto colado" antes de "Salvar corrida", que
+    # dispara este mesmo evento por tabela) sem arriscar grudar um roteiro
+    # de OUTRA corrida numa corrida antiga e abandonada que a pessoa
+    # resolveu selecionar de novo pelo dropdown.
+    criada_agora = (time.time() - (RUNS_DIR / nome).stat().st_mtime) < 120
+    roteiro_preparado = (bool(roteiro_path_atual) and Path(roteiro_path_atual).exists()
+                         and criada_agora)
+    if ja_tem_parse:
+        roteiro_path_novo = ""
+        aviso_roteiro_txt = (
+            "Roteiro desta corrida já processado (veja \"Parse + enriquecimento\" abaixo). "
+            "Só traga um roteiro aqui se quiser SUBSTITUIR o desta corrida."
+        )
+    elif roteiro_preparado:
+        roteiro_path_novo = roteiro_path_atual
+        aviso_roteiro_txt = (
+            f"✅ Roteiro já preparado ({Path(roteiro_path_atual).name}) continua em uso "
+            "nesta corrida. Passo 3: clique Rodar (aba Stills).")
+    else:
+        roteiro_path_novo = ""
+        aviso_roteiro_txt = ("Corrida nova, sem roteiro ainda. Passo 2: arraste um .txt OU cole "
+                            "o texto e clique \"Usar texto colado\".")
     return (auto, cast, plano, enriq, stills, video,
             _corrida_status_pronta(nome),
-            "", aviso_roteiro_txt,
+            roteiro_path_novo, aviso_roteiro_txt,
             _stage_html(None, -1), resumo_descriptor_gaps(cast))
 
 
@@ -1367,10 +1395,10 @@ def build() -> None:
                                     "Lista de corridas atualizada -- selecione uma e clique "
                                     "\"Carregar corrida selecionada\"."),
                         outputs=[runs, aviso_corrida])
-        runs.change(fn=carregar_run_completo, inputs=runs,
+        runs.change(fn=carregar_run_completo, inputs=[runs, roteiro_path],
                     outputs=[auto, cast, plano, enriquecimento, galeria, video,
                              aviso_corrida, roteiro_path, aviso_roteiro, estagio_html, cast_gaps_aviso])
-        carregar.click(fn=carregar_run_completo, inputs=runs,
+        carregar.click(fn=carregar_run_completo, inputs=[runs, roteiro_path],
                        outputs=[auto, cast, plano, enriquecimento, galeria, video,
                                 aviso_corrida, roteiro_path, aviso_roteiro, estagio_html, cast_gaps_aviso])
         nova_btn.click(fn=nova_corrida,
