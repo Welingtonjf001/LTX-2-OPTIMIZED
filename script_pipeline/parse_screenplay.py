@@ -177,8 +177,20 @@ def _extract_freeform_scene(text: str) -> Optional["Scene"]:
         if speaker not in characters:
             characters.append(speaker)
 
-    if not dialogue_lines and not names:
-        return None  # nothing structural found at all -- let the caller report failure
+    # BUGFIX 2026-09-09 (achado com roteiro real do usuario): a condicao era
+    # "sem fala E sem nome", entao um texto que so casasse `names` (por
+    # exemplo o proprio FREEFORM_NAME_INTRO_RE disparando em falso positivo
+    # contra um cabecalho de cena tipo "PALACE OF EMERALD SHADOWS -
+    # IMPERIAL BEDCHAMBER - DAY", onde "- IMPERIAL BEDCHAMBER -" bate o
+    # padrao "- Nome -") virava uma "cena" com 0 falas e 0 personagens em
+    # `characters` (que so e' preenchido junto com dialogue_lines) -- ainda
+    # assim contava como sucesso e IMPEDIA `main()` de cair no fallback
+    # correto (`prose_to_screenplay`, que reestrutura via LLM), porque
+    # `parse_structure` parava de devolver `[]`. Sem fala nenhuma extraida,
+    # nao ha estrutura de verdade pra manter -- exigir `dialogue_lines` deixa
+    # esse caso cair no fallback certo em vez de produzir 1 cena vazia.
+    if not dialogue_lines:
+        return None  # nada de fala extraida -- deixa o chamador tentar reestruturar via LLM
 
     # MEASURED (2026-08-11): heading_raw used to be stripped[:80] + "...", i.e. the raw
     # paragraph chopped mid-word. render_scenes pasted that fragment at the FRONT of

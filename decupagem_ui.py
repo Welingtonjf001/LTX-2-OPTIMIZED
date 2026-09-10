@@ -91,6 +91,59 @@ _PROC: dict = {"p": None}
 
 
 # --------------------------------------------------------------------------
+# motor LLM: qual instancia do Ollama esta no ar importa (ver CLAUDE.md) --
+# o catalogo muda de maquina pra maquina e de sessao pra sessao (quem sobe
+# `ollama serve` e com qual OLLAMA_MODELS). Um default FIXO no codigo (como
+# era ate 2026-09-09) trava com HTTP 404 assim que a instancia no ar nao
+# serve aquela tag especifica -- MEDIDO pelo usuario: "qwen2.5:32b-instruct-
+# q4_K_M" (o default corrigido depois do crash do qwen3.6-35b-a3b, ver
+# MEMORIAL 3.65/3.76) nem sempre esta entre os modelos baixados.
+# --------------------------------------------------------------------------
+_MOTOR_LLM_FALLBACK = ["qwen2.5:32b-instruct-q4_K_M", "gemma4",
+                       "mistral-nemo:12b-instruct-2407-q4_K_M", "qwen3.6-35b-a3b:latest"]
+# Preferencia quando o modelo documentado como seguro nao esta na lista:
+# modelos DENSOS (nao MoE) de INSTRUCAO GERAL primeiro -- o crash medido
+# (§3.65) e especifico de roteamento MoE em prompt longo (nao ha caso
+# medido de modelo denso falhando do mesmo jeito), e a tarefa aqui e
+# enriquecimento NARRATIVO (cena, emocao, prompt visual), nao codigo -- um
+# modelo "coder" fica DEPOIS dos de instrucao geral de proposito, mesmo
+# sendo denso e do tamanho certo. "qwen3.6-35b-a3b" fica por ultimo.
+_MOTOR_LLM_PREFERENCIA = ["qwen2.5:32b-instruct-q4_K_M", "gemma4:31b",
+                          "gemma4-32k:latest", "gemma4-64k:latest", "phi4:14b",
+                          "phi4-64k:latest", "mistral-nemo:12b-instruct-2407-q4_K_M",
+                          "gemma4", "qwen2.5-coder:32b", "qwen2.5-coder-64k:latest",
+                          "qwen3.6-35b-a3b:latest"]
+
+
+def listar_modelos_ollama() -> list:
+    """Tags realmente servidas pela instancia do Ollama no ar AGORA (timeout
+    curto -- nao pode travar o boot da UI se o Ollama estiver desligado).
+    [] se inacessivel; quem chama cai no fallback hardcoded."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as r:
+            dados = json.load(r)
+        return sorted(m["name"] for m in dados.get("models", []))
+    except Exception:
+        return []
+
+
+def motor_llm_padrao() -> tuple:
+    """(choices, default) para o dropdown "Motor LLM" -- se o Ollama estiver
+    no ar, usa a lista REAL (evita escolher por padrao uma tag que devolve
+    HTTP 404); senao cai no fallback hardcoded, do jeito que sempre foi."""
+    disponiveis = listar_modelos_ollama()
+    if not disponiveis:
+        return _MOTOR_LLM_FALLBACK, _MOTOR_LLM_FALLBACK[0]
+    padrao = next((m for m in _MOTOR_LLM_PREFERENCIA if m in disponiveis), disponiveis[0])
+    # A tag preferida (mesmo se nao estiver instalada agora) continua na
+    # lista -- digitavel/selecionavel achando por texto -- pra nao esconder
+    # a decisao documentada so porque esta instancia nao a tem baixada hoje.
+    choices = sorted(set(disponiveis) | {_MOTOR_LLM_FALLBACK[0]})
+    return choices, padrao
+
+
+# --------------------------------------------------------------------------
 # leitura de artefatos
 # --------------------------------------------------------------------------
 def listar_runs() -> list:
@@ -1215,16 +1268,20 @@ def build() -> None:
             # ---------------------------------------------------------------
             with gr.Tab("Motores"):
                 with gr.Row():
+                    _motor_choices, _motor_padrao = motor_llm_padrao()
+                    _motor_ao_vivo = _motor_choices != _MOTOR_LLM_FALLBACK
                     motor = gr.Dropdown(
-                        choices=["qwen2.5:32b-instruct-q4_K_M", "gemma4",
-                                 "mistral-nemo:12b-instruct-2407-q4_K_M", "qwen3.6-35b-a3b:latest"],
-                        value="qwen2.5:32b-instruct-q4_K_M", label="Motor LLM (parse/cast/emoção/estrutura)", scale=2,
+                        choices=_motor_choices, value=_motor_padrao, scale=2,
+                        label=f"Motor LLM (parse/cast/emoção/estrutura) -- "
+                              f"{'detectado no Ollama ao vivo' if _motor_ao_vivo else 'lista padrão (Ollama não respondeu ao abrir a UI)'}",
                         allow_custom_value=True,
                         info="Tag do Ollama (`ollama list` mostra o que já está baixado). Aceita "
-                             "qualquer tag digitada, mesmo fora da lista. ⚠️ qwen3.6-35b-a3b:latest "
-                             "(MoE) crasha o backend CUDA do Ollama em prompt longo -- o próprio "
-                             "enriquecimento do parse -- MEDIDO e documentado no CLAUDE.md/"
-                             "MEMORIAL §3.65; só escolha se souber o que está fazendo.")
+                             "qualquer tag digitada, mesmo fora da lista -- a escolhida aqui é "
+                             "conferida contra a instância no ar quando você clicar Rodar, não "
+                             "antes. ⚠️ qwen3.6-35b-a3b:latest (MoE) crasha o backend CUDA do "
+                             "Ollama em prompt longo -- o próprio enriquecimento do parse -- "
+                             "MEDIDO e documentado no CLAUDE.md/MEMORIAL §3.65; só escolha se "
+                             "souber o que está fazendo.")
                     consistencia = gr.Number(
                         value=0.35, label="Auditoria de consistência facial (limiar)", scale=1,
                         info="InsightFace/ArcFace compara cada still novo ao still de "
