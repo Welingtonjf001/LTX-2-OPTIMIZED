@@ -1119,9 +1119,23 @@ def main(argv=None) -> int:
         )
         if converted:
             converted, arte_convertida = extract_art_direction(converted)
-            if arte_convertida:
+            # BUGFIX 2026-09-10 (achado pelo usuario num teste real): a linha
+            # `ESTILO VISUAL:` do texto ORIGINAL e' extraida (e removida) no
+            # inicio de main(), ANTES do texto ir pro prose_to_screenplay --
+            # entao quando o usuario ja tinha fixado um estilo, o LLM de
+            # reestruturacao nunca via essa instrucao, inventava a PROPRIA
+            # direcao de arte do zero, e essa sobrescrevia (`arte_do_texto =
+            # arte_convertida`) a escolha explicita do usuario em silencio.
+            # O docstring de extract_art_direction ja promete o oposto ("isto
+            # aqui e leitura de um dado que ja existe -- e por isso ganha
+            # dele"); a implementacao fazia o contrario. So aceita o palpite
+            # do LLM quando o usuario NAO tinha especificado nada.
+            if arte_convertida and not arte_do_texto:
                 arte_do_texto = arte_convertida
                 print(f"[parse_screenplay] direcao de arte: {arte_convertida}", file=sys.stderr)
+            elif arte_convertida:
+                print(f"[parse_screenplay] direcao de arte do LLM ('{arte_convertida}') descartada -- "
+                      f"o roteiro ja fixava '{arte_do_texto}'.", file=sys.stderr)
             auto_path = parse_dir / "screenplay_auto.txt"
             auto_path.write_text(converted, encoding="utf-8")
             print(f"[parse_screenplay] roteiro reestruturado salvo em {auto_path}", file=sys.stderr)

@@ -40,6 +40,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     from script_pipeline import run_folder
+    from script_pipeline.lipsync_audit import audit_lipsync
     from tensorxx_ge.lipsync import apply_lipsync, lipsync_status
 
     run_dir = Path(args.run_dir).resolve()
@@ -52,6 +53,7 @@ def main(argv=None) -> int:
         f"Wav2Lip {'disponivel' if status.wav2lip_available else 'indisponivel'}.")
 
     synced_manifest = []
+    audit_report = {}
     failures = 0
     for clip in clips:
         if not clip.get("ok") or not clip.get("video_path"):
@@ -76,16 +78,55 @@ def main(argv=None) -> int:
             clip["video_path"], clip["audio_path"], str(output_path),
             work_dir=str(lipsync_dir), engine=args.engine, log=log,
         )
+        final_video = str(result) if result is not None else clip["video_path"]
         if result is not None:
-            synced_manifest.append({**clip, "final_video_path": str(result), "lipsync_applied": True})
+            synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": True})
             log(f"{clip['id']}: lip-sync ok -> {result}")
         else:
             log(f"{clip['id']}: lip-sync falhou; mantendo clipe original sem sincronia labial.")
-            synced_manifest.append({**clip, "final_video_path": clip["video_path"], "lipsync_applied": False})
+            synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": False})
+
+        # AUDITORIA DE QUALIDADE (2026-09-09, pedido do usuario): o bloco
+        # acima so confere se o processo TECNICO rodou sem excecao -- isto
+        # aqui mede se a boca do video final realmente se move em sincronia
+        # com o audio, aplicado ou nao (um fallback sem sync tambem entra na
+        # medicao, e deve medir baixo -- e o comportamento esperado). Nunca
+        # bloqueia a corrida: so registra.
+        try:
+            veredito = audit_lipsync(final_video, clip["audio_path"], log=log)
+        except Exception as e:
+            veredito = {"score": None, "faces_detected": 0, "frames_sampled": 0,
+                        "motivo": f"auditoria falhou: {type(e).__name__}: {e}"}
+        audit_report[clip["id"]] = veredito
+        if veredito["score"] is None:
+            log(f"  auditoria de sync: nao foi possivel medir ({veredito['motivo']}).")
+        elif veredito["frames_sampled"] < 15:
+            # MEDIDO 2026-09-09: um plano curto (shot008, 1,47s, 11 quadros
+            # amostrados) mediu correlacao negativa mesmo com o LatentSync
+            # tendo rodado -- amostra pequena demais pra confiar no numero.
+            # Nao classifica OK/SUSPEITO aqui; so avisa que a base e curta.
+            log(f"  auditoria de sync: correlacao {veredito['score']:.3f}, mas so "
+                f"{veredito['frames_sampled']} quadro(s) amostrado(s) -- baixa confianca "
+                f"(plano curto), nao classificado como OK/suspeito.")
+        else:
+            # Calibrado com 5 clipes reais (2026-09-09): planos com lip-sync
+            # aplicado mediram 0.29-0.34; planos sem sync (fallback pro
+            # clipe cru) mediram -0.23 a -0.05 -- 0.15 separa os dois grupos
+            # com folga, sem exigir uma correlacao alta (o proxy e' ruidoso).
+            marca = "OK" if veredito["score"] >= 0.15 else "SUSPEITO -- boca pode nao acompanhar a fala"
+            log(f"  auditoria de sync: correlacao boca-audio {veredito['score']:.3f} ({marca}).")
 
     (lipsync_dir / "synced_clips.json").write_text(
         json.dumps(synced_manifest, ensure_ascii=False, indent=2), encoding="utf-8",
     )
+    (lipsync_dir / "lipsync_audit.json").write_text(
+        json.dumps(audit_report, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    medidos = [v["score"] for v in audit_report.values() if v["score"] is not None]
+    suspeitos = sum(1 for s in medidos if s < 0.3)
+    if audit_report:
+        log(f"lipsync_scenes: auditoria de sync -- {len(medidos)}/{len(audit_report)} clipe(s) medido(s), "
+            f"{suspeitos} suspeito(s) (correlacao < 0.3). Relatorio: {lipsync_dir / 'lipsync_audit.json'}")
     ok_count = sum(1 for c in synced_manifest if c.get("final_video_path"))
     log(f"lipsync_scenes: {ok_count}/{len(clips)} clipe(s) com video final disponivel "
         f"({sum(1 for c in synced_manifest if c.get('lipsync_applied'))} com lip-sync aplicado).")
