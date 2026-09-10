@@ -70,6 +70,47 @@ def face_similarity(path_a: str, path_b: str) -> float | None:
     return float(np.dot(ea, eb))
 
 
+def detect_duplicate_faces(image_path: str, *, dup_threshold: float = 0.35) -> dict:
+    """Auditoria de PLANO, nao de personagem: `check_consistency` compara o
+    MAIOR rosto do still contra uma referencia e nunca olha os outros rostos
+    da mesma imagem -- entao um still com dois personagens onde o segundo
+    saiu com a cara clonada do primeiro passa limpo (o rosto principal bate
+    com a referencia; ele ESTA certo, so que duplicado ao lado). MEDIDO
+    2026-09-10 com um still real: XIAO-LAN conversando com uma copia dela
+    mesma em vez de MEI-LI -- so apareceu ao comparar os DOIS rostos do
+    still ENTRE SI, nao cada um contra uma referencia externa.
+
+    Detecta TODOS os rostos do still (nao so o maior) e mede a similaridade
+    de cosseno de cada PAR. Um par com similaridade >= `dup_threshold`
+    (padrao 0.35 -- MESMO limiar ja validado em `check_consistency` para
+    "e a mesma pessoa", contra a faixa 0.10-0.12 medida para personagens
+    DIFERENTES no MEMORIAL) e imagem da mesma pessoa duas vezes no quadro.
+    MEDIDO no still real do shot007 (a dupla XIAO-LAN/XIAO-LAN): os dois
+    rostos, em angulos diferentes um do outro, mediram 0.588 -- bem acima
+    do limiar mesmo sem estarem na mesma pose exata.
+
+    Devolve {"faces_detected": int, "duplicate_pairs": [(i, j, score), ...],
+    "flagged": bool}. `faces_detected` < 2 sempre devolve flagged=False (nao
+    ha par pra comparar -- nao e erro, so nao ha o que medir)."""
+    import cv2
+    import numpy as np
+
+    img = cv2.imread(str(image_path))
+    if img is None:
+        return {"faces_detected": 0, "duplicate_pairs": [], "flagged": False}
+    app = _get_app()
+    faces = app.get(img)
+    if len(faces) < 2:
+        return {"faces_detected": len(faces), "duplicate_pairs": [], "flagged": False}
+    pares = []
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            score = float(np.dot(faces[i].normed_embedding, faces[j].normed_embedding))
+            if score >= dup_threshold:
+                pares.append((i, j, score))
+    return {"faces_detected": len(faces), "duplicate_pairs": pares, "flagged": bool(pares)}
+
+
 def check_consistency(still_path: str, reference_path: str, *, threshold: float = 0.35) -> tuple[bool, float | None]:
     """(ok, score). ok=True quando score >= threshold OU quando nao da pra
     medir (sem rosto em algum dos dois -- nao bloqueia geracao por um caso

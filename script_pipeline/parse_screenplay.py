@@ -676,6 +676,51 @@ ESTILO_VISUAL_RE = re.compile(r"^[ \t]*ESTILO VISUAL[ \t]*:[ \t]*(.+?)[ \t]*$",
                               re.IGNORECASE | re.MULTILINE)
 
 
+# VALIDACAO DE ESTILO CONFLITANTE -- pedido do usuario 2026-09-10 depois de
+# medir o efeito real: uma direcao de arte como "photorealistic cinematic
+# film still, realistic 3D animation, soft natural lighting" (a MESMA que
+# este pipeline gerou/aceitou sem aviso) mistura "fotorrealista" com
+# "animacao 3D" no MESMO texto -- o modelo resolve essa ambiguidade de
+# jeito DIFERENTE plano a plano, e o filme sai com estilo indo e voltando
+# entre still fotografico e still com cara de render (MEDIDO comparando
+# shot009 e shot007 da mesma corrida, mesmo `art_direction` no prompt).
+# "photorealistic"/"photorealism" ganha quando os dois aparecem juntos --
+# e o termo mais especifico das duas metades conflitantes.
+_ESTILO_FOTO_RE = re.compile(r"\bphoto\s*-?realis(?:tic|m)\b", re.IGNORECASE)
+# Captura o QUALIFICADOR opcional (realistic/stylized/polished/smooth) junto
+# com o termo conflitante -- sem isso, remover so "3D animation" de
+# "realistic 3D animation" deixava um "realistic" solto sem sentido.
+_ESTILO_ANIMADO_RE = re.compile(
+    r"\b(?:realistic|stylized|polished|smooth|clean|rich)?\s*"
+    r"(3d\s*animation|3d\s*render(?:ed|ing)?|cel\s*animation|cel-shaded|"
+    r"illustration|anime|cartoon|hand-?drawn|painted|stop-?motion|"
+    r"cg\s*animation|cgi)\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_style_conflict(art_direction: str) -> tuple[str, str | None]:
+    """(estilo_ajustado, aviso|None). Remove termos de animacao/ilustracao
+    quando "photorealistic"/"photorealism" tambem esta presente no mesmo
+    texto -- os dois juntos sao uma instrucao contraditoria, nao uma
+    combinacao valida. Nao mexe em texto sem essa combinacao especifica."""
+    if not art_direction or not _ESTILO_FOTO_RE.search(art_direction):
+        return art_direction, None
+    conflitantes = [m.group(1) for m in _ESTILO_ANIMADO_RE.finditer(art_direction)]
+    if not conflitantes:
+        return art_direction, None
+    ajustado = _ESTILO_ANIMADO_RE.sub("", art_direction)
+    # Limpa o que sobra no lugar do(s) termo(s) removido(s): junta por
+    # virgula, descarta segmentos vazios (dois termos seguidos removidos
+    # deixam um segmento vazio ENTRE virgulas, nao so nas pontas).
+    ajustado = ", ".join(p.strip() for p in ajustado.split(",") if p.strip())
+    ajustado = re.sub(r"\s{2,}", " ", ajustado)
+    termos = ", ".join(sorted(set(t.strip() for t in conflitantes if t.strip())))
+    aviso = (f"direcao de arte misturava 'photorealistic' com termo(s) de animacao/ilustracao "
+             f"({termos}) -- mantido so o fotorrealista: '{ajustado}'")
+    return ajustado, aviso
+
+
 def extract_art_direction(text: str) -> tuple[str, str]:
     """Tira a linha "ESTILO VISUAL: ..." do texto e devolve (texto_limpo, meio).
 
@@ -738,7 +783,10 @@ def _apply_setting(scene: Scene, payload: dict) -> None:
     if not scene.art_direction:
         arte = payload.get("art_direction")
         if isinstance(arte, str) and arte.strip():
-            scene.art_direction = arte.strip()[:200]
+            arte, aviso_estilo = resolve_style_conflict(arte.strip()[:200])
+            if aviso_estilo:
+                print(f"[parse_screenplay] cena {scene.index}: {aviso_estilo}", file=sys.stderr)
+            scene.art_direction = arte
 
 
 def _apply_shot_list(scene: Scene, payload: dict, *, log=print) -> None:
@@ -1160,6 +1208,10 @@ def main(argv=None) -> int:
     # enriquecimento de proposito: _apply_setting so preenche art_direction que
     # ainda esteja vazio, entao o dado lido ganha do palpite do modelo.
     if arte_do_texto:
+        arte_do_texto, aviso_estilo = resolve_style_conflict(arte_do_texto)
+        if aviso_estilo:
+            print(f"[parse_screenplay] {aviso_estilo}", file=sys.stderr)
+            run_folder.append_log(run_dir, f"parse_screenplay: {aviso_estilo}")
         for cena in scenes:
             cena.art_direction = arte_do_texto
 

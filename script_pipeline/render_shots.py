@@ -169,9 +169,32 @@ def _apply_freeze(clip_path: Path, *, extra_seconds: float = 0.6, log=print) -> 
     log(f"  freeze aplicado: +{extra_seconds}s segurando o ultimo frame.")
 
 
+def _duplicate_face_check(still_path: Path, *, log=print, idx: int) -> dict:
+    """Roda `consistency_audit.detect_duplicate_faces` no still ja pronto --
+    barato (so mais uma passada de deteccao facial, sem gerar nada de novo)
+    e roda SEMPRE, mesmo sem `consistency_threshold` -- pedido do usuario
+    2026-09-10 depois de achar um still com dois personagens onde o segundo
+    saiu com a cara clonada do primeiro (`check_consistency` nao pega isso,
+    so olha o MAIOR rosto contra uma referencia). Nunca bloqueia a geracao,
+    so grava o resultado no manifesto para a UI/relatorio avisarem."""
+    try:
+        from script_pipeline.consistency_audit import detect_duplicate_faces
+
+        resultado = detect_duplicate_faces(str(still_path))
+    except Exception as e:
+        log(f"  auditoria de duplicidade facial falhou: {type(e).__name__}: {e}")
+        return {"duplicate_flag": None, "duplicate_faces_detected": None}
+    if resultado["flagged"]:
+        pares = ", ".join(f"{i}-{j} ({score:.3f})" for i, j, score in resultado["duplicate_pairs"])
+        log(f"  ⚠ plano {idx}: {resultado['faces_detected']} rosto(s) detectado(s), "
+            f"PAR(ES) SUSPEITO(S) DE DUPLICIDADE: {pares} -- confira se dois personagens "
+            f"saíram com a mesma cara antes de gerar vídeo.")
+    return {"duplicate_flag": resultado["flagged"], "duplicate_faces_detected": resultado["faces_detected"]}
+
+
 def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: int,
                     checkpoint: str, clip: str, vae: str, seed: int,
-                    reference: str | None, log=print,
+                    reference: str | None, reference_2: str | None = None, log=print,
                     steps: int = 8, cfg: float = 1.0, guidance: float = 3.5,
                     weight_dtype: str = "default",
                     consistency_threshold: float | None = None,
@@ -180,7 +203,12 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
     import script_pipeline.generate_storyboards as sb
 
     out = out_dir / f"shot{idx:03d}_{shot['framing']}.png"
+    # A chave de cache tem de incluir a 2a referencia -- sem isso, um plano
+    # gerado ANTES do fix (so uma referencia) seria reaproveitado como se
+    # nada tivesse mudado, mesmo com o co_subject novo disponivel agora.
     chave = _still_key(shot, reference, width, height, checkpoint, lora_name, lora_strength)
+    if reference_2:
+        chave = f"{chave}|ref2={Path(reference_2).name}"
     man = _load_manifest(out_dir)
     guardado = man.get(str(idx)) or {}
     if out.exists() and guardado.get("key") == chave:
@@ -198,6 +226,7 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
             seed=seed_usado, out_path=dest, clip=clip, vae=vae, guidance=guidance,
             weight_dtype=weight_dtype,
             prompt_override=shot["storyboard_prompt"], reference_image=reference,
+            reference_image_2=reference_2,
             art_directed=bool(shot.get("art_direction")), log=log,
             lora_name=lora_name, lora_strength=lora_strength)
 
@@ -235,10 +264,12 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
                 sobra.unlink(missing_ok=True)
         if not out.exists():
             return None
+        dup = _duplicate_face_check(out, log=log, idx=idx)
         man[str(idx)] = {"file": out.name, "key": chave,
                          "prompt": shot["storyboard_prompt"][:300],
-                         "reference": reference, "consistency_score": melhor_score,
-                         "seed": melhor_seed}
+                         "reference": reference, "reference_2": reference_2,
+                         "consistency_score": melhor_score,
+                         "seed": melhor_seed, **dup}
         _save_manifest(out_dir, man)
         return out
 
@@ -247,9 +278,10 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
         return None
     # Só registra depois de a imagem existir: manifesto apontando para arquivo
     # que não saiu faria o próximo run pular a geração e falhar mais adiante.
+    dup = _duplicate_face_check(out, log=log, idx=idx)
     man[str(idx)] = {"file": out.name, "key": chave,
                      "prompt": shot["storyboard_prompt"][:300],
-                     "reference": reference}
+                     "reference": reference, "reference_2": reference_2, **dup}
     _save_manifest(out_dir, man)
     return out
 
@@ -394,10 +426,19 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         ref = refs.get(sujeito) if (use_reference and sujeito) else None
         if ref is None and use_reference:
             ref = location_refs.get(cena_id)
+        # SEGUNDA referencia (opcao B, 2026-09-10): o plano tem um segundo
+        # personagem NOMEADO no proprio texto (`co_subject`, de shot_plan.py)
+        # -- so entra se ja existe still de referencia pra ele, senao nao ha
+        # o que passar. Sem `ref` (o primeiro personagem) o template dual nao
+        # e usado mesmo com co_ref presente -- ReferenceLatent encadeia a
+        # partir do primeiro.
+        co_sujeito = shot.get("co_subject") or ""
+        co_ref = refs.get(co_sujeito) if (use_reference and ref and co_sujeito) else None
         log(f"\n[plano {i} · {len(shots)} na fila] cena {shot['scene']} · {shot['style']} · "
             f"{shot['framing']}/{shot['angle']}/{shot['movement']} · "
             f"{shot['seconds']}s ({shot['frames']}f)"
-            f"{' · ref=' + Path(ref).name if ref else ''}")
+            f"{' · ref=' + Path(ref).name if ref else ''}"
+            f"{' · ref2=' + Path(co_ref).name if co_ref else ''}")
 
         if videos_only:
             # Manifesto primeiro: com hash no cache, o glob pode achar um still
@@ -416,7 +457,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         else:
             still = _still_for_shot(shot, i, out_dir=stills_dir, width=width,
                                     height=height, checkpoint=checkpoint, clip=clip,
-                                    vae=vae, seed=seed, reference=ref, log=log,
+                                    vae=vae, seed=seed, reference=ref, reference_2=co_ref, log=log,
                                     steps=passos, cfg=escala_cfg, guidance=escala_guidance,
                                     weight_dtype=escala_weight_dtype,
                                     consistency_threshold=consistency_threshold,

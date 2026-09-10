@@ -328,6 +328,28 @@ def _character_in(texto: str, personagens: list) -> str:
     return ""
 
 
+def _other_character_in(texto: str, personagens: list, excluir: str) -> str:
+    """Segundo personagem nomeado no MESMO texto, alem de `excluir` -- opcao B
+    do pedido do usuario 2026-09-10 (ver storyboard_audit.py e MEMORIAL): um
+    plano so registrava UM `subject`, entao um plano com dois personagens no
+    quadro (ex.: "Xiao-Lan stands... looking at Mei-Li with admiration") so
+    levava referencia pra um dos dois -- o outro era pura invencao textual do
+    FLUX. MEDIDO no still real do shot007 da cena Palacio de Esmeralda: saiu
+    XIAO-LAN duplicada em vez de XIAO-LAN+MEI-LI, porque so XIAO-LAN tinha
+    referencia. So retorna nome que aparece EXPLICITAMENTE no texto do plano
+    (nao qualquer personagem da cena) -- um plano solo nao ganha referencia
+    de sobra so porque a cena tem duas pessoas."""
+    def norm(x: str) -> str:
+        return "".join(c for c in x.lower() if c.isalnum())
+    alvo = norm(texto or "")
+    alvo_excluir = norm(excluir or "")
+    for nome in personagens:
+        n = norm(nome)
+        if n and n != alvo_excluir and n in alvo:
+            return nome
+    return ""
+
+
 # Velocidade de fala usada como proxy de duração. ~14 caracteres por segundo é
 # uma taxa confortável em português; serve só para dimensionar o plano, já que a
 # duração real vem depois do TTS.
@@ -638,6 +660,7 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             linha = dialogo[li] if 0 <= li < len(dialogo) else {}
             sujeito = linha.get("character") or ""
             acao = linha.get("beat_visual") or scene.get("visual_prompt") or ""
+            co_sujeito = _other_character_in(acao, personagens, sujeito)
             fala = linha.get("text") or ""
             emocao_da_fala = linha.get("emotion") or linha.get("parenthetical")
             # Alterna a cobertura entre falantes: mesmo padrão repetido em todas
@@ -661,6 +684,7 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             # detalhe de objeto, e é assim que ele volta a ser usado: só quando
             # a ação não nomeia ninguém.
             sujeito = _character_in(acao, personagens)
+            co_sujeito = _other_character_in(acao, personagens, sujeito) if sujeito else ""
             if sujeito:
                 enquadre = cobertura[pos % len(cobertura)]
             else:
@@ -700,6 +724,7 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             "angle": angulo,
             "movement": movimento,
             "subject": sujeito,
+            "co_subject": co_sujeito,
             "screen_side": lado,
             "style": nome_estilo,
             "seconds": segundos,

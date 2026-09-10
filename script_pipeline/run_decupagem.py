@@ -47,6 +47,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -268,6 +269,19 @@ def main() -> int:
             cmd_stills += ["--lora", args.lora, "--lora-strength", str(args.lora_strength)]
         if not passo("5-D stills", cmd_stills):
             return 1
+
+        # PORTAO DE REVISAO (2026-09-10, pedido do usuario depois de dois
+        # defeitos reais -- rosto duplicado num still de 2 personagens e
+        # drift de estilo -- passarem direto pro video sem aviso nenhum).
+        # So reporta: nunca interrompe a corrida sozinho, quem decide se
+        # revisa a galeria antes de --ate render e a pessoa. Ver
+        # storyboard_audit.py.
+        from script_pipeline.storyboard_audit import build_report, format_summary
+        relatorio_stills = build_report(run)
+        print(format_summary(relatorio_stills))
+        if relatorio_stills:
+            (run / "shots" / "storyboard_audit.json").write_text(
+                json.dumps(relatorio_stills, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # O animatic vem DEPOIS dos stills e ANTES do vídeo: é o único ponto em que
     # dá para ver a cena inteira montada sem ter gastado GPU com difusão.

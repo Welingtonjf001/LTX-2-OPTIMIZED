@@ -619,7 +619,8 @@ def generate_scene_storyboard(
     scene: dict, cast: dict, *, server: str, checkpoint: str, width: int, height: int,
     steps: int, cfg: float, seed: int, out_path: Path, log=print,
     clip: str = "", vae: str = "", guidance: float = 3.5, prompt_override: str | None = None,
-    reference_image: str | None = None, art_directed: bool = False,
+    reference_image: str | None = None, reference_image_2: str | None = None,
+    art_directed: bool = False,
     weight_dtype: str = "default", lora_name: str = "", lora_strength: float = 0.8,
 ) -> bool:
     architecture = detect_architecture(checkpoint)
@@ -628,11 +629,22 @@ def generate_scene_storyboard(
     # prompt + same seed produced an unrelated person WITHOUT the reference and the
     # referenced person WITH it. Only FLUX has this path; SDXL falls back to text.
     used_reference_template = bool(reference_image and architecture == "flux")
-    if used_reference_template:
+    # DUAL reference (2026-09-10, opcao B do pedido do usuario): um plano com
+    # DOIS personagens nomeados so tinha referencia pro `subject` principal --
+    # o outro era pura invencao textual do FLUX, e foi assim que o still real
+    # do shot007 saiu com XIAO-LAN duplicada em vez de XIAO-LAN+MEI-LI (ver
+    # storyboard_audit.py / consistency_audit.detect_duplicate_faces). O grafo
+    # ReferenceLatent encadeia (Storyboard-Director ja fazia isso ate 4x);
+    # aqui vao exatamente 2, o caso comum de dialogo entre dois personagens.
+    used_dual_reference = bool(used_reference_template and reference_image_2)
+    if used_dual_reference:
+        template = json.loads((ROOT / "comfyui_workflows" / "character_flux_reference_dual.json").read_text(encoding="utf-8"))
+    elif used_reference_template:
         template = json.loads((ROOT / "comfyui_workflows" / "character_flux_reference.json").read_text(encoding="utf-8"))
     else:
         template = json.loads(WORKFLOW_TEMPLATES[architecture].read_text(encoding="utf-8"))
         reference_image = None
+        reference_image_2 = None
     prompt = prompt_override if prompt_override else build_prompt(scene, cast)
     values = {
         "SEED": seed, "STEPS": steps,
@@ -661,9 +673,13 @@ def generate_scene_storyboard(
         values["REFERENCE_IMAGE"] = _stage_reference(
             reference_image, f"{scene['index']:02d}_{out_path.stem}"
         )
+    if reference_image_2:
+        values["REFERENCE_IMAGE_2"] = _stage_reference(
+            reference_image_2, f"{scene['index']:02d}_{out_path.stem}_2"
+        )
     workflow = _fill_template(template, values)
     if lora_name:
-        arch_key = "flux-ref" if used_reference_template else architecture
+        arch_key = "flux-ref" if (used_reference_template or used_dual_reference) else architecture
         _apply_lora(workflow, arch_key, lora_name, lora_strength)
         log(f"Cena {scene['index']}: LoRA {lora_name} (forca {lora_strength}).")
     log(f"Cena {scene['index']}: {prompt[:120]}...")
