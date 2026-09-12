@@ -186,7 +186,7 @@ def _duplicate_face_check(still_path: Path, *, log=print, idx: int) -> dict:
         return {"duplicate_flag": None, "duplicate_faces_detected": None}
     if resultado["flagged"]:
         pares = ", ".join(f"{i}-{j} ({score:.3f})" for i, j, score in resultado["duplicate_pairs"])
-        log(f"  ⚠ plano {idx}: {resultado['faces_detected']} rosto(s) detectado(s), "
+        log(f"  ALERTA plano {idx}: {resultado['faces_detected']} rosto(s) detectado(s), "
             f"PAR(ES) SUSPEITO(S) DE DUPLICIDADE: {pares} -- confira se dois personagens "
             f"saíram com a mesma cara antes de gerar vídeo.")
     return {"duplicate_flag": resultado["flagged"], "duplicate_faces_detected": resultado["faces_detected"]}

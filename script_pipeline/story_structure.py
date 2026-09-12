@@ -190,6 +190,14 @@ def _build_prompt(scenes: list[dict], det: dict, language: str) -> tuple[str, st
 
 
 def _call_ollama(system: str, user: str, model: str, log=print) -> dict | None:
+    # Roteamento pra NVIDIA (pedido do usuario 2026-09-12): "nvidia/<modelo>"
+    # em qualquer --engine cai aqui em vez do Ollama local -- mesmo contrato
+    # JSON-in/JSON-out, entao cast_characters.py/prompt_polish.py/
+    # story_structure.py nao precisam saber a diferenca. Ver nvidia_llm.py.
+    if model.startswith("nvidia/"):
+        from script_pipeline.nvidia_llm import call_nvidia
+        return call_nvidia(system, user, model, log=log)
+
     payload = {
         "model": model, "stream": False, "format": "json",
         # think=False: modelo de raciocinio gasta o orcamento no campo `thinking`

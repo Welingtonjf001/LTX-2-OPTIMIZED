@@ -75,6 +75,12 @@ SLUG_GLOSSARIO = {
 
 
 def _ollama(system: str, user: str, model: str, log=print) -> dict | None:
+    # Roteamento pra NVIDIA (pedido do usuario 2026-09-12), mesmo padrao de
+    # story_structure._call_ollama. Ver nvidia_llm.py.
+    if model.startswith("nvidia/"):
+        from script_pipeline.nvidia_llm import call_nvidia
+        return call_nvidia(system, user, model, log=log)
+
     payload = {"model": model, "stream": False, "format": "json", "think": False,
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}],

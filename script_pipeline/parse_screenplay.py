@@ -1060,6 +1060,19 @@ def enrich_with_llm_ollama(
         last_error = None
         raw = ""
         ok = False
+        # Roteamento pra NVIDIA (pedido do usuario 2026-09-12) -- devolve
+        # texto cru, igual o `content` do Ollama; o `_extract_json` mais
+        # abaixo trata os dois do mesmo jeito. Ver nvidia_llm.py.
+        if model.startswith("nvidia/"):
+            from script_pipeline.nvidia_llm import call_nvidia_text
+            raw = call_nvidia_text(system_prompt, user_prompt, model,
+                                    max_tokens=min(4096, 1200 + 60 * len(scene.dialogue)), log=log) or ""
+            ok = bool(raw)
+            if not ok:
+                last_error = "NVIDIA API sem resposta"
+            results.append({"id": job_id, "ok": ok, "raw_text": raw,
+                            **({"error": str(last_error)} if not ok else {})})
+            continue
         for attempt in range(3):
             req = urllib.request.Request(
                 f"{ollama_url}/api/chat", data=req_bytes,

@@ -359,6 +359,15 @@ def _run_ollama(user_prompt: str, *, model: str, max_new_tokens: int, log=print)
     exists on disk 404s here, that mismatch is the usual cause, so the error
     message lists what this instance actually serves.
     """
+    # Roteamento pra NVIDIA (pedido do usuario 2026-09-12) -- esta chamada
+    # devolve TEXTO LIVRE (roteiro reformatado), nao JSON, entao usa
+    # `call_nvidia_text`, nao `call_nvidia`. Ver nvidia_llm.py.
+    if model.startswith("nvidia/"):
+        from script_pipeline.nvidia_llm import call_nvidia_text
+        log(f"[prose_to_screenplay] convertendo prosa -> roteiro via NVIDIA ({model})...")
+        return call_nvidia_text(SYSTEM_PROMPT, user_prompt, model,
+                                 max_tokens=max_new_tokens, log=log)
+
     import urllib.error
     import urllib.request
 

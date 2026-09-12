@@ -123,6 +123,65 @@ def concat_videos(video_paths: list[str], output_path: Path, *, work_dir: Path, 
     return True
 
 
+def _pick_music_track(music_path: str | None, music_dir: str | None, *, log) -> str | None:
+    """Resolve qual arquivo de musica usar. `music_path` explicito sempre
+    ganha; `music_dir` sorteia um arquivo de audio da pasta -- pedido do
+    usuario 2026-09-12: os motores de video (LTX/MiniMax) so geram trilha
+    para ALGUMAS cenas (as de dialogo, via audio_conditioning), entao o
+    filme monta com trechos sem musica nenhuma. Uma trilha externa continua,
+    escolhida aqui, cobre o filme inteiro independente do que cada motor
+    gerou."""
+    if music_path:
+        return music_path
+    if music_dir:
+        import random
+
+        extensoes = {".mp3", ".wav", ".m4a", ".flac", ".ogg"}
+        candidatos = sorted(p for p in Path(music_dir).glob("*") if p.suffix.lower() in extensoes)
+        if not candidatos:
+            log(f"assemble_final: nenhum arquivo de audio em {music_dir}; seguindo sem musica.")
+            return None
+        escolha = random.choice(candidatos)
+        log(f"assemble_final: musica sorteada de {music_dir}: {escolha.name}")
+        return str(escolha)
+    return None
+
+
+def mix_music_bed(
+    movie_path: Path, music_path: str, out_path: Path, *,
+    music_volume: float, duck_ratio: float, duck_threshold: float, log,
+) -> str | None:
+    """Mistura uma trilha de musica CONTINUA sob o FILME JA MONTADO -- uma
+    passada so, depois da concatenacao, nao por clipe. Por-clipe (o
+    `--ambient-track` de mix_audio.py) reinicia o loop da musica a cada
+    corte de plano, o que soa como a musica "parando e recomecando" bem no
+    meio do filme -- exatamente o que o usuario reportou. Aqui a mesma
+    trilha toca sem interrupcao do inicio ao fim.
+
+    Ducking por SIDECHAIN contra a faixa de audio do PROPRIO filme (fala +
+    o que cada motor gerou) -- mesmo mecanismo de `mix_audio.restore_bed`:
+    a musica abaixa sozinha quando ha fala/som e volta no silencio, sem
+    precisar marcar onde estao as falas."""
+    ffmpeg = os.environ.get("LTX_FFMPEG", "C:/ffmpeg/bin/ffmpeg.exe")
+    filtro = (
+        "[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[voz][chave];"
+        f"[1:a]aresample=48000,aformat=channel_layouts=stereo,volume={music_volume}[musica];"
+        f"[musica][chave]sidechaincompress=threshold={duck_threshold}:ratio={duck_ratio}:"
+        "attack=5:release=400:makeup=1[abaixada];"
+        "[voz][abaixada]amix=inputs=2:duration=first:normalize=0[aout]"
+    )
+    r = subprocess.run(
+        [ffmpeg, "-y", "-v", "error", "-i", str(movie_path), "-stream_loop", "-1", "-i", str(music_path),
+         "-filter_complex", filtro, "-map", "0:v:0", "-map", "[aout]",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(out_path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if r.returncode != 0 or not out_path.exists():
+        log(f"assemble_final: falha ao misturar musica ({(r.stderr or '')[-500:]}); seguindo sem musica.")
+        return None
+    return str(out_path)
+
+
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -131,6 +190,14 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--output", default="movie.mp4")
+    parser.add_argument("--music-path", default=None,
+                        help="arquivo de musica especifico para tocar sob o filme inteiro")
+    parser.add_argument("--music-dir", default=None,
+                        help="pasta de musicas -- sorteia um arquivo se --music-path nao for dado")
+    parser.add_argument("--music-volume", type=float, default=0.18,
+                        help="nivel da musica antes do ducking (0-1)")
+    parser.add_argument("--music-duck-ratio", type=float, default=8.0)
+    parser.add_argument("--music-duck-threshold", type=float, default=0.02)
     args = parser.parse_args(argv)
 
     from script_pipeline import run_folder
@@ -155,6 +222,17 @@ def main(argv=None) -> int:
     if not ok:
         log("assemble_final: FALHOU.")
         return 1
+
+    musica = _pick_music_track(args.music_path, args.music_dir, log=log)
+    if musica:
+        com_musica = final_dir / f"_com_musica_{output_path.name}"
+        resultado = mix_music_bed(
+            output_path, musica, com_musica, music_volume=args.music_volume,
+            duck_ratio=args.music_duck_ratio, duck_threshold=args.music_duck_threshold, log=log,
+        )
+        if resultado:
+            com_musica.replace(output_path)
+            log(f"assemble_final: musica ({Path(musica).name}) misturada sob o filme inteiro.")
 
     log(f"assemble_final: filme final pronto -> {output_path}")
     run_folder.mark_stage_complete(run_dir, "assemble")

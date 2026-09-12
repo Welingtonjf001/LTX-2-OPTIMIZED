@@ -918,6 +918,13 @@ ORBIT_MIN_SECONDS = 5.0
 
 
 def _call_ollama_camera(system: str, user: str, model: str, log=print) -> dict | None:
+    # Roteamento pra NVIDIA (pedido do usuario 2026-09-12) -- mesmo padrao de
+    # story_structure._call_ollama: "nvidia/<modelo>" cai na API da NVIDIA em
+    # vez do Ollama local. Ver nvidia_llm.py.
+    if model.startswith("nvidia/"):
+        from script_pipeline.nvidia_llm import call_nvidia
+        return call_nvidia(system, user, model, log=log)
+
     payload = {
         "model": model, "stream": False, "format": "json", "think": False,
         "messages": [{"role": "system", "content": system},

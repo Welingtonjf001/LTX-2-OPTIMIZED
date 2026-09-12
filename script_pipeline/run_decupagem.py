@@ -164,6 +164,18 @@ def main() -> int:
                          "nao confundir com os LoRAs de video em models/loras/). "
                          "Sem isto, nenhum LoRA (comportamento de sempre).")
     ap.add_argument("--lora-strength", type=float, default=0.8)
+    # Musica de fundo continua sob o filme inteiro (pedido do usuario
+    # 2026-09-12): os motores de video so geram trilha nas cenas de dialogo
+    # (audio_conditioning), entao o filme montado tem trechos sem musica
+    # nenhuma. Misturada em assemble_final.py DEPOIS da concatenacao -- uma
+    # trilha continua, nao reiniciada a cada corte. `--music-path` explicito
+    # ganha de `--music-dir` (sorteia um arquivo da pasta).
+    ap.add_argument("--music-path", default=None,
+                    help="arquivo de musica para tocar sob o filme inteiro")
+    ap.add_argument("--music-dir", default=None,
+                    help="pasta de musicas -- sorteia um arquivo se --music-path nao for dado")
+    ap.add_argument("--music-volume", type=float, default=None,
+                    help="nivel da musica antes do ducking (0-1, padrao 0.18)")
     args = ap.parse_args()
 
     run = Path(args.run_dir).resolve()
@@ -365,8 +377,14 @@ def main() -> int:
         passo("7 mix", ["-m", "script_pipeline.mix_audio",
                         "--run-dir", str(run)], obrigatorio=False)
     if ate("final"):
-        if not passo("8 montagem", ["-m", "script_pipeline.assemble_final",
-                                    "--run-dir", str(run)]):
+        cmd_montagem = ["-m", "script_pipeline.assemble_final", "--run-dir", str(run)]
+        if args.music_path:
+            cmd_montagem += ["--music-path", args.music_path]
+        if args.music_dir:
+            cmd_montagem += ["--music-dir", args.music_dir]
+        if args.music_volume is not None:
+            cmd_montagem += ["--music-volume", str(args.music_volume)]
+        if not passo("8 montagem", cmd_montagem):
             return 1
         passo("9 verificacao", ["-m", "script_pipeline.verify_output",
                                 "--run-dir", str(run)], obrigatorio=False)
