@@ -103,9 +103,27 @@ def runs(assignment: list[int]) -> list[tuple[int, int]]:
     return out
 
 
+# Fracao maxima do clipe que a guia pode cobrir. MEDIDO 2026-09-13: com 65 quadros de
+# guia num clipe de 73 (89%) o video TOCA a sequencia de referencia -- still, retrato do
+# sujeito 1, do sujeito 2 e corte seco para o cenario no quadro 57 --, em distilled bf16
+# e em w4a8, com guia 1,0 e 0,5. Clipes de 113/129 quadros com a mesma guia nao cortaram.
+# O workflow oficial LTX-2.3_MSR_sample_workflow_V2 usa 65 quadros num video de 251 (~26%).
+MSR_MAX_FRACAO = 0.34
+
+# Enquadramentos em que o MSR NAO entra. MEDIDO 2026-09-13 (teste_distilled_close e
+# teste_close_v2): nos 3 planos abertos (still com os personagens pequenos no corredor) o
+# video larga o still ja no quadro 1 e vira o plano medio dos retratos da guia -- salto de
+# histograma 0,17-0,46 --, com guia de 65 E de 17 quadros. Nos closes (retrato e still no
+# mesmo tamanho) o salto ficou < 0,015. O oficial e T2V puro: no I2V o still ja fixa o
+# cenario e a guia de retratos compete com ele.
+MSR_SEM_ENQUADRAMENTO_ABERTO = ("wide", "full", "insert", "establishing")
+
+
 def pick_msr_frame_count(num_frames: int) -> int | None:
-    """Maior sequencia do treino que cabe no clipe (a guia nao pode passar dele)."""
-    cabem = [f for f in MSR_FRAME_COUNTS if f <= num_frames]
+    """Maior sequencia do treino que cabe em MSR_MAX_FRACAO do clipe. None = clipe curto
+    demais para o MSR (menos de 51 quadros): melhor sem guia do que com a guia virando
+    keyframe."""
+    cabem = [f for f in MSR_FRAME_COUNTS if f <= num_frames * MSR_MAX_FRACAO]
     return max(cabem) if cabem else None
 
 
@@ -227,6 +245,8 @@ def shot_ic_spec(mode: str, shot: dict, still: str, refs: dict, location_ref: st
     imagens = [refs[s] for s in sujeitos]
     descs = [(s, (descriptors or {}).get(s, "")) for s in sujeitos]
     locacao = None
+    if mode == "msr" and shot.get("framing") in MSR_SEM_ENQUADRAMENTO_ABERTO:
+        return None, video_prompt, ""
     if mode == "msr":
         # O slot de cenario e obrigatorio no MSR.
         r = build_msr_guide(imagens, still, width, height, num_frames, work_dir)

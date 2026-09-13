@@ -86,9 +86,13 @@ FRAMINGS = {
 # rosto nao tem pixel (CLAUDE.md 3.17), e o inserto, que por definicao nao tem
 # rosto no quadro (ver SUBJECT_HINTS). Ver _cobertura_de_fala.
 SEM_ROSTO = ("wide", "full", "insert")
+# Ligado por plan_all(dialogue_close_only=...) -- ver _cobertura_de_fala.
+DIALOGO_SO_CLOSE = False
+# Abaixo desta altura de saida o medium nao da rosto suficiente ao lip-sync.
+ALTURA_MIN_MEDIUM_FALA = 704
 
 
-def _cobertura_de_fala(cobertura: list) -> list:
+def _cobertura_de_fala(cobertura: list, somente_close: bool | None = None) -> list:
     """A escada de enquadramentos que serve a um plano de FALA.
 
     MEDIDO 2026-08-28 no run Lyra: as duas falas do Thoren sairam `wide`, com o
@@ -100,7 +104,17 @@ def _cobertura_de_fala(cobertura: list) -> list:
     Filtra a cobertura do estilo, mantendo a ORDEM e a intencao dele, e garante
     pelo menos dois degraus -- com um so, o plano-contraplano vira quatro
     planos identicos, que foi o segundo defeito da mesma cena."""
-    escada = [c for c in cobertura if c not in SEM_ROSTO]
+    # MEDIDO 2026-09-13 ("O Primeiro Tour", 38 planos de fala a 960x544, auditoria
+    # de sync + altura do rosto por insightface): rosto >300 px -> mediana +0,18 e
+    # 7/10 aprovados; 200-300 px -> +0,12 e 8/17; 120-200 px -> -0,14. Por
+    # enquadramento: close +0,25 (rosto ~277 px), medium +0,05 (~203 px). O
+    # LatentSync trabalha num recorte de 512x512 -- rosto pequeno chega ampliado e
+    # sem sinal de boca. Por isso, abaixo de 704 px de altura, fala so em close.
+    # E extreme_close NUNCA serve a fala: o texto dele e "only the eyes and brow
+    # fill the frame" -- a boca sai do quadro e nao ha o que sincronizar.
+    if somente_close if somente_close is not None else DIALOGO_SO_CLOSE:
+        return ["close"]
+    escada = [c for c in cobertura if c not in SEM_ROSTO and c != "extreme_close"]
     if not escada:
         return ["medium", "close"]
     if len(escada) == 1:
@@ -115,6 +129,12 @@ ESTABELECIMENTO_FRAMING = ("extreme wide establishing shot of the whole location
                            "taking in the space and its depth, no one in the foreground")
 SUBJECT_HINTS = {
     "ots": "facing the camera in the mid-ground, their face fully visible and in focus",
+    # MEDIDO 2026-09-13 (20260913_teste_distilled_close): "close-up, the face filling
+    # most of the frame" com descritor longo + pose de corpo saiu PLANO MEDIO (cintura
+    # para cima, rosto ~200 px a 960x544) -- o lip-sync pontuou -0,1 a +0,1 nos 3
+    # motores. O enquadramento precisa de limites fisicos, nao so de nome.
+    "close": "framed from the top of the head to the shoulders, face large and centered, "
+             "mouth clearly visible, no hands or waist in frame",
 }
 ANGLES = {
     "eye":  "",                     # default do modelo; não gastar prompt com isso
@@ -418,7 +438,9 @@ def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
             clausula += f", {SUBJECT_HINTS[framing]}"
         partes.append(clausula)
     pose_curta = (pose or "").strip().rstrip(".")
-    if pose_curta:
+    # Close nao leva gesto de corpo: "arms crossed" obrigou o FLUX a abrir ate a cintura
+    # (VISTO 2026-09-13, shot001_close.png). A expressao ja vem pelo descritor/emocao.
+    if pose_curta and framing != "close":
         # Recorte na primeira frase -- o still e um instante, nao a acao
         # inteira (que pode cobrir varios segundos de movimento).
         pose_curta = re.split(r"(?<=[.!?])\s+", pose_curta)[0].rstrip(".")
@@ -839,7 +861,9 @@ def style_for_scene(index: int, base: str, changes: dict) -> str:
 def plan_all(scenes: list, structure: dict | None, *, style_name: str = "classico",
              fps: float = 24.0, descriptors: dict | None = None,
              include_quotes: bool = False, style_changes: dict | None = None,
-             durations: dict | None = None) -> dict:
+             durations: dict | None = None, dialogue_close_only: bool = False) -> dict:
+    global DIALOGO_SO_CLOSE
+    DIALOGO_SO_CLOSE = bool(dialogue_close_only)
     if style_name not in STYLES:
         raise ValueError(f"estilo desconhecido {style_name!r}; use {sorted(STYLES)}")
     style_changes = style_changes or {}
@@ -1139,7 +1163,18 @@ def main() -> int:
                          "por cena. Sem isto, so o determinístico de sempre.")
     ap.add_argument("--engine", default="qwen3.6-35b-a3b:latest",
                     help="tag do Ollama para --camera-llm")
+    ap.add_argument("--height", type=int, default=None,
+                    help="altura do video de saida; decide o enquadramento de fala em --dialogue-framing auto")
+    ap.add_argument("--dialogue-framing", default="auto", choices=["auto", "close", "livre"],
+                    help=f"auto = fala so em close abaixo de {ALTURA_MIN_MEDIUM_FALA} px de altura "
+                         "(rosto >300 px, o que o lip-sync aprova -- MEMORIAL 3.80); close = sempre; "
+                         "livre = a escada do estilo (ainda sem extreme_close, que tira a boca do quadro)")
     args = ap.parse_args()
+    so_close = (args.dialogue_framing == "close" or
+                (args.dialogue_framing == "auto" and args.height is not None
+                 and args.height < ALTURA_MIN_MEDIUM_FALA))
+    print(f"[shot_plan] enquadramento de fala: {'so close' if so_close else 'escada do estilo'} "
+          f"(--dialogue-framing {args.dialogue_framing}, altura {args.height})")
     changes = parse_style_changes(args.style_changes)
 
     if args.scenes:
@@ -1180,7 +1215,8 @@ def main() -> int:
 
     plan = plan_all(scenes, structure, style_name=args.style, fps=args.fps,
                     include_quotes=args.include_quotes, style_changes=changes,
-                    descriptors=descritores, durations=duracoes)
+                    descriptors=descritores, durations=duracoes,
+                    dialogue_close_only=so_close)
     if args.camera_llm:
         enrich_camera_style(plan, engine=args.engine, log=print)
     out = Path(args.out) if args.out else sp.parent / "shot_plan.json"

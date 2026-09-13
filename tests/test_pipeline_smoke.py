@@ -168,6 +168,28 @@ def test_cobertura_de_fala_garante_dois_degraus():
     assert len(escada) >= 2
 
 
+def test_cobertura_de_fala_nunca_extreme_close():
+    # extreme_close e "so os olhos": a boca sai do quadro e o lip-sync nao tem o que sincronizar.
+    assert "extreme_close" not in _cobertura_de_fala(["extreme_close", "close", "medium"])
+
+
+def test_cobertura_de_fala_so_close_abaixo_de_704():
+    # MEDIDO 2026-09-13: a 960x544 o medium da rosto ~203 px e sync mediana +0,05;
+    # o close ~277 px e +0,25.
+    assert _cobertura_de_fala(["medium", "close", "wide"], somente_close=True) == ["close"]
+    assert "medium" in _cobertura_de_fala(["medium", "close"], somente_close=False)
+
+
+def test_still_close_sem_gesto_de_corpo_e_com_limite_de_quadro():
+    # VISTO 2026-09-13: "arms crossed" num close fez o FLUX abrir ate a cintura.
+    from script_pipeline.shot_plan import _storyboard_prompt
+    kw = dict(angle="eye", subject="A", location="hall", time_of_day="day", look="",
+              descriptor="", screen_side=None, pose="She crosses her arms.")
+    close = _storyboard_prompt(framing="close", **kw)
+    assert "crosses her arms" not in close and "top of the head" in close
+    assert "crosses her arms" in _storyboard_prompt(framing="medium", **kw)
+
+
 def test_emocao_visivel_traduz_slug_conhecido():
     v = emocao_visivel("com_medo")
     assert v and "wide" in v  # "eyes wide and darting..."

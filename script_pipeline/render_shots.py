@@ -496,6 +496,11 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         clip_path = clips_dir / f"shot{i:03d}.mp4"
         marca = clips_dir / f"shot{i:03d}.key"
         chave = f"{shot['frames']}|{_audio_key(wav_cond)}"
+        # O STILL e o quadro 0 do I2V: still refeito com clipe velho e o mesmo modo de falha
+        # silenciosa. VISTO 2026-09-13 (teste_close_v2): os closes novos foram gerados e os
+        # 3 clipes de fala antigos, de plano medio, foram reaproveitados. Invalida uma vez
+        # o cache de corridas antigas (chave nova), o que e o comportamento certo.
+        chave += f"|still={_audio_key(str(still))}"
         # LoRAs de video e IC-LoRA (2026-09-12) mudam o CLIPE do mesmo jeito que trocar o
         # audio -- entram na chave, senao ligar um LoRA reaproveitaria o clipe velho em
         # silencio. So quando ligados: corrida sem eles mantem a chave antiga e o cache.
@@ -512,7 +517,12 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     strength=ic_strength, guide_strength=ic_guide_strength)
                 chave += chave_ic
                 if ic_spec is None:
-                    log(f"  IC-LoRA ({ic_mode}): plano sem personagem com referencia -- so o still")
+                    if ic_mode == "msr" and shot.get("framing") in ic_references.MSR_SEM_ENQUADRAMENTO_ABERTO:
+                        log(f"  IC-LoRA (msr): plano {shot.get('framing')} -- sem guia, so o still "
+                            f"(retratos da guia fariam o video largar o still no quadro 1)")
+                    else:
+                        log(f"  IC-LoRA ({ic_mode}): plano sem personagem com referencia ou curto "
+                            f"demais para a guia -- so o still")
         if clip_path.exists():
             # Reaproveitar exige que o clipe CORRESPONDA ao plano atual, não só
             # que exista. MEDIDO 2026-08-26: depois que o TTS trocou as durações
@@ -817,7 +827,9 @@ def apply_voice(feitos: list, plan: dict, dialogue: dict, out_dir: Path, *,
             # dois mudou, o resultado do lip-sync tambem nao muda. Sem isto,
             # reprocessar so o mux forcava LatentSync de novo nos cinco planos.
             marca = ls_dir / f"shot{i:03d}.key"
-            chave_ls = f"{_clip_frames(base)}|{Path(wav).stat().st_size}"
+            # + tamanho do clipe: um clipe refeito (still novo) com a mesma contagem de
+            # quadros herdava o lip-sync do clipe velho (VISTO 2026-09-13).
+            chave_ls = f"{_clip_frames(base)}|{base.stat().st_size}|{Path(wav).stat().st_size}"
             if alvo.exists() and marca.exists() and                     marca.read_text(encoding="utf-8").strip() == chave_ls:
                 log(f"  plano {i}: lip-sync ja feito, reaproveitando")
                 base = alvo

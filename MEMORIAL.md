@@ -6086,6 +6086,36 @@ MEDIDO (w4a8, 960x544), auditoria de sync `lipsync_audit`:
   Testado pela própria WebUI: o comando montado levou todas as opções à cadeia
   (corrida `20260913_0832_teste_webui_loras`).
 
+## 3.80 Enquadramento de fala amarrado ao que o lip-sync aprova (2026-09-13)
+
+MEDIDO no "O Primeiro Tour" (38 planos de fala a 960x544): auditoria de sync
+(`lipsync_audit`) cruzada com a altura do rosto (insightface, quadro do meio do
+clipe cru).
+
+| rosto | planos | sync mediana | aprovados (≥0,15) |
+|---|---|---|---|
+| <120 px | 1 | +0,04 | 0/1 |
+| 120-200 px | 3 | -0,14 | 1/3 |
+| 200-300 px | 17 | +0,12 | 8/17 |
+| >300 px | 10 | +0,18 | 7/10 |
+
+Por enquadramento: close +0,25 (rosto ~277 px), medium +0,05 (~203 px). O
+LatentSync recorta o rosto para 512x512, então rosto pequeno chega ampliado e sem
+sinal de boca. Uma seed, uma cena: é tendência, não lei.
+
+Amarrado em `shot_plan._cobertura_de_fala`:
+
+- **fala nunca em `extreme_close`** (em nenhum modo): o texto do enquadramento é
+  "only the eyes and brow fill the frame" — a boca sai do quadro;
+- `--dialogue-framing auto` (padrão): **só close quando a altura de saída é menor
+  que 704 px**; a 1280x704 ou mais, a escada do estilo (medium + close) volta;
+- `close` força sempre; `livre` usa a escada do estilo.
+
+`run_decupagem` passa `--height` e `--dialogue-framing` ao estágio P. Verificado
+refazendo a decupagem da mesma corrida a 544 px: `auto` → 38/38 planos de fala em
+close; `livre` → 16 medium + 22 close, idêntico à corrida original. Planos de ação
+não mudam.
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do

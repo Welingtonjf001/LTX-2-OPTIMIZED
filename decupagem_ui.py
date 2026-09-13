@@ -937,6 +937,72 @@ def regenerar_selecao(nome_run: str, quais: str, motor_img: str, largura, altura
     return status, stills_com_legenda(run)
 
 
+def limpar_cache_stills(nome_run: str, quais: str, derivados: bool, liberar_comfy: bool) -> str:
+    """Limpador de cache para uma NOVA geracao de stills (pedido do usuario 2026-09-13).
+
+    "Marcar para refazer" apaga so o PNG e a entrada do manifesto. O que ficava para tras
+    e reaproveitado em silencio depois que o still muda:
+      - clipe (`shots/clips/shotNNN.key`): VISTO 2026-09-13, closes novos com os clipes de
+        plano medio antigos reusados;
+      - lip-sync (`lipsync/shotNNN.key` e `_synced.mp4`), animatic e auditoria de storyboard;
+      - o cache de nos/modelos do ComfyUI (`POST /free`), que segura o FLUX carregado.
+    Nao apaga clipes .mp4: sem a .key eles sao refeitos na proxima passada de video."""
+    if not nome_run:
+        return "Selecione uma corrida primeiro."
+    run = RUNS_DIR / nome_run
+    linhas = [apagar_stills(nome_run, quais)]
+    if linhas[0].startswith(("Selecione", "Nao entendi")):
+        return linhas[0]
+
+    alvo = (quais or "").strip().lower()
+    todos = alvo in ("", "todos", "all", "*")
+    indices = set()
+    if not todos:
+        for parte in alvo.replace(";", ",").split(","):
+            parte = parte.strip()
+            if "-" in parte:
+                a, b = parte.split("-", 1)
+                indices.update(range(int(a), int(b) + 1))
+            elif parte:
+                indices.add(int(parte))
+
+    def _casa(p: Path) -> bool:
+        m = re.match(r"shot(\d+)", p.name)
+        return bool(m) and (todos or int(m.group(1)) in indices)
+
+    if derivados:
+        removidos = []
+        for pasta, padroes in ((run / "shots" / "clips", ("shot*.key",)),
+                               (run / "lipsync", ("shot*.key", "shot*_synced.mp4"))):
+            if not pasta.is_dir():
+                continue
+            for padrao in padroes:
+                for p in pasta.glob(padrao):
+                    if _casa(p):
+                        p.unlink(missing_ok=True)
+                        removidos.append(f"{pasta.name}/{p.name}")
+        for p in (run / "shots" / "animatic.mp4", run / "shots" / "storyboard_audit.json"):
+            if p.exists():
+                p.unlink(missing_ok=True)
+                removidos.append(f"shots/{p.name}")
+        linhas.append(f"Derivados invalidados ({len(removidos)}): "
+                      + (", ".join(removidos[:12]) + (" ..." if len(removidos) > 12 else "")
+                         if removidos else "nenhum"))
+
+    if liberar_comfy:
+        import urllib.request
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8188/free", method="POST",
+                                         data=json.dumps({"unload_models": True,
+                                                          "free_memory": True}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10)
+            linhas.append("ComfyUI (8188): modelos descarregados e cache de nós liberado.")
+        except OSError:
+            linhas.append("ComfyUI (8188) fora do ar — nada a liberar.")
+    return "\n".join(linhas)
+
+
 # --------------------------------------------------------------------------
 # execucao
 # --------------------------------------------------------------------------
@@ -1503,6 +1569,19 @@ def build() -> None:
                         btn_refazer = gr.Button("Marcar para refazer", scale=1)
                         btn_regenerar_selecao = gr.Button("Regenerar seleção agora", scale=1,
                                                           variant="primary")
+                    gr.Markdown(
+                        "**🧹 Limpar cache**: além dos stills da seleção, invalida o que foi "
+                        "feito A PARTIR deles — chave dos clipes, lip-sync, animatic e auditoria "
+                        "de storyboard — e pode liberar os modelos/cache do ComfyUI. Sem isso, um "
+                        "still novo pode seguir com o clipe velho. Clipes `.mp4` não são "
+                        "apagados: sem a chave, a próxima passada de vídeo refaz."
+                    )
+                    with gr.Row():
+                        limpar_derivados = gr.Checkbox(value=True, scale=2,
+                                                       label="Invalidar clipes, lip-sync e animatic da seleção")
+                        limpar_comfy = gr.Checkbox(value=False, scale=2,
+                                                   label="Liberar cache do ComfyUI (8188) — não use com geração em andamento")
+                        btn_limpar_cache = gr.Button("🧹 Limpar cache", scale=1, variant="stop")
                     aviso_refazer = gr.Textbox(label="", interactive=False, lines=6)
 
                 # Pos-producao, FORA do fluxo de geracao de proposito: e ferramenta
@@ -1583,6 +1662,11 @@ def build() -> None:
                                     inputs=[runs, quais, motor_img, largura, altura,
                                             lora, lora_strength],
                                     outputs=[aviso_refazer, galeria])
+        btn_limpar_cache.click(fn=limpar_cache_stills,
+                               inputs=[runs, quais, limpar_derivados, limpar_comfy],
+                               outputs=aviso_refazer
+                               ).then(fn=lambda n: stills_com_legenda(RUNS_DIR / n) if n else [],
+                                      inputs=runs, outputs=galeria)
         btn_parar.click(fn=parar, outputs=aviso)
         salvar.click(fn=salvar_cast, inputs=[runs, cast], outputs=[aviso, cast_gaps_aviso])
         sheet_btn.click(fn=gerar_sheet_personagem,

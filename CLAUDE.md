@@ -632,6 +632,12 @@ não girava, porque as falas caem em paridade fixa e um falante em cada dois ca�
 sempre no aberto. Sem isso o rosto derrete (§3.17) e a cena vira quatro planos
 iguais. Ver §3.36.4.
 
+**Plano de fala abaixo de 704 px de altura sai só em close** (desde 2026-09-13,
+`--dialogue-framing auto`). MEDIDO: a 960x544 o close dá rosto ~277 px e sync
+mediana +0,25; o medium dá ~203 px e +0,05 — o LatentSync recorta 512x512 e rosto
+pequeno chega sem sinal de boca. `extreme_close` nunca vai para fala (só olhos
+no quadro). `--dialogue-framing close|livre` força ou solta. Ver `MEMORIAL.md` §3.80.
+
 **O `--cache-none` é necessário para a passada de VÍDEO caber na placa.** Sem
 ele o mesmo clipe de 145 frames encalha a 24,2 GB de 24,5; com ele passa da carga
 com 15,9 GB. O `render_shots` já liga sozinho quando a passada não é de stills.

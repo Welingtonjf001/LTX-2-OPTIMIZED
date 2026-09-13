@@ -256,12 +256,18 @@ def _submit_and_wait(workflow: dict, *, log_cb=None, timeout: int) -> dict:
 def generate(prompt: str, output_path: str, *, image_path: str, audio_path: str,
              negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
              num_frames: int = 93, steps: int = 20, cfg: float = 3.0, seed: int = 42,
-             fps: float = 25.0, log_cb=None, timeout: int = 3600) -> str:
+             fps: float = 25.0, log_cb=None, timeout: int | None = None) -> str:
     """Gera um clipe LongCat-Video-Avatar (imagem + audio + texto) e copia para
     *output_path*. `image_path` e' a referencia de identidade/still do plano;
     `audio_path` e' a fala real que dirige o lip-sync (mesmo papel do
     `audio_conditioning` do LTX 2.5 -- NAO opcional aqui, o modelo e' avatar
-    audio-driven, sem audio nao ha o que sincronizar)."""
+    audio-driven, sem audio nao ha o que sincronizar).
+
+    `timeout` None = estimado. MEDIDO 2026-09-13 na 3090 (bf16, 25 blocos em swap,
+    960x544): 101 quadros a ~270 s/passo -- 20 passos = ~90 min. O fixo de 3600s
+    abandonava o job no passo 13 com o servidor ainda gerando."""
+    if timeout is None:
+        timeout = int(600 + steps * 270 * max(1.0, num_frames / 101) * 1.5)
     ensure_server(log_cb=log_cb)
     image_name = _stage_input(image_path, "img")
     audio_name = _stage_input(audio_path, "aud")
@@ -295,10 +301,12 @@ def _cli(argv=None) -> int:
     ap.add_argument("--cfg", type=float, default=3.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--fps", type=float, default=25.0)
+    ap.add_argument("--timeout", type=int, default=None, help="segundos; padrao estimado por quadros x passos")
     args = ap.parse_args(argv)
 
     generate(args.prompt, args.output_path, image_path=args.image, audio_path=args.audio,
-             num_frames=args.num_frames, steps=args.steps, cfg=args.cfg, seed=args.seed, fps=args.fps)
+             num_frames=args.num_frames, steps=args.steps, cfg=args.cfg, seed=args.seed, fps=args.fps,
+             timeout=args.timeout)
     return 0
 
 

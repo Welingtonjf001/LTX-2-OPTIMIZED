@@ -186,6 +186,10 @@ def main() -> int:
                     choices=["auto", "latentsync", "wav2lip", "dubit", "none"],
                     help="auto = LatentSync, Wav2Lip de reserva (como sempre); dubit = IC-LoRA "
                          "DubIt do LTX; none = sem lip-sync (fica a boca que o LTX gerou)")
+    ap.add_argument("--dialogue-framing", default="auto", choices=["auto", "close", "livre"],
+                    help="enquadramento dos planos de FALA: auto = so close abaixo de 704 px de "
+                         "altura (onde o rosto passa de 300 px e o lip-sync aprova); close = sempre; "
+                         "livre = escada do estilo. extreme_close nunca, em nenhum modo.")
     ap.add_argument("--dubit-strength", type=float, default=1.0)
     ap.add_argument("--dubit-guide-strength", type=float, default=1.0)
     ap.add_argument("--dubit-audio", default="congelar", choices=["congelar", "gerar"])
@@ -272,6 +276,7 @@ def main() -> int:
                "--dialogue", str(run / "dialogue" / "lines.json"),
                "--cast", str(run / "characters" / "cast.json"),
                "--style", args.style, "--fps", str(args.fps),
+               "--height", str(args.height), "--dialogue-framing", args.dialogue_framing,
                "--out", str(run / "parse" / "shot_plan.json")]
         if args.style_changes:
             cmd += ["--style-changes", args.style_changes]
@@ -409,6 +414,12 @@ def main() -> int:
                     cmd_video += ["--ic-lora", args.ic_lora]
         if not passo("5-D video", cmd_video):
             return 1
+        # So avisa, nunca interrompe: corte seco dentro de um clipe unico e a guia do
+        # IC-LoRA agindo como keyframe (VISTO 2026-09-13 com MSR no w4a8). Ver
+        # guide_leak_audit.py.
+        if args.video_engine == "ltx" and args.ic_reference != "off":
+            passo("5-D auditoria de guia", ["-m", "script_pipeline.guide_leak_audit",
+                                            "--run-dir", str(run)], obrigatorio=False)
 
     if ate("lipsync"):
         cmd_lip = ["-m", "script_pipeline.lipsync_scenes", "--run-dir", str(run),

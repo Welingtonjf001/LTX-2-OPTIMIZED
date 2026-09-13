@@ -94,10 +94,12 @@ def test_msr_mais_sujeitos_que_latentes_divide_por_quadros():
     assert sum(n for _, n in corridas) == 17
 
 
-def test_pick_msr_frame_count_nunca_passa_do_clipe():
-    assert icr.pick_msr_frame_count(81) == 65
-    assert icr.pick_msr_frame_count(49) == 49
-    assert icr.pick_msr_frame_count(20) == 17
+def test_pick_msr_frame_count_guia_no_maximo_um_terco_do_clipe():
+    # MEDIDO 2026-09-13: guia de 65 num clipe de 73 virava keyframe (corte no quadro 57).
+    assert icr.pick_msr_frame_count(251) == 65   # proporcao do workflow oficial
+    assert icr.pick_msr_frame_count(129) == 41
+    assert icr.pick_msr_frame_count(73) == 17
+    assert icr.pick_msr_frame_count(49) is None  # curto demais: sem MSR
     assert icr.pick_msr_frame_count(9) is None
 
 
@@ -110,7 +112,8 @@ def test_folha_e_guia_msr_no_formato_do_treino(tmp_path):
     folha = Image.open(icr.build_ingredients_sheet([str(retrato), str(cena)], 960, 544, tmp_path / "f.png"))
     assert folha.size == (960, 544) and folha.getpixel((2, 2)) == (0, 0, 0)  # fundo PRETO
 
-    corridas, quadros = icr.build_msr_guide([str(retrato)], str(cena), 960, 544, 81, tmp_path / "msr")
+    # 201 quadros: a guia de 65 so cabe em clipe >= ~3x (MSR_MAX_FRACAO).
+    corridas, quadros = icr.build_msr_guide([str(retrato)], str(cena), 960, 544, 201, tmp_path / "msr")
     assert quadros == 65 and sum(n for _, n in corridas) == 65
     sujeito = Image.open(corridas[0][0])
     assert sujeito.size == (960, 544) and sujeito.getpixel((2, 2)) == (255, 255, 255)  # fundo BRANCO
@@ -138,8 +141,33 @@ def test_shot_ic_spec_ingredients_e_msr_com_referencia(tmp_path):
     ic, prompt, _ = icr.shot_ic_spec("msr", shot, str(still), refs, None, {},
                                      width=960, height=544, num_frames=81,
                                      work_dir=tmp_path / "msr", lora="msr.safetensors")
-    assert sum(n for _, n in ic["frames"]) == 65
+    assert sum(n for _, n in ic["frames"]) == 25  # <= 1/3 de 81 (MSR_MAX_FRACAO)
     assert prompt == "Image 1: ANA. Image 2: the location and background. Ana walks."
+
+    # Clipe curto demais para a guia caber em 1/3: sem MSR, so o still.
+    ic, prompt, chave = icr.shot_ic_spec("msr", shot, str(still), refs, None, {},
+                                         width=960, height=544, num_frames=49,
+                                         work_dir=tmp_path / "msr_curto", lora="msr.safetensors")
+    assert ic is None and prompt == "Ana walks." and chave == ""
+
+
+def test_msr_nao_liga_em_plano_aberto(tmp_path):
+    # MEDIDO 2026-09-13: still aberto + retratos de corpo inteiro na guia = o video larga
+    # o still no quadro 1 (salto 0,39-0,46) nos 3 planos abertos; closes ficaram < 0,015.
+    folha = tmp_path / "ANA.png"
+    Image.new("RGB", (512, 768), (90, 60, 40)).save(folha)
+    still = tmp_path / "still.png"
+    Image.new("RGB", (960, 544), (10, 10, 60)).save(still)
+    kw = dict(width=960, height=544, num_frames=129, lora="msr.safetensors")
+    for enquadramento in ("wide", "full", "insert"):
+        shot = {"video_prompt": "p", "subject": "ANA", "co_subject": "", "framing": enquadramento}
+        ic, prompt, chave = icr.shot_ic_spec("msr", shot, str(still), {"ANA": str(folha)}, None, {},
+                                             work_dir=tmp_path / enquadramento, **kw)
+        assert ic is None and prompt == "p" and chave == ""
+    shot = {"video_prompt": "p", "subject": "ANA", "co_subject": "", "framing": "close"}
+    ic, _, _ = icr.shot_ic_spec("msr", shot, str(still), {"ANA": str(folha)}, None, {},
+                                work_dir=tmp_path / "close", **kw)
+    assert ic is not None
 
 
 def test_shot_ic_spec_sem_referencia_nao_liga(tmp_path):
