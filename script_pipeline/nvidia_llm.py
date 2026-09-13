@@ -38,7 +38,7 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
 def call_nvidia_text(system: str, user: str, model: str, *, log=print, temperature: float = 0.0,
-                      max_tokens: int = 8192) -> str | None:
+                      max_tokens: int = 8192, enable_thinking: bool = False) -> str | None:
     """Mesma API, mas devolve o CONTEUDO CRU (texto livre), sem tentar
     interpretar como JSON -- pra chamadas de reformatacao/conversao de
     texto (ex.: `prose_to_screenplay.py`), onde o resultado esperado e'
@@ -63,6 +63,7 @@ def call_nvidia_text(system: str, user: str, model: str, *, log=print, temperatu
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": user}],
                 temperature=temperature, top_p=0.95, max_tokens=max_tokens, stream=False,
+                extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
             )
             return (completion.choices[0].message.content or "").strip()
         except Exception as e:
@@ -73,7 +74,7 @@ def call_nvidia_text(system: str, user: str, model: str, *, log=print, temperatu
 
 
 def call_nvidia(system: str, user: str, model: str, *, log=print, temperature: float = 0.2,
-                 max_tokens: int = 4096) -> dict | None:
+                 max_tokens: int = 4096, enable_thinking: bool = False) -> dict | None:
     """Mesmo contrato de `story_structure._call_ollama`: devolve o JSON do
     content da resposta, ou None em falha (nunca lanca -- quem chama ja
     trata None como "usar o fallback deterministico").
@@ -118,6 +119,15 @@ def call_nvidia(system: str, user: str, model: str, *, log=print, temperature: f
                 top_p=0.95,
                 max_tokens=max_tokens,
                 stream=False,
+                # Nemotron e' um modelo de RACIOCINIO: sem isto ele escreve o
+                # "pensamento" passo-a-passo dentro do proprio `content` (nao
+                # tem campo separado tipo o `thinking` do Ollama) -- MEDIDO
+                # 2026-09-12, um orcamento de 1500 tokens (suficiente pro
+                # qwen3.6 local) foi gasto INTEIRO raciocinando e nunca
+                # chegou a escrever o JSON pedido. `enable_thinking=False`
+                # (documentado no exemplo oficial da NVIDIA) suprime isso,
+                # mesmo espirito do `think: False` que ja existe pro Ollama.
+                extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
             )
             corpo = completion.choices[0].message.content or ""
             break

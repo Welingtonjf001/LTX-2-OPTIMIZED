@@ -297,7 +297,7 @@ caminho passado na linha de comando.
 
 | variável | padrão | efeito |
 |---|---|---|
-| `LTX25_VARIANT` | `distilled` | `dev` = CFG real, negative prompt funciona, várias vezes mais lento. `gguf-q6k` = ver abaixo |
+| `LTX25_VARIANT` | **`w4a8-v10`** (desde 2026-09-12; antes `distilled`) | `distilled` = bf16, mais lento e instável. `dev` = CFG real, negative prompt funciona, várias vezes mais lento. `gguf-q6k` = ver abaixo. **`storyplay25` continua em `distilled`**: keyframes não testados com o 4-bit |
 | `LTX25_AUDIO_COND` | `1` | condiciona a geração pela trilha; `0` desliga |
 | `LTX25_TWO_STAGE` | `0` | `1` = upscale latente x2 + refino. **Dobra a resolução de saída** |
 | `LTX25_RIFE_MODEL` | `rife-v4.6` | modelo do RIFE no `video_doctor` |
@@ -323,6 +323,90 @@ de produção continua `distilled`; a opção está documentada nos `.bat`
 (`start_webui_25.bat` e os outros 6 que tocam 2.5) e disponível como
 dropdown "Model variant" na UI que `start_webui_25.bat` sobe
 (`web_ui_v4_25.py`, seletor gerado via `_make_25_uis.py`).
+
+### Escada de quantização medida: `w4a8-v10` é o padrão desde 2026-09-12
+
+MEDIDO 2026-09-12, duas baterias (rosto e ação) a 1280x704 com 121 frames.
+Detalhe em `MEMORIAL.md` §3.77.
+
+| variante | rosto | ação | qualidade (usuário, ação) |
+|---|---|---|---|
+| `distilled` bf16 | 720s* | 1036s | pior |
+| `gguf-q6k` 6-bit | 277s | 439s* | 3º |
+| `w4a8-v10` 4-bit | 287s | **331s** | 2º |
+| two-stage bf16 | 555s | 923s | 1º, mas **mudou a idade** da personagem no teste de rosto |
+
+\* inclui boot do ComfyUI.
+
+- **Mais bits não compraram qualidade visível.** O ranking com uma seed só
+  não prova que 4-bit é *melhor*.
+- ⚠️ **O "~3×" das baterias é majoritariamente CARGA do modelo, não
+  amostragem.** Com os dois modelos já carregados (mesmo plano de 249
+  frames, 960x544, I2V + fala): `w4a8-v10` **575s** contra bf16 **896s** =
+  **~1,6×**. A carga do bf16 (39 GiB, com offload) é enorme e varia muito: o
+  primeiro plano bf16 depois do `w4a8-v10`, com só 121 frames, levou 1990s.
+  Numa decupagem que carrega o modelo uma vez e renderiza vários planos, o
+  ganho real fica perto de 1,6×. Trocar de variante no meio da corrida é o que
+  faz aparecer os 3×.
+- **O bf16 é instável** (+44% entre baterias, contra +15% do `w4a8-v10`),
+  porque não cabe na 3090 e depende de offload.
+- **Não existe "mais passos" no `distilled`**: 8 sigmas fixos; `--steps` só
+  vale no `dev`.
+- **Two-stage não serve para personagem recorrente** (risco de identidade).
+  Use em ação/ambiente.
+- `w4a8-v10` validado em plano longo (337 frames, 262s, sem travar) e
+  **no caminho real da decupagem** (I2V com still + `audio_conditioning` com
+  fala do TTS, 2 planos, sem erro). **Ainda não testado**: keyframes.
+  **Veredito do usuário (2026-09-12): `w4a8-v10` com maior qualidade nos dois
+  planos**, e também na bateria de ação. São 3 de 3 comparações contra o bf16.
+- **PADRÃO TROCADO para `w4a8-v10` em 2026-09-12**: backend, `run_decupagem`,
+  `decupagem_ui` e os `.bat` de decupagem, webui, cinema, screenplay e music
+  video. **Exceção: `storyplay25` continua `distilled`** (usa keyframes, sem
+  teste). Reverter: `LTX25_VARIANT=distilled`. Ver `MEMORIAL.md` §3.77.
+
+### LoRAs e IC-LoRAs de vídeo no 2.5 (desde 2026-09-12)
+
+Catálogo em `ltx_loras.py`: tipo, força, gatilho e compatibilidade de cada um.
+`python ltx_loras.py list`, `status --compat`, `download --set core|gated`.
+
+- **LoRA treinado no 2.3 carrega no 2.5.** VERIFICADO de três jeitos: cabeçalho
+  (1772 pesos lineares idênticos, 48 blocos, 0 shape divergente), workflows
+  oficiais 2.5 vendorizados (carregam IC-LoRAs 2.3) e model card do LTX-2.5.
+  Carregar não prova efeito igual — validar vendo.
+- Arquivos: `models/loras/` (treino 2.3) e `models/2.5/loras/` (treino 2.5),
+  pastas planas (o ComfyUI lista por nome).
+- Uso: `ltx25_backend.generate(..., loras=[(arquivo, força)], ic_lora={...})`;
+  decupagem `--video-lora chave[:força]` (repetível) e
+  `--ic-reference {off,ingredients,msr}`; UI 7913, aba Motores. **`--lora`
+  continua sendo dos STILLS** — são outros checkpoints.
+- O backend insere `LTXVCropGuides`: o sampler do grafo T2V oficial não tem, e
+  sem ele a guia IC do tamanho do clipe sai decodificada no fim do vídeo.
+- ⚠️ **IC-LoRA com fator de referência > 1 (union-control, motion-track) +
+  `audio_conditioning` é recusado com erro.** `LTXVSetAudioVideoMaskByTime` só
+  preserva máscara por quadro; a guia reduzida vira máscara espacial e seria
+  re-ruída em silêncio (LIDO em `ComfyUI-LTXVideo/latents.py`). Fator 1
+  (ingredients, msr, cameraman, cdrama-canny) funciona com fala.
+- ⚠️ **LoRA sobre `w4a8-v10`**: com o modelo inteiro na placa o ComfyUI funde o
+  LoRA e requantiza o peso a 4 bits. Antes de concluir que um LoRA "não faz nada",
+  compare com `gguf-q6k` ou `distilled`.
+- MSR: a 2.3 V2 roda com nós nativos (sequência montada em
+  `script_pipeline/ic_references.py`). **A 2.5 exige o custom node
+  ComfyUI-LTX2.5-MSR** (slot embedding): baixada, NÃO ligada.
+- Conteúdo: `motion-enhancer-n4w` é afinado para NSFW; `talking-head-av` é de UM
+  personagem do autor; `cdrama-char` puxa os rostos dos atores da série.
+- Oficiais com licença (aceita 2026-09-13) BAIXADOS: Ingredients, Cinemagraph,
+  Pixel-Upscaler, Deblur e Clean-Plate 2.5; Relight e DubIt 2.3 — todos 0 chave
+  faltando no 2.5. `--ic-reference ingredients` passa a usar o Ingredients 2.5
+  sozinho. Ainda NÃO ligados a nenhum fluxo: Cinemagraph (LoRA comum, dá para
+  usar via `--video-lora cinemagraph-2.5`), e os V2V (upscaler, deblur,
+  clean-plate, relight, dubit) — sem pós-produção integrada ainda.
+  Opcionais não baixados: `download --set gated-extra`.
+- Testes sem GPU: `tests/test_ltx_loras.py`, sobre a fixture do grafo real.
+  ⚠️ `tests/test_pipeline_smoke.py::test_build_workflow_nao_toca_rede` **sobe o
+  ComfyUI** apesar do nome (`base_api` → `ensure_server`, lido no código): não
+  rodar a suíte inteira com a GPU ocupada.
+
+Detalhes e medições: `MEMORIAL.md` §3.78.
 
 ⚠️ **`_make_25_uis.py` regenera as 4 UIs 2.5 de uma vez** e reescreve cada
 `_25.py` do zero a partir do original 2.3 + substituições do script —

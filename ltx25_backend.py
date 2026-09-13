@@ -18,8 +18,12 @@ Known gaps in this first version (kept explicit rather than silently wrong):
     opt-in: `two_stage=True`, `--two-stage`, or LTX25_TWO_STAGE=1. It is not
     derived from the 2.3 UIs' `--spatial-upsampler-path`, which they pass on
     every run -- keying off it would silently slow every existing render.
-  - No LoRA support: the official single-stage 2.5 T2V graph has no LoRA loader
-    node, so the 2.3 UIs' LoRA pickers do not carry over.
+  - LoRA/IC-LoRA: the official single-stage graph has no loader, so since
+    2026-09-12 they are grafted in from outside (`loras` / `ic_lora`; see
+    _apply_model_patches, _apply_ic_guide, _apply_crop_guides; catalog and the
+    2.3 -> 2.5 compatibility evidence in ltx_loras.py). NOT wired for two-stage,
+    and an IC-LoRA with a reduced reference (factor > 1) is refused together with
+    audio conditioning -- the audio mask node would silently drop the guide.
   - Progress is reported as elapsed wall time, not per-step percentage: the
     ComfyUI HTTP API only exposes a finished job through /history (live
     per-node progress needs the websocket channel, not wired here).
@@ -173,7 +177,11 @@ VARIANTS = {
     # text_encoders/). Arquivo em models/ (raiz), hardlink NTFS pra ca.
     "w4a8-v10": "ltx25DistilledW4A8_v10.safetensors",
 }
-DEFAULT_VARIANT = os.environ.get("LTX25_VARIANT", "distilled").strip().lower()
+# Padrao w4a8-v10 desde 2026-09-12 (MEMORIAL 3.77): mais rapido e estavel que o
+# bf16 nesta placa, qualidade julgada maior em 3 de 3 comparacoes. Os .bat e a
+# decupagem_ui definem LTX25_VARIANT explicitamente; isto vale so sem a variavel.
+# storyplay25 continua em distilled de proposito: keyframes nao testados com ele.
+DEFAULT_VARIANT = os.environ.get("LTX25_VARIANT", "w4a8-v10").strip().lower()
 
 # Teste comparativo 2026-09-06 (pedido do usuario): GGUF do transformer
 # distilled via ComfyUI-GGUF (mesmo node ja usado no 2.3), pra comparar
@@ -637,6 +645,141 @@ def _apply_dev_variant(api: dict, *, steps: int, video_cfg: float, audio_cfg: fl
     api.pop(N_SIGMAS, None)
 
 
+# --- LoRAs e IC-LoRAs ------------------------------------------------------------
+#
+# O grafo oficial 2.5 single-stage nao tem loader de LoRA -- era a "lacuna conhecida"
+# do topo deste arquivo ate 2026-09-12. Os nos entram por fora, como os keyframes e o
+# audio. Tipos, forcas, gatilhos e a verificacao 2.3 -> 2.5 moram em ltx_loras.py.
+#
+# Ids fora da faixa do grafo oficial e dos outros enxertos deste modulo (dev 91xx,
+# keyframes 92xx/93xx, audio 94xx).
+N_LORA_BASE = 9500
+N_IC_LOADER = "9600"
+N_IC_GUIDE = "9601"
+N_CROP_GUIDES = "9602"
+
+
+def _consumers(api: dict, link: list) -> list[tuple[str, str]]:
+    """Quem le `link` ([id, saida]). Trocar a origem por aqui, em vez de apontar um
+    id fixo, pega tambem os enxertos feitos antes (guider do dev, refino do two-stage)."""
+    return [(nid, nome) for nid, no in api.items()
+            for nome, valor in no["inputs"].items()
+            if isinstance(valor, list) and len(valor) == 2
+            and valor[0] == link[0] and valor[1] == link[1]]
+
+
+def _require_lora(name: str) -> str:
+    import ltx_loras
+    if ltx_loras.installed_path(name) is None:
+        raise FileNotFoundError(
+            f"LoRA '{name}' nao encontrado em {ltx_loras.LORA_DIRS['2.3']} nem em "
+            f"{ltx_loras.LORA_DIRS['2.5']}. Baixe com: python ltx_loras.py download <chave>")
+    return name
+
+
+def _apply_model_patches(api: dict, source: list, loras, ic_lora, *, log_cb=None) -> None:
+    """Encadeia LoraLoaderModelOnly (e o loader do IC-LoRA por ultimo) entre o
+    carregador do transformer e TODO no que o lia."""
+    consumidores = _consumers(api, source)
+    atual = source
+    for i, (nome, forca) in enumerate(loras or []):
+        nid = str(N_LORA_BASE + i)
+        api[nid] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": atual, "lora_name": _require_lora(nome), "strength_model": float(forca)}}
+        atual = [nid, 0]
+        _log(f"[ltx25] LoRA {i + 1}: {nome} (força {forca})", log_cb)
+    if ic_lora:
+        # LTXICLoRALoaderModelOnly e o LoraLoader mais a leitura do
+        # `reference_downscale_factor` do metadata -- a guia usa esse fator (saida 1)
+        # para decidir em que resolucao codificar a referencia.
+        api[N_IC_LOADER] = {"class_type": "LTXICLoRALoaderModelOnly", "inputs": {
+            "model": atual, "lora_name": _require_lora(ic_lora["lora"]),
+            "strength_model": float(ic_lora.get("strength", 1.0))}}
+        atual = [N_IC_LOADER, 0]
+    for nid, nome in consumidores:
+        api[nid]["inputs"][nome] = atual
+
+
+def _ic_guide_images(api: dict, ic: dict, *, width: int, height: int, num_frames: int) -> list:
+    """O lote de imagens que vira a guia do IC-LoRA."""
+    if ic.get("frames"):
+        # Sequencia de imagens estaticas: a folha repetida em todo quadro
+        # (Ingredients) ou os grupos sujeito/cenario do MSR. Montada com nos em vez
+        # de um mp4 para a referencia nao passar por codec com perda.
+        lote = None
+        for j, (imagem, quantos) in enumerate(ic["frames"]):
+            carga, rep = str(9700 + j), str(9730 + j)
+            api[carga] = {"class_type": "LoadImage", "inputs": {"image": os.path.basename(imagem)}}
+            api[rep] = {"class_type": "RepeatImageBatch",
+                        "inputs": {"image": [carga, 0], "amount": int(quantos)}}
+            if lote is None:
+                lote = [rep, 0]
+            else:
+                junta = str(9760 + j)
+                api[junta] = {"class_type": "ImageBatch", "inputs": {"image1": lote, "image2": [rep, 0]}}
+                lote = [junta, 0]
+        return lote
+    if ic.get("video"):
+        api["9610"] = {"class_type": "LoadVideo", "inputs": {"file": os.path.basename(ic["video"])}}
+        api["9611"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["9610", 0]}}
+        # A guia nao pode ser mais longa que o clipe: LTXAddVideoICLoRAGuide faz assert.
+        api["9612"] = {"class_type": "ImageFromBatch", "inputs": {
+            "image": ["9611", 0], "batch_index": 0, "length": int(num_frames)}}
+        return ["9612", 0]
+    if ic.get("tracks"):
+        trilhas = ic["tracks"] if isinstance(ic["tracks"], str) else json.dumps(ic["tracks"])
+        api["9620"] = {"class_type": "LTXVDrawTracks", "inputs": {
+            "tracks": trilhas, "width": int(width), "height": int(height)}}
+        return ["9620", 0]
+    raise ValueError("ic_lora precisa de 'frames', 'video' ou 'tracks'.")
+
+
+def _apply_ic_guide(api: dict, ic: dict, *, width: int, height: int, num_frames: int,
+                    log_cb=None) -> None:
+    """Injeta a guia antes do LTXVConcatAVLatent, no latente de VIDEO -- mesmo ponto
+    e mesmo motivo dos keyframes (LTXVAddGuide nao aceita o latente AV aninhado)."""
+    guider = api.get(N_CFG_GUIDER) or api.get("9103")
+    if guider is None:
+        raise RuntimeError("Nenhum guider encontrado para a guia do IC-LoRA.")
+    concat = api[N_CONCAT]["inputs"]
+    imagens = _ic_guide_images(api, ic, width=width, height=height, num_frames=num_frames)
+    api[N_IC_GUIDE] = {"class_type": "LTXAddVideoICLoRAGuide", "inputs": {
+        "positive": guider["inputs"]["positive"], "negative": guider["inputs"]["negative"],
+        "vae": api[N_IMG2VID]["inputs"]["vae"], "latent": concat["video_latent"],
+        "image": imagens, "frame_idx": int(ic.get("frame_idx", 0)),
+        "strength": float(ic.get("guide_strength", 1.0)),
+        "latent_downscale_factor": [N_IC_LOADER, 1],
+        # "center" como o workflow do MSR; o Ingredients oficial usa "disabled", mas a
+        # referencia ja sai de ic_references no aspecto do clipe -- os dois coincidem.
+        "crop": ic.get("crop", "center"),
+        "use_tiled_encode": False, "tile_size": 256, "tile_overlap": 64}}
+    guider["inputs"]["positive"] = [N_IC_GUIDE, 0]
+    guider["inputs"]["negative"] = [N_IC_GUIDE, 1]
+    concat["video_latent"] = [N_IC_GUIDE, 2]
+    _log(f"[ltx25] IC-LoRA {ic['lora']} (modelo {ic.get('strength', 1.0)}, guia "
+         f"{ic.get('guide_strength', 1.0)}) -- {ic.get('describe', 'guia de referencia')}", log_cb)
+
+
+def _apply_crop_guides(api: dict) -> None:
+    """Tira os quadros de guia do latente de video antes do decode.
+
+    O sampler do grafo T2V/I2V oficial NAO tem LTXVCropGuides -- os grafos IC-LoRA
+    oficiais tem. Sem isto, uma guia do tamanho do clipe dobraria o numero de quadros
+    decodificados, com a propria referencia colada no fim do video."""
+    guider = api.get(N_CFG_GUIDER) or api.get("9103")
+    sep = next((nid for nid, no in api.items()
+                if no["class_type"] == "LTXVSeparateAVLatent"
+                and no["inputs"].get("av_latent") == [N_SAMPLER, 0]), None)
+    if sep is None:
+        raise RuntimeError("LTXVSeparateAVLatent do sampler principal nao encontrado.")
+    consumidores = _consumers(api, [sep, 0])
+    api[N_CROP_GUIDES] = {"class_type": "LTXVCropGuides", "inputs": {
+        "positive": guider["inputs"]["positive"], "negative": guider["inputs"]["negative"],
+        "latent": [sep, 0]}}
+    for nid, nome in consumidores:
+        api[nid]["inputs"][nome] = [N_CROP_GUIDES, 2]
+
+
 def build_workflow(
     prompt: str,
     *,
@@ -657,12 +800,40 @@ def build_workflow(
     keyframes: list[tuple[str, int, float]] | None = None,
     audio_conditioning: str | None = None,
     two_stage: bool = TWO_STAGE_DEFAULT,
+    loras: list[tuple[str, float]] | None = None,
+    ic_lora: dict | None = None,
     log_cb=None,
 ) -> dict:
+    """loras: [(nome do arquivo, forca)], encadeados na ordem dada.
+
+    ic_lora: um IC-LoRA com a sua guia -- {"lora", "strength", "guide_strength",
+    "crop", "describe"} mais UMA fonte de guia: "frames" [(imagem, quadros)] (folha de
+    ingredientes, pseudo-video do MSR), "video" (controle: canny/pose/camera) ou
+    "tracks" (JSON do LTXVDrawTracks). Montagem em script_pipeline/ic_references.py."""
     if variant not in VARIANTS and variant not in GGUF_VARIANTS:
         raise ValueError(
             f"variant deve ser um de {sorted(VARIANTS) + sorted(GGUF_VARIANTS)}; "
             f"recebi {variant!r}")
+    if ic_lora:
+        if two_stage:
+            raise ValueError(
+                "IC-LoRA no two-stage nao esta ligado: o refino x2 precisaria receber a guia "
+                "de novo na resolucao dobrada (os grafos IC oficiais de two-stage fazem isso "
+                "a parte). Rode este plano com two_stage=False.")
+        if audio_conditioning and AUDIO_COND_ENABLED:
+            import ltx_loras
+            fator = ltx_loras.reference_downscale(ic_lora["lora"])
+            if fator > 1:
+                # LIDO no codigo (ComfyUI-LTXVideo/latents.py, LTXVSetAudioVideoMaskByTime):
+                # o no refaz a mascara de video inteira e so multiplica de volta a mascara
+                # anterior quando ela e POR QUADRO (1,1,F,1,1). Guia com fator > 1 passa por
+                # LTXVDilateLatent e vira mascara ESPACIAL -- descartada, e a guia e o
+                # primeiro quadro seriam re-ruidos sem erro nenhum.
+                raise ValueError(
+                    f"IC-LoRA '{ic_lora['lora']}' usa referencia reduzida (fator {fator}) e "
+                    "isso nao combina com audio_conditioning: a mascara de audio descartaria a "
+                    "guia em silencio. Gere este plano sem trilha condicionada, ou use um "
+                    "IC-LoRA de fator 1 (ingredients, msr, cameraman, cdrama-canny).")
     api = base_api(two_stage)
     ids = stage_ids(two_stage)
     n_unet, n_enh = ids["unet"], ids["enhancer_clip"]
@@ -687,6 +858,18 @@ def build_workflow(
                 "Baixe de Lightricks/LTX-2.5 (diffusion_models/) antes de usar esta variante."
             )
         api[n_unet]["inputs"]["unet_name"] = ckpt
+
+    # LoRAs e IC-LoRA entram entre o carregador e quem le o modelo, ANTES do dev e dos
+    # demais enxertos: _apply_dev_variant e _apply_audio_conditioning leem o modelo do
+    # guider, e ele ja tem de apontar para o modelo com LoRA.
+    if loras or ic_lora:
+        _apply_model_patches(api, [n_unet, 0], loras, ic_lora, log_cb=log_cb)
+        if variant in ("w4a8-v10", "redgraft", "distilled-int8"):
+            _log("[ltx25] LoRA sobre checkpoint quantizado: com o modelo inteiro na placa o "
+                 "ComfyUI funde o LoRA e REQUANTIZA o peso (ModelPatcher.patch_weight_to_device "
+                 "-> set_weight); em camada descarregada aplica exato, na hora. Fidelidade NAO "
+                 "medida nesta variante -- antes de concluir que um LoRA 'nao faz nada', "
+                 "compare com gguf-q6k ou distilled.", log_cb)
 
     # --- PRECISAO E DEVICE: os dois botoes que a rota 2.5 nunca apertou -------
     #
@@ -793,6 +976,12 @@ def build_workflow(
     if keyframes:
         _apply_keyframes(api, keyframes, log_cb=log_cb)
 
+    # A guia do IC-LoRA vai no mesmo latente de video, depois dos keyframes e antes do
+    # audio: a mascara de audio embrulha a saida do concat e tem de encontrar a guia la.
+    if ic_lora:
+        _apply_ic_guide(api, ic_lora, width=width, height=height, num_frames=num_frames,
+                        log_cb=log_cb)
+
     # After the guides: those work on the plain VIDEO latent, before the AV
     # concat, while audio conditioning wraps the concat's output. Reversing the
     # order would make the mask node read a latent the guides then replace.
@@ -804,6 +993,13 @@ def build_workflow(
             _log("[ltx25] condicionamento por trilha desligado via LTX25_AUDIO_COND=0: "
                  "o clipe sai com áudio gerado pelo modelo e o movimento não segue "
                  "a batida.", log_cb)
+
+    # Por ultimo: o crop le o positive FINAL (depois da mascara de audio) para contar
+    # quantos quadros de guia tirar. Com keyframes e IC-LoRA juntos sai tudo que foi
+    # anexado, inclusive o quadro extra de cada keyframe -- que sem IC-LoRA continua no
+    # clipe como sempre ficou (MEMORIAL 3.12).
+    if ic_lora:
+        _apply_crop_guides(api)
 
     return api
 
@@ -904,6 +1100,8 @@ def generate(
     keyframes: list[tuple[str, int, float]] | None = None,
     audio_conditioning: str | None = None,
     two_stage: bool = TWO_STAGE_DEFAULT,
+    loras: list[tuple[str, float]] | None = None,
+    ic_lora: dict | None = None,
     log_cb=None,
     timeout: int = 5400,
 ) -> str:
@@ -915,17 +1113,43 @@ def generate(
 
     audio_conditioning: path to a soundtrack the video should be generated ON,
     replacing the audio the model would otherwise invent. This is the 2.5
-    equivalent of 2.3's `--audio-input-path`; see _apply_audio_conditioning."""
+    equivalent of 2.3's `--audio-input-path`; see _apply_audio_conditioning.
+
+    loras / ic_lora: ver build_workflow. As imagens e o video da guia do IC-LoRA vao
+    para ComfyUI/input como as demais entradas, e os gatilhos que o catalogo
+    (ltx_loras.py) exige entram no prompt aqui, com log."""
     staged = stage_input_image(image_path) if image_path else None
     staged_keys = [(stage_input_image(p), i, s) for p, i, s in (keyframes or [])]
     staged_audio = stage_input_audio(audio_conditioning) if audio_conditioning else None
+    staged_ic = None
+    if ic_lora:
+        staged_ic = dict(ic_lora)
+        if ic_lora.get("frames"):
+            staged_ic["frames"] = [(stage_input_image(p), n) for p, n in ic_lora["frames"]]
+        if ic_lora.get("video"):
+            staged_ic["video"] = _stage_input(ic_lora["video"])
     # Tudo que _stage_input copiou para ComfyUI/input, para apagar no finally.
     # Nenhuma UI aqui limpava isso: em uso continuo a pasta so cresce, e um
     # nome tipo "a1b2c3d4_shot002.wav" nao diz de qual run veio quando alguem
     # for depurar.
     _staged_paths = [p for p in [staged, staged_audio] if p] + [p for p, _, _ in staged_keys]
+    if staged_ic:
+        _staged_paths += [p for p, _ in staged_ic.get("frames") or []]
+        if staged_ic.get("video"):
+            _staged_paths.append(staged_ic["video"])
+    nomes_lora = [n for n, _ in (loras or [])] + ([ic_lora["lora"]] if ic_lora else [])
+    if nomes_lora:
+        import ltx_loras
+        gatilhos = [ltx_loras.BY_LOCAL[n].trigger for n in nomes_lora
+                    if n in ltx_loras.BY_LOCAL and ltx_loras.BY_LOCAL[n].trigger
+                    and ltx_loras.BY_LOCAL[n].trigger not in prompt]
+        if gatilhos:
+            prompt = ltx_loras.apply_triggers(prompt, nomes_lora)
+            _log(f"[ltx25] gatilho(s) de LoRA acrescentado(s) ao prompt: {', '.join(gatilhos)}", log_cb)
     api = build_workflow(
         prompt,
+        loras=loras,
+        ic_lora=staged_ic,
         negative=negative,
         width=width,
         height=height,
@@ -972,6 +1196,116 @@ def generate(
                 pass
 
 
+# --- pos-producao V2V: IC-LoRA em que o proprio clipe e a guia ----------------------
+#
+# DubIt, Deblur, Pixel-Upscaler e afins usam o mesmo grafo T2V + _apply_ic_guide com
+# a guia vinda de um video. O que muda entre eles e de onde vem o AUDIO:
+#   remux    -- gera so a imagem e recoloca o audio do clipe de origem (deblur,
+#               upscale). O sincronismo nao muda: o audio nem passa pelo modelo;
+#   congelar -- a fala entra congelada pela mascara (_apply_audio_conditioning) e o
+#               modelo refaz a boca sobre ela: DubIt mantendo a voz do TTS;
+#   gerar    -- o jeito do workflow oficial do DubIt: o audio vira tokens de identidade
+#               de voz (LTXVSetAudioRefTokens) e o modelo GERA a fala a partir do texto
+#               citado no prompt. A voz final e do modelo, nao do TTS.
+FFMPEG_BIN = os.environ.get("LTX_FFMPEG", "C:/ffmpeg/bin/ffmpeg.exe")
+
+
+def _probe_video(path: str) -> dict:
+    ffprobe = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe.exe")
+    r = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-count_frames",
+                        "-show_entries", "stream=width,height,nb_read_frames,r_frame_rate",
+                        "-of", "json", path], capture_output=True, text=True)
+    s = json.loads(r.stdout)["streams"][0]
+    num, den = s["r_frame_rate"].split("/")
+    return {"width": int(s["width"]), "height": int(s["height"]),
+            "frames": int(s["nb_read_frames"]), "fps": float(num) / float(den or 1)}
+
+
+def _apply_audio_ref_tokens(api: dict, audio_name: str) -> None:
+    """Audio de referencia como contexto de identidade de voz, com o latente de audio
+    do grafo continuando VAZIO (o modelo gera a fala). Mesmo par de nos do workflow
+    oficial LTX-2.3_ICLoRA_DubIt."""
+    guider = api.get(N_CFG_GUIDER) or api.get("9103")
+    audio_vae = api["5514:3980"]["inputs"]["audio_vae"]
+    api["9410"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+    api["9411"] = {"class_type": "LTXVAudioVAEEncode",
+                   "inputs": {"audio": ["9410", 0], "audio_vae": audio_vae}}
+    api["9412"] = {"class_type": "LTXVSetAudioRefTokens", "inputs": {
+        "positive": guider["inputs"]["positive"], "negative": guider["inputs"]["negative"],
+        "audio_latent": ["9411", 0]}}
+    guider["inputs"]["positive"] = ["9412", 0]
+    guider["inputs"]["negative"] = ["9412", 1]
+
+
+def generate_v2v(prompt: str, source_video: str, output_path: str, *, lora: str,
+                 strength: float = 1.0, guide_strength: float = 1.0, audio: str = "remux",
+                 audio_path: str | None = None, scale: int = 1,
+                 negative: str = DEFAULT_NEGATIVE, seed: int = 42,
+                 variant: str = DEFAULT_VARIANT, log_cb=None, timeout: int = 5400) -> str:
+    """Refaz `source_video` com um IC-LoRA V2V e grava em `output_path` com a MESMA
+    duracao da origem.
+
+    Duracao: o modelo so aceita 8k+1 quadros. O numero e arredondado PARA CIMA (a guia
+    curta cobre quase tudo e o no aceita guia menor que o clipe) e a saida e cortada na
+    duracao da origem -- arredondar para baixo encurtaria o video e a fala sairia
+    cortada no fim, o mesmo defeito de sincronismo de 2026-09-13."""
+    if audio not in ("remux", "congelar", "gerar"):
+        raise ValueError(f"audio deve ser remux, congelar ou gerar; recebi {audio!r}")
+    import ltx_loras
+    info = _probe_video(source_video)
+    duracao = info["frames"] / info["fps"]
+    quadros = (max(info["frames"], 9) - 1 + 7) // 8 * 8 + 1
+    largura = max(32, int(round(info["width"] * scale / 32)) * 32)
+    altura = max(32, int(round(info["height"] * scale / 32)) * 32)
+    staged = [_stage_input(source_video)]
+
+    def _wav(fonte: str) -> str:
+        destino = os.path.join(COMFY_ROOT, "input",
+                               f"{uuid.uuid4().hex[:8]}_{os.path.splitext(os.path.basename(fonte))[0]}.wav")
+        subprocess.run([FFMPEG_BIN, "-y", "-v", "error", "-i", fonte, "-vn", "-ac", "2",
+                        "-ar", "48000", destino], check=True)
+        staged.append(destino)
+        return destino
+
+    ic = {"lora": lora, "strength": float(strength), "guide_strength": float(guide_strength),
+          "video": staged[0], "crop": "disabled",
+          "describe": f"V2V sobre {os.path.basename(source_video)} (audio: {audio})"}
+    cond = _wav(audio_path or source_video) if audio == "congelar" else None
+    ref = _wav(audio_path or source_video) if audio == "gerar" else None
+    prompt = ltx_loras.apply_triggers(prompt, [lora])
+    try:
+        api = build_workflow(
+            prompt, negative=negative, width=largura, height=altura, num_frames=quadros,
+            frame_rate=float(round(info["fps"])), seed=seed, image_path=None,
+            filename_prefix=os.path.splitext(os.path.basename(output_path))[0] or "v2v",
+            variant=variant, ic_lora=ic, audio_conditioning=cond, log_cb=log_cb)
+        if ref:
+            _apply_audio_ref_tokens(api, os.path.basename(ref))
+            _log("[ltx25] V2V: fala GERADA pelo modelo, com o audio como referencia de voz.", log_cb)
+        files = submit_and_wait(api, log_cb=log_cb, timeout=timeout, expect_node=N_SAVE)
+        if not files:
+            raise RuntimeError("V2V terminou sem arquivo de saida.")
+        bruto = os.path.join(COMFY_OUTPUT, files[0])
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        if audio == "remux":
+            cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", bruto, "-i", audio_path or source_video,
+                   "-map", "0:v:0", "-map", "1:a:0?", "-t", f"{duracao:.4f}",
+                   "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+                   "-c:a", "aac", "-b:a", "256k", output_path]
+        else:
+            cmd = [FFMPEG_BIN, "-y", "-v", "error", "-i", bruto, "-t", f"{duracao:.4f}",
+                   "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+                   "-c:a", "aac", "-b:a", "256k", output_path]
+        subprocess.run(cmd, check=True)
+        return output_path
+    finally:
+        for p in staged:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -994,10 +1328,35 @@ if __name__ == "__main__":
     ap.add_argument("--steps", type=int, default=None, help="passos (só dev; padrão 15)")
     ap.add_argument("--video-cfg", type=float, default=DEV_VIDEO_CFG)
     ap.add_argument("--audio-cfg", type=float, default=DEV_AUDIO_CFG)
+    ap.add_argument("--audio-conditioning", default=None,
+                    help="trilha/fala sobre a qual o video e gerado (ver _apply_audio_conditioning)")
+    ap.add_argument("--lora", action="append", default=[], metavar="CHAVE[:FORCA]",
+                    help="LoRA comum, repita para empilhar; chave de ltx_loras.py ou nome do arquivo")
+    ap.add_argument("--ic-lora", default=None, metavar="CHAVE[:FORCA]",
+                    help="IC-LoRA; exige --ic-image, --ic-video ou --ic-tracks")
+    ap.add_argument("--ic-image", default=None, help="imagem repetida em todos os quadros (folha)")
+    ap.add_argument("--ic-video", default=None, help="video de controle (canny/pose/camera)")
+    ap.add_argument("--ic-tracks", default=None, help="arquivo JSON de trilhas (LTXVDrawTracks)")
+    ap.add_argument("--ic-guide-strength", type=float, default=1.0)
     args = ap.parse_args()
 
     if (args.num_frames - 1) % 8 != 0:
         raise SystemExit(f"--num-frames deve ser 1 + múltiplo de 8; recebi {args.num_frames}")
+
+    import ltx_loras
+    cli_loras = [ltx_loras.parse_lora_arg(v) for v in args.lora] or None
+    cli_ic = None
+    if args.ic_lora:
+        nome_ic, forca_ic = ltx_loras.parse_lora_arg(args.ic_lora)
+        cli_ic = {"lora": nome_ic, "strength": forca_ic, "guide_strength": args.ic_guide_strength}
+        if args.ic_image:
+            cli_ic["frames"] = [(args.ic_image, args.num_frames)]
+        elif args.ic_video:
+            cli_ic["video"] = args.ic_video
+        elif args.ic_tracks:
+            cli_ic["tracks"] = open(args.ic_tracks, encoding="utf-8").read()
+        else:
+            raise SystemExit("--ic-lora exige --ic-image, --ic-video ou --ic-tracks")
 
     out = generate(
         args.prompt, args.output_path,
@@ -1006,5 +1365,6 @@ if __name__ == "__main__":
         image_path=args.image, disable_audio=args.disable_audio,
         variant=args.variant, steps=args.steps,
         video_cfg=args.video_cfg, audio_cfg=args.audio_cfg,
+        audio_conditioning=args.audio_conditioning, loras=cli_loras, ic_lora=cli_ic,
     )
     print(f"OK -> {out}")

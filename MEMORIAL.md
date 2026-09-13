@@ -5701,6 +5701,391 @@ verificados contra uma corrida nova:
    isolada) -- primeira corrida real com isso ligado deve ter o log do
    estágio "5-D video" acompanhado de perto.
 
+## 3.77 Escada de quantização do LTX 2.5 medida em duas baterias: o bf16 não compra qualidade (2026-09-12)
+
+Pergunta do usuário: dá para trocar parte do ganho de velocidade por qualidade?
+A primeira ideia, aumentar passos, **não existe no `distilled`**: ele usa
+`ManualSigmas` com 8 sigmas fixos e CFG 1, e `--steps` só vale para o `dev`
+(o próprio help da CLI diz "só dev"). Os 8 sigmas são os pontos para os quais
+a destilação treinou o modelo; passos intermediários ficam fora da
+distribuição. O botão que existe de verdade é a precisão dos pesos do mesmo
+modelo destilado: bf16 (39 GiB) → `gguf-q6k` 6-bit (18,7 GiB) → `w4a8-v10`
+4-bit (14,9 GiB).
+
+### Tempos (3090, 1280x704, 121 frames, `--disable-dynamic-vram`, cache-none)
+
+| variante | bateria 1: rosto, seed 42 | bateria 2: ação, seed 7 |
+|---|---|---|
+| `distilled` bf16 | 720s (pagou boot do ComfyUI) | **1036s** (sem boot) |
+| `gguf-q6k` | 277s | 439s (pagou boot) |
+| `w4a8-v10` | 287s | **331s** |
+| two-stage bf16 (640x352 → 1280x704) | 555s | 923s |
+
+A bateria 2 foi ordenada de propósito para o bf16 NÃO pagar o boot. Ele ficou
+em 1036s, 3,1× o `w4a8-v10`. **Isso NÃO prova que o ganho é de amostragem:**
+a ordem tirou só o boot do ComfyUI, e cada troca de variante ainda recarrega o
+transformer. Com os modelos já carregados, o ganho medido é ~1,6× (ver
+"Teste no caminho real da decupagem" abaixo).
+
+**O bf16 é instável; o quantizado, não.** Custo de amostragem não depende do
+conteúdo (mesma resolução e frames), mas entre baterias o `w4a8-v10` variou
++15%, o bf16 +44% e o two-stage bf16 +66%. O bf16 não cabe na 3090 e vive de
+offload para a RAM, então sente o estado da máquina (havia navegadores e o
+Epic Launcher abertos). O quantizado cabe inteiro na VRAM.
+
+**Validação do plano longo (condição da §3.51 para destravar a troca):**
+`w4a8-v10`, 337 frames a 960x544, seed e prompt diferentes (barco de pesca)
+→ **262s, sem travar**.
+
+### Qualidade: julgada pelo usuário, vendo
+
+- **Bateria 2, do melhor para o pior: two-stage > `w4a8-v10` > `gguf-q6k` > bf16.**
+- **Bateria 1, two-stage vs direto (mesma seed): o two-stage mudou a idade da
+  personagem**; fora isso, o flicker ficou parecido.
+
+Leitura, com as ressalvas:
+
+1. **D1/D2/D3 partem do mesmo ruído** (mesma seed e resolução). A única
+   diferença é o arredondamento da quantização desviando a trajetória. Com
+   uma seed, "4-bit melhor que bf16" pode ser variação de amostra: NÃO é
+   evidência de que menos bits melhora. O que a bateria sustenta é o ponto
+   que decide: **a quantização não custou qualidade visível, então os ~3× de
+   velocidade saem de graça.**
+2. **Two-stage NÃO é seguro para identidade.** Com a mesma seed a amostra já
+   é outra (o estágio 1 a 640x352 tem ruído de outro formato), então uma
+   corrida não separa acaso de efeito sistemático. Mas o sistemático é
+   plausível: no estágio 1 o rosto fica em ~1,9 × 1,95 células latentes, a
+   faixa de derretimento da §3.17, e o refino a partir de sigma 0,85 preserva
+   a estrutura. Isso qualifica a §3.18 ("refino latente é o melhor caminho
+   para rosto"): melhor que ESRGAN para nitidez, mas pode trocar a pessoa.
+   Uso recomendado: plano de ação/ambiente sim; plano de fala e personagem
+   recorrente, direto em 1280x704. Na ação ele ficou em 1º na qualidade,
+   mas com bf16 a vantagem de tempo quase sumiu (923s vs 1036s).
+
+### O que NÃO mudou e o que falta
+
+**Padrão de produção continua `distilled` bf16.** Candidato à troca:
+`w4a8-v10`. Ele é mais rápido e mais estável, tem proveniência oficial
+(conversor ComfyUI Kitchen) e troca só `unet_name` no mesmo `UNETLoader`, o
+que compõe com o two-stage. O `gguf-q6k` troca o node inteiro.
+
+Ainda não testado no `w4a8-v10`, e é o que a decupagem usa:
+
+- **I2V com o still do plano** (`--image`);
+- **`audio_conditioning` com fala real** (base do lip-sync);
+- **keyframes**.
+
+Rodar uma corrida real da decupagem com ele antes de trocar o padrão.
+
+### Teste no caminho real da decupagem, e a correção do "3×"
+
+Reproduzida a chamada de `render_shots.py:561` (I2V com o still do plano,
+`image_strength=1.0`, `audio_conditioning` com a fala do TTS, 960x544) sobre
+dois planos de fala de `outputs/decupagem/20260911_2123_palacio_esmeralda_v6_ltx`.
+Mesma seed por plano nas duas variantes. Ordem: `w4a8-v10` (plano 3, plano 1),
+depois bf16 (plano 3, plano 1).
+
+| plano | frames | `w4a8-v10` | bf16 |
+|---|---|---|---|
+| shot003 close (Mei-Li) | 121 | 275s (boot do ComfyUI + carga) | **1990s** (primeira carga do bf16) |
+| shot001 médio (Xiao-Lan) | 249 | **575s** (modelo já carregado) | **896s** (modelo já carregado) |
+
+**Funcional: passou.** As 4 corridas terminaram sem erro, com I2V e
+condicionamento por fala. Duração do áudio igual à do clipe original (9,65s /
+4,45s).
+
+**Correção do que registrei acima.** A linha "o ganho não era carga fria" está
+ERRADA. Ordenar a bateria 2 tirou do bf16 só o *boot do ComfyUI*, não a *carga
+do modelo*: cada troca de variante recarrega o transformer, e a do bf16 (39
+GiB, com offload) é enorme e instável. A comparação limpa é a do shot001, com
+os dois modelos já carregados: **575s contra 896s = ~1,6×**. O plano de 121
+frames em bf16 levou 1990s porque incluiu essa carga.
+
+Consequência prática: numa decupagem que carrega a variante uma vez e
+renderiza vários planos, o ganho de amostragem é **~1,6×**. Os 3× só aparecem
+quando cada corrida paga a própria carga. A carga do bf16 continua sendo custo
+real a cada início de estágio de vídeo (o ComfyUI é reiniciado entre stills e
+vídeo), só que é paga uma vez por corrida, e não uma vez por plano.
+
+**Veredito do usuário, vendo os 4 clipes: `w4a8-v10` com maior qualidade nos
+dois planos.** Somado à bateria de ação, são **3 comparações independentes**
+(cenas, seeds e modos diferentes: T2V e I2V com fala) com o `w4a8-v10` acima
+do bf16 em todas. A ressalva de uma seed por comparação continua valendo, mas
+se as duas fossem equivalentes a chance de o bf16 perder as três por acaso
+seria de 1/8. Isso não prova que 4-bit é *melhor*, mas sustenta a decisão:
+**o bf16 não entrega qualidade que justifique ~1,6× mais tempo e a
+instabilidade do offload.**
+
+Ressalva do julgamento: os clipes não passaram pelo lip-sync (estágio [6]), que
+substitui a região da boca. O que foi comparado vale para rosto, identidade e
+estabilidade, não para a boca final.
+
+### Padrão trocado para `w4a8-v10` (2026-09-12, escopo aprovado pelo usuário)
+
+Trocado em: fallback de `ltx25_backend.DEFAULT_VARIANT`; `run_decupagem.py`
+(`--ltx-variant`, que antes nem ACEITAVA `w4a8-v10` nas `choices`);
+`decupagem_ui.py` (`ENV_VIDEO`, dropdown, que também não oferecia a opção, e
+defaults de função); e os `.bat` de decupagem, webui, cinema, screenplay e
+music video v2/v3.
+
+**Fora de propósito: `storyplay25.py` e `start_storyplay25.bat` continuam em
+`distilled`**, porque usam keyframes por padrão (`use_kf=True`) e essa
+combinação não foi testada com o 4-bit.
+
+Conferido antes de trocar: as UIs com dropdown de variante montam as opções a
+partir de `sorted(VARIANTS) + sorted(GGUF_VARIANTS)`, que já inclui
+`w4a8-v10`. Isso vale para `web_ui_v4_25`, o gerador `_make_25_uis.py` e o
+argparse do `ltx_pipelines_25`. Sem isso, o Gradio 6 rejeitaria o valor e a UI
+nem subiria. Nenhum `.bat` define `LTX25_UNET_DTYPE`, que forçaria cast sobre
+um checkpoint já quantizado.
+
+Para reverter: `LTX25_VARIANT=distilled` no `.bat`, ou escolher `distilled` no
+dropdown.
+
+Vídeos: `outputs_25/teste_qualidade_20260912/` (bateria 1 + plano longo),
+`outputs_25/teste_acao_20260912/` (bateria 2),
+`outputs_25/teste_decupagem_w4a8_20260912/` (caminho real).
+
+## 3.78 LoRAs de vídeo: do 2.3 ao 2.5, catálogo e IC-LoRA no backend e na decupagem (2026-09-12)
+
+Pedido do usuário: baixar uma lista de ~28 LoRAs e IC-LoRAs, quase todos
+marcados LTX-2.3, e integrá-los aos pipelines "rumo a consistência, continuidade
+e expressividade" para C/K-drama. O núcleo sugerido por ele: MSR, ID-LoRA
+TalkVid, Better Human Motion, Motion Track, Cameraman, Chinese Drama Canny,
+Talking Head, Ingredients, Relight e Pixel Upscaler.
+
+### A pergunta que decidia tudo: LoRA do 2.3 serve no 2.5?
+
+Três evidências independentes, levantadas antes de baixar qualquer coisa:
+
+1. **Cabeçalho dos safetensors, local.** Transformer 2.3 (`distilled-fp8`)
+   contra 2.5 (`distilled` bf16): 1772 pesos lineares em comum, 0 divergência de
+   shape, 48 blocos nos dois. O único peso que some é
+   `text_embedding_projection.{video,audio}_aggregate_embed`, que no 2.5 foi para
+   dentro do `gemma4-12b-with-proj`.
+2. **Os workflows oficiais 2.5 vendorizados carregam IC-LoRAs 2.3**:
+   Union-Control, Motion-Track, Ingredients, Deblur (no V2V) e In-Outpainting.
+3. **Model card do Lightricks/LTX-2.5**: a grande maioria dos LoRAs/IC-LoRAs do
+   2.3 roda no 2.5 sem mudança, com exceções a validar.
+
+O `compat_25` do catálogo refaz a checagem 1 a cada download: **14 de 14 do
+núcleo com 0 chave faltando e 0 shape errado.** Isso prova carga, não efeito.
+
+### O levantamento no HF mudou a lista
+
+- A Lightricks publicou versões **2.5** (2026-09-10) de Ingredients, Cinemagraph,
+  Pixel-Spatial-Upscaler, Deblur, Decompression, Clean-Plate, Day-To-Night,
+  Colorization e Water-Simulation. Todas `gated=auto`, com **licença não aceita
+  nesta conta** (`Welingtonjf`): não baixadas — aceitar é decisão do usuário, no
+  site. Relight, DubIt, HDR, In-Outpainting, Motion-Track e Union-Control só
+  existem para 2.3.
+- **MSR**: a LiconStudio tem uma versão 2.5 (V1) além da 2.3 V2. A 2.5 traz
+  `reference_slot_embedding` (chaves que não são LoRA, o `compat_25` acusa) e
+  exige o custom node ComfyUI-LTX2.5-MSR. A 2.3 V2 é LoRA puro, e o node do autor
+  (`LiconMSR`) só monta uma sequência de imagens — LIDO o código-fonte, a
+  alocação foi reescrita em `ic_references.py` sem instalar código de terceiros.
+- **"Motion Enhancer n4w"**: "n4w/N54W" é NSFW no vocabulário do autor. A
+  variante "2.5" (`distilled-lora-450-enhanced-n4w`, 5 a 9 GB) substitui o LoRA
+  de destilação e é para o checkpoint **dev**, não para o nosso destilado.
+- **"AV-LoRA Talking Head"**: LoRA de UM personagem (gatilho `OHWXPERSON`), não
+  generaliza. O valor está na receita (Fish S2 Pro + ltx-trainer, 77 GB de VRAM).
+- **ID-LoRA TalkVid/CelebVHQ**: só o ramo de ÁUDIO (`audio_attn`, `audio_ff`,
+  `audio_to_video_attn`) — identidade de VOZ via tokens de áudio de referência.
+  Na decupagem a fala vem do TTS e fica congelada: sem efeito no fluxo atual.
+- **Chinese Drama**: o charlora carrega a identidade dos atores da série
+  (`char_N_person`); a canny é sem identidade.
+- **FPV Motion**: não encontrado no HF para 2.3/2.5.
+- Fora da lista, anotados e não baixados: `yuvraj108c/LTX-2.5-22b-IC-LoRA-BBox-Control`
+  (2.5 nativo, blocking por caixas animadas; amarrar prompt a caixa exige o node
+  ComfyUI-LTX-BBox-Animator), `Alissonerdx/LTX-Best-Face-ID` e
+  `BFS-Best-Face-Swap-Video` (identidade/troca de rosto),
+  `SyFeee/LTX2.3-Dual-Character-en` e `vpakarinen/better-human-motion-h3-lora`
+  (para o MiniMax H3).
+
+### Baixado: núcleo sem licença, 12,5 GB
+
+| chave | tipo | alvos ok no 2.5 |
+|---|---|---|
+| msr-2.3-v2 | ic_refs (nativo) | 480 |
+| msr-2.5 | plugin (não ligado) | 480 + slot embedding |
+| id-lora-talkvid / celebvhq | audio_ref | 864 / 864 |
+| talking-head-av | lora | 1152 |
+| better-human-motion | lora | 1632 |
+| motion-enhancer-n4w | lora | 1536 |
+| motion-track | ic_tracks (fator 2) | 480 |
+| cameraman-v2 / v1 | ic_video (fator 1) | 480 / 480 |
+| cdrama-canny | ic_video (fator 1) | 1152 |
+| cdrama-char | lora | 1152 |
+| transition | lora (`zhuanchang`) | 576 |
+| vbvr-i2v (390K) | lora | 1248 |
+
+Só `.safetensors` e `.json` de workflow. O download vai para
+`models/_hf_staging` e só então é movido para o nome final: interrompido, nunca
+deixa arquivo truncado com o nome que o ComfyUI lista.
+
+### Backend: três enxertos
+
+- `_apply_model_patches`: `LoraLoaderModelOnly` encadeados, com o
+  `LTXICLoRALoaderModelOnly` por último, entre o loader e **todos** os que liam o
+  modelo (achados por `_consumers`, não por id fixo). Vem antes do dev, dos
+  keyframes e do áudio, que leem o modelo do guider.
+- `_apply_ic_guide`: `LTXAddVideoICLoRAGuide` no latente de VÍDEO antes do
+  `LTXVConcatAVLatent` (mesmo motivo dos keyframes, §3.12), com o fator lido do
+  próprio loader. A guia pode ser uma sequência de imagens
+  (`LoadImage`+`RepeatImageBatch`+`ImageBatch`, sem passar por codec), um vídeo
+  (`LoadVideo`+`GetVideoComponents`+`ImageFromBatch`, cortado no nº de quadros
+  porque o nó faz assert) ou trilhas (`LTXVDrawTracks`).
+- `_apply_crop_guides`: **o sampler do grafo T2V/I2V oficial NÃO tem
+  `LTXVCropGuides`** (os grafos IC oficiais têm). Sem inserir, a guia do tamanho
+  do clipe dobraria os quadros decodificados.
+
+Duas recusas explícitas, as duas por mecanismo LIDO no código:
+
+- **Fator de referência > 1 junto com `audio_conditioning`.**
+  `LTXVSetAudioVideoMaskByTime` (`ComfyUI-LTXVideo/latents.py`) recria a máscara
+  de vídeo inteira com `mask_init_value_video` e só multiplica a anterior de
+  volta quando ela tem forma (1,1,F,1,1). A guia de fator 1 mantém máscara por
+  quadro (`append_keyframe` sem `guide_mask`) e sobrevive. A de fator > 1 passa
+  por `LTXVDilateLatent`, vira máscara espacial, é descartada — e guia e primeiro
+  quadro seriam re-ruídos sem erro nenhum.
+- **IC-LoRA no two-stage**: o refino x2 precisaria receber a guia de novo.
+
+**LoRA sobre checkpoint quantizado** (LIDO em `model_patcher.py`/`ops.py`): com
+carga cheia, `patch_weight_to_device` dequantiza, soma o LoRA e chama
+`set_weight`, que **requantiza** (`requantize_from_float`, escala recalculada,
+arredondamento estocástico). Em camada descarregada, `LowVramPatch` aplica exato
+no forward, sem kernel int4. No `w4a8-v10` o delta do LoRA passa por 4 bits:
+fidelidade a medir.
+
+Gatilhos (`zhuanchang`, `CINEMAGRAPH_MOTION`, `OHWXPERSON`) entram no prompt em
+`generate()`, com log — LoRA com gatilho e sem ele é o caso "carregou e não fez
+nada" que não aparece em log nenhum.
+
+### Decupagem
+
+`render_shots_stage`/`run_decupagem`: `--video-lora` e `--ic-reference
+{off,ingredients,msr}`, resolvidos antes de gastar GPU. Por plano,
+`ic_references.shot_ic_spec` monta:
+
+- **ingredients**: folha sobre fundo preto com a character sheet do sujeito (e do
+  co-sujeito) mais a locação da cena; prompt "Reference sheet: … Generated video: …";
+- **msr**: sujeitos contidos em fundo branco e cenário (locação ou o próprio still)
+  em 17–65 quadros, na maior sequência do treino que cabe no plano; prompt
+  "Image 1: NOME, …".
+
+Plano sem personagem com referência segue só com o still. O still continua sendo
+o primeiro quadro nos dois modos. LoRAs e IC entram na chave `.key` do clipe
+**só quando ligados** — corrida sem eles mantém o cache antigo.
+`ltx_pipelines_25` passou a honrar `--lora` (LoRA comum) para as UIs 2.3→2.5.
+
+### Validação sem GPU
+
+- `tests/test_ltx_loras.py`: 14 testes, sobre a fixture
+  `tests/fixtures/ltx25_base_api_single.json` — o grafo oficial convertido contra
+  o `/object_info` real, não um grafo inventado.
+- Validador contra o `/object_info` real, com ComfyUI só-CPU na porta 8198: 7
+  variantes (LoRA simples; 2 LoRAs + áudio; IC por imagens + áudio; IC por vídeo;
+  IC por trilhas; dev + LoRA + IC + keyframes; gguf + LoRA), sem problema.
+- Armadilha de ambiente: no Git Bash, `CUDA_VISIBLE_DEVICES=""` **não** esconde as
+  GPUs (o Windows apaga variável vazia), e o `comfy_kitchen` quebra no import com
+  `Invalid device id` ao consultar a placa. `CUDA_VISIBLE_DEVICES=-1` resolve.
+
+### Teste de GPU
+
+MEDIDO 2026-09-12 na cópia `outputs/decupagem/_lora_ic_test_palacio/`, plano 9
+(MEI-LI, 33 quadros, 960x544, I2V + fala), `w4a8-v10`. Vídeos e quadros em
+`lora_tests/`.
+
+| caso | s | quadros | dif. q0×still | observação |
+|---|---|---|---|---|
+| base | 243 (com boot) | 33 | 3,8 | giro borrado, rosto derrete no fim |
+| better-human-motion 0.6 | 125 | 33 | 3,7 | último quadro quase idêntico ao base |
+| ingredients (folha c/ locação) | 94 | 33 | 6,5 | **vídeo vira a folha** (tarja preta 1,00) |
+| msr (1 sujeito) | 134 | 33 | 4,5 | rosto nítido e figurino da sheet no fim, sem vazamento |
+
+- Mecânica validada no servidor real: grafo aceito, nenhuma `lora key not
+  loaded` no log do ComfyUI, crop removendo a guia (a máscara registrou 10
+  latentes, 5 reais + 5 de guia; saíram 33 quadros). O w4a8 carregou inteiro,
+  ou seja, pelo caminho que funde e requantiza o LoRA. Custo por passo com guia
+  do tamanho do clipe: ~1,7 s contra ~0,85 s.
+- **O vazamento da folha não era o LoRA.** A folha tinha um painel de "locação"
+  (o primeiro wide da cena) com a XIAO-LAN dentro. O diagnóstico com a folha só
+  da personagem, medido pela fração de tarja preta no último quadro (base 0,25):
+  0,18 no w4a8, 0,21 com o LoRA a 0, 0,19 no gguf-q6k e 0,01 em T2V sem fala.
+  Nenhum vaza. Correção: a locação ficou fora da folha por padrão
+  (`include_location`), e o cenário do MSR passou a ser o still do próprio plano.
+- better-human-motion no w4a8 não produziu diferença visível numa seed. Isso é
+  compatível com a requantização apagar o delta, mas **não prova** — falta o
+  mesmo A/B no `gguf-q6k`.
+- Julgamento de qualidade é do usuário. Primeira corrida real com MSR:
+  `outputs/decupagem/20260912_primeiro_tour_msr/` (cena "O Primeiro Tour").
+
+## 3.79 Sincronismo da montagem, pós-produção V2V (DubIt/Deblur/Upscaler) e controles de LoRA na UI (2026-09-13)
+
+### O filme perdia sincronia a cada corte -- causa medida, não suposta
+
+Queixa do usuário no "O Primeiro Tour" (43 planos). Medido plano a plano:
+
+- depois do mix, o vídeo de cada plano de fala saía 0,1-0,16 s mais curto que o áudio;
+- corrigir só isso (áudio aparado/completado para a duração do vídeo) **não
+  bastou**: o filme continuou com 144,3 s de vídeo contra 138,5 s de áudio;
+- a causa maior: os planos de fala voltam do lip-sync a **25 fps** (timebase
+  1/12800) e os de ação ficam a **24 fps** (1/12288). O concat demuxer com `-c copy`
+  mistura as bases de tempo e estica o vídeo.
+
+Correção em `assemble_final._normalize_audio_for_concat`: todo clipe é reencodado a
+24 fps com a mesma timescale, e o áudio fica com exatamente a duração do vídeo.
+Resultado: **146,7/141,0 s → 140,83/140,79 s** (0,05 s de diferença no filme
+inteiro). O filme antigo ficou em `final/movie_antes_fix_sync.mp4`.
+
+Isso é **deriva entre planos**. A sincronia **dentro** do plano é outra coisa, e a
+auditoria mostrou que ela também é fraca: vários planos com "lip-sync ok" mediram
+correlação boca-áudio negativa (shot025 -0,24; shot040 -0,11; shot030 ≈0).
+
+### Pós-produção V2V: `ltx25_backend.generate_v2v`
+
+É o IC-LoRA com o próprio clipe como guia. Três modos de áudio: `remux` (o áudio
+original é recolocado, então o sincronismo não pode mudar), `congelar` (a fala do
+TTS entra congelada e a boca é refeita) e `gerar` (o jeito do workflow oficial do
+DubIt: áudio como tokens de identidade de voz, fala gerada do texto citado). A
+duração é arredondada PARA CIMA a 8k+1 e cortada na da origem.
+
+MEDIDO (w4a8, 960x544), auditoria de sync `lipsync_audit`:
+
+| caso | contra a fala do TTS | contra o áudio do próprio clipe |
+|---|---|---|
+| shot025 Wav2Lip (produção) | -0,24 | — |
+| shot025 DubIt congelar | +0,11 | +0,03 |
+| shot025 DubIt congelar, guia 0,7 | +0,14 | — |
+| shot025 DubIt gerar | +0,15 | **+0,41** |
+| shot040 Wav2Lip (produção) | -0,11 | — |
+| shot040 DubIt congelar | -0,05 | -0,02 |
+| shot040 DubIt gerar | -0,03 | -0,15 |
+
+- DubIt melhora sobre o Wav2Lip nos dois planos, mas **não resolve**: o 040 segue
+  sem sincronia em todos os modos.
+- `gerar` teve o melhor resultado isolado (+0,41 no 025), mas a voz final é do
+  modelo, não do TTS, e o 040 piorou. Veredito do usuário, ouvindo.
+- Tempo: ~225-290 s por plano de 3-6 s (com a carga do modelo).
+- Deblur (remux): ok, 346 s num plano de 3,4 s. A primeira versão cortava o fim com
+  `-c:v copy` e saía 0,08 s mais longa; passou a reencodar.
+- Pixel-Upscaler x2 (remux): ok, 1920x1088, duração idêntica, 209 s num plano de 1,7 s.
+
+### Onde ficou exposto
+
+- `lipsync_scenes --engine {auto,latentsync,wav2lip,dubit,none}` com
+  `--dubit-strength/--dubit-guide-strength/--dubit-audio`; DubIt falhou → cai para
+  LatentSync/Wav2Lip.
+- `postprod_v2v` (novo, estágio 7b, entre mix e montagem): `--deblur`/`--upscale`
+  com forças. Upscale é tudo ou nada; clipe que falhar sobe x2 por lanczos.
+- `run_decupagem`: `--lipsync-engine`, `--dubit-*`, `--post-deblur[-strength]`,
+  `--post-upscale[-strength]`.
+- `decupagem_ui` (aba Motores, acordeão "LoRAs do LTX 2.5"): cada LoRA comum com
+  liga/desliga e força (padrão = catálogo), IC-LoRA com força e força da guia,
+  lip-sync e DubIt, Deblur e Upscaler com força. Tudo desligado = corrida de sempre.
+  Testado pela própria WebUI: o comando montado levou todas as opções à cadeia
+  (corrida `20260913_0832_teste_webui_loras`).
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do

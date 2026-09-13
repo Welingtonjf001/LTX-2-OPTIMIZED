@@ -16,22 +16,27 @@ set "LTX_FFMPEG=C:/ffmpeg/bin/ffmpeg.exe"
 
 REM ---------------------------------------------------------------------
 REM ESCOLHA DA VERSAO DO MODELO LTX-2.5 (edite a linha abaixo):
-REM   distilled = 8 passos, CFG 1. Rapido (~6 min/clipe de 15s).
-REM               ATENCAO: nesta variante o negative prompt NAO tem efeito
-REM               (em CFG 1 o ramo negativo se cancela na formula do CFG),
-REM               entao legendas queimadas nao sao removiveis por prompt.
+REM   w4a8-v10  = PADRAO desde 2026-09-12. O mesmo modelo destilado (8 passos,
+REM               CFG 1) quantizado em 4 bits, 14,9 GB, conversor oficial
+REM               comfy-kitchen. MEDIDO: ~1,6x mais rapido que o bf16 com o
+REM               modelo ja carregado e bem mais estavel (cabe na placa, sem
+REM               offload); qualidade julgada MAIOR que a do bf16 em 3 de 3
+REM               comparacoes; validado com I2V e audio_conditioning.
+REM               Ver MEMORIAL 3.77.
+REM               ATENCAO: CFG 1, entao o negative prompt NAO tem efeito
+REM               (legendas queimadas nao sao removiveis por prompt).
+REM   distilled = o mesmo modelo em bf16, 39 GB. Padrao ate 2026-09-12.
+REM               Mais lento e instavel nesta placa (depende de offload).
 REM   dev       = transformer nao destilado, CFG real (video 3 / audio 7),
 REM               15 passos. O negative prompt FUNCIONA. Varias vezes mais
 REM               lento (~30 avaliacoes do modelo contra 8).
-set "LTX25_VARIANT=distilled"
+set "LTX25_VARIANT=w4a8-v10"
 REM
-REM   gguf-q6k  = GGUF Q6_K via ComfyUI-GGUF, 8 passos/CFG 1 igual distilled.
-REM               MEDIDO 2026-09-06: 37 porcento mais rapido que distilled na
-REM               mesma cena (265s contra 797s numa cena de dialogo pesada) --
-REM               `audio_conditioning` CONFIRMADO compativel (testado de
-REM               proposito, e o que sustenta o lip-sync da decupagem). Ainda
-REM               NAO testado: variante dev, upscale de 2 estagios, keyframes
-REM               -- nao trocar se o fluxo usar algum desses.
+REM   gguf-q6k  = GGUF Q6_K via ComfyUI-GGUF, 8 passos/CFG 1. Mesma velocidade
+REM               do w4a8-v10, qualidade julgada abaixo dele (MEMORIAL 3.77).
+REM               Troca o node inteiro do loader: NAO testado com dev,
+REM               upscale de 2 estagios nem keyframes.
+REM   Keyframes com w4a8-v10 ainda NAO testados.
 REM ---------------------------------------------------------------------
 
 

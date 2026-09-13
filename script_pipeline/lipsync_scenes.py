@@ -29,6 +29,44 @@ def _load_clips(run_dir: Path) -> list[dict]:
     return json.loads(clips_path.read_text(encoding="utf-8"))
 
 
+def _dubit_clip(clip: dict, output_path: Path, *, run_dir: Path, args, log) -> str | None:
+    """Refaz a boca do clipe CRU do LTX com o IC-LoRA DubIt (ltx25_backend.generate_v2v).
+
+    Em `congelar` a fala do TTS entra congelada e o modelo so redesenha a boca sobre
+    ela: voz e duracao ficam as do TTS. Em `gerar` o modelo gera a fala a partir do
+    texto (voz do modelo, com o TTS como referencia de timbre) -- o texto vai citado no
+    prompt, que e o que o workflow oficial pede."""
+    import ltx25_backend
+    import ltx_loras
+    lora = ltx_loras.BY_KEY["dubit-2.3"].local
+    if ltx_loras.installed_path(lora) is None:
+        log(f"{clip['id']}: LoRA DubIt nao instalado (python ltx_loras.py download dubit-2.3)")
+        return None
+    prompt = ""
+    try:
+        plan = json.loads((run_dir / "parse" / "shot_plan.json").read_text(encoding="utf-8"))["shots"]
+        prompt = plan[int(clip["id"].rsplit("shot", 1)[1])]["video_prompt"]
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    if args.dubit_audio == "gerar":
+        try:
+            falas = json.loads((run_dir / "dialogue" / "lines.json").read_text(encoding="utf-8"))
+            texto = next(e["text"] for e in falas if e["line_index"] == clip.get("line_index")
+                         and e["scene_index"] == clip.get("scene_index"))
+            prompt = f'{prompt} The character speaks in Brazilian Portuguese, saying: "{texto}"'
+        except (OSError, StopIteration, KeyError):
+            pass
+    try:
+        return ltx25_backend.generate_v2v(
+            prompt, clip["video_path"], str(output_path), lora=lora,
+            strength=args.dubit_strength, guide_strength=args.dubit_guide_strength,
+            audio=args.dubit_audio, audio_path=clip["audio_path"],
+            log_cb=lambda m: log(f"    [dubit] {m}"))
+    except Exception as e:
+        log(f"{clip['id']}: DubIt falhou ({type(e).__name__}: {str(e)[:300]})")
+        return None
+
+
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,7 +74,17 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--engine", default="auto", choices=["auto", "latentsync", "wav2lip"])
+    parser.add_argument("--engine", default="auto", choices=["auto", "latentsync", "wav2lip", "dubit", "none"],
+                        help="dubit = IC-LoRA DubIt do LTX refaz a boca sobre a fala (ver "
+                             "ltx25_backend.generate_v2v); none = nao sincroniza, mantem o clipe do LTX")
+    parser.add_argument("--dubit-strength", type=float, default=1.0, help="forca do LoRA DubIt no modelo")
+    parser.add_argument("--dubit-guide-strength", type=float, default=1.0,
+                        help="quanto o clipe original prende a imagem (1 = fiel, menos = mais livre)")
+    parser.add_argument("--dubit-audio", default="congelar", choices=["congelar", "gerar"],
+                        help="congelar = mantem a voz do TTS; gerar = o modelo gera a fala do texto "
+                             "(voz do modelo, com o TTS so como referencia)")
+    parser.add_argument("--dubit-fallback", default="auto", choices=["auto", "none"],
+                        help="se o DubIt falhar num plano: auto = LatentSync/Wav2Lip; none = clipe original")
     args = parser.parse_args(argv)
 
     from script_pipeline import run_folder
@@ -68,16 +116,30 @@ def main(argv=None) -> int:
             log(f"{clip['id']}: sem fala (cena de acao); mantendo clipe original.")
             continue
 
-        if not status.available:
+        if args.engine == "none":
+            # Opcao explicita de NAO usar lip-sync: o LTX ja gerou a boca sobre a fala
+            # condicionada. O clipe segue com a propria faixa (voz + trilha).
+            synced_manifest.append({**clip, "final_video_path": clip["video_path"], "lipsync_applied": False})
+            log(f"{clip['id']}: lip-sync desligado (--engine none); mantendo clipe do LTX.")
+            continue
+
+        if args.engine != "dubit" and not status.available:
             log(f"{clip['id']}: nenhum motor de lip-sync disponivel; mantendo clipe original.")
             synced_manifest.append({**clip, "final_video_path": clip["video_path"], "lipsync_applied": False})
             continue
 
         output_path = lipsync_dir / f"{clip['id']}_synced.mp4"
-        result = apply_lipsync(
-            clip["video_path"], clip["audio_path"], str(output_path),
-            work_dir=str(lipsync_dir), engine=args.engine, log=log,
-        )
+        if args.engine == "dubit":
+            result = _dubit_clip(clip, output_path, run_dir=run_dir, args=args, log=log)
+            if result is None and args.dubit_fallback == "auto" and status.available:
+                log(f"{clip['id']}: DubIt falhou; caindo para LatentSync/Wav2Lip.")
+                result = apply_lipsync(clip["video_path"], clip["audio_path"], str(output_path),
+                                       work_dir=str(lipsync_dir), engine="auto", log=log)
+        else:
+            result = apply_lipsync(
+                clip["video_path"], clip["audio_path"], str(output_path),
+                work_dir=str(lipsync_dir), engine=args.engine, log=log,
+            )
         final_video = str(result) if result is not None else clip["video_path"]
         if result is not None:
             synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": True})

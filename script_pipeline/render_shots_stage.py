@@ -143,6 +143,19 @@ def main() -> int:
                          "LTX em models/loras/, que sao incompativeis aqui). Sem isto, nenhum "
                          "LoRA (comportamento de sempre).")
     ap.add_argument("--lora-strength", type=float, default=0.8)
+    # LoRAs de VIDEO do LTX 2.5 (models/loras e models/2.5/loras) -- nada a ver com o
+    # --lora acima, que e dos STILLS. Catalogo, forcas e gatilhos: ltx_loras.py.
+    ap.add_argument("--video-lora", action="append", default=[], metavar="CHAVE[:FORCA]",
+                    help="LoRA comum na passada de video (repita para empilhar). Chave do "
+                         "catalogo (ex.: better-human-motion:0.6) ou nome do arquivo.")
+    ap.add_argument("--ic-reference", default="off", choices=["off", "ingredients", "msr"],
+                    help="IC-LoRA de referencia no video: 'ingredients' = folha com a character "
+                         "sheet do(s) personagem(ns) + locacao; 'msr' = sequencia MSR V2 "
+                         "(sujeitos + cenario). O still segue como primeiro quadro. So LTX.")
+    ap.add_argument("--ic-lora", default=None,
+                    help="troca o IC-LoRA padrao do modo (chave do catalogo ou arquivo)")
+    ap.add_argument("--ic-strength", type=float, default=1.0)
+    ap.add_argument("--ic-guide-strength", type=float, default=1.0)
     args = ap.parse_args()
 
     # O motor decide checkpoint, encoders e amostragem de uma vez. Passar
@@ -198,7 +211,45 @@ def main() -> int:
               "shot_plan/decoupagem ja escreveu a fala dentro do prompt de "
               "cada plano (mesma convencao dos prompts de teste do usuario).")
 
+    # LoRAs/IC-LoRA de video resolvidos AQUI, antes de gastar GPU: nome errado ou LoRA
+    # nao baixado para a corrida com a mensagem certa, em vez de falhar plano a plano
+    # dentro do ComfyUI com "value_not_in_list".
+    video_loras, ic_lora_nome, descritores = [], None, {}
+    if not args.stills_only and args.engine == "ltx":
+        import ltx_loras
+        from script_pipeline import ic_references
+        for valor in args.video_lora:
+            nome, forca = ltx_loras.parse_lora_arg(valor)
+            spec = ltx_loras.BY_LOCAL.get(nome)
+            if ltx_loras.installed_path(nome) is None:
+                print(f"[5-D] LoRA de video '{valor}' nao instalado -- "
+                      "python ltx_loras.py download <chave>", file=sys.stderr)
+                return 1
+            if spec is not None and spec.kind != "lora":
+                print(f"[5-D] '{valor}' e {spec.kind}, nao LoRA comum -- use --ic-reference.",
+                      file=sys.stderr)
+                return 1
+            video_loras.append((nome, forca))
+        if args.ic_reference != "off":
+            ic_lora_nome = ic_references.resolve_ic_lora(args.ic_reference, args.ic_lora)
+            if not ic_lora_nome or ltx_loras.installed_path(ic_lora_nome) is None:
+                print(f"[5-D] nenhum IC-LoRA instalado para --ic-reference {args.ic_reference}",
+                      file=sys.stderr)
+                return 1
+            print(f"[5-D] IC-LoRA de referencia: {args.ic_reference} -> {ic_lora_nome}")
+        if video_loras:
+            print("[5-D] LoRAs de video: " + ", ".join(f"{n} ({s:g})" for n, s in video_loras))
+        if cast_path.exists():
+            try:
+                descritores = {nome: info.get("descriptor", "") for nome, info in
+                               json.loads(cast_path.read_text(encoding="utf-8")).items()}
+            except (OSError, json.JSONDecodeError):
+                descritores = {}
+
     feitos = rs.render(plan, shots_dir, width=args.width, height=args.height,
+                       video_loras=video_loras, ic_mode=args.ic_reference, ic_lora=ic_lora_nome,
+                       ic_strength=args.ic_strength, ic_guide_strength=args.ic_guide_strength,
+                       cast_descriptors=descritores,
                        fps=args.fps, checkpoint=args.checkpoint, clip=args.clip,
                        vae=args.vae, seed=args.seed, limit=None,
                        stills_only=args.stills_only, videos_only=args.videos_only,

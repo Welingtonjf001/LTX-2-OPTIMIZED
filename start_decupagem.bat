@@ -26,24 +26,28 @@ REM   --disable-dynamic-vram : o ComfyUI liga "dynamic VRAM" por padrao e ele
 REM       engasga ao encenar o encoder de 25 GB. O mesmo plano de 81 frames
 REM       nao fechava em 13 min e passa a fechar em 151 s. Com ele, um plano
 REM       de 337 frames fecha em 394 s.
-REM   distilled (bf16) : NAO troque por distilled-int8 aqui. MEDIDO 2026-08-28:
-REM       o int8 tem 20 GB e CABE na placa, entao o ComfyUI o carrega inteiro
-REM       ("full load: True") e nao sobra VRAM para o latente -- um plano de 129
-REM       frames travou duas vezes. O bf16 tem 39 GB, nao cabe, e o gerenciador
-REM       e obrigado a descarregar 19 GB ("loaded partially") -- o mesmo plano
-REM       fecha em 1087 s. Caber inteiro e o problema. Ver MEMORIAL 3.35.
+REM   w4a8-v10 : PADRAO desde 2026-09-12. Destilado em 4 bits, 14,9 GB,
+REM       conversor oficial comfy-kitchen. MEDIDO no caminho real desta cadeia
+REM       (I2V com o still + audio_conditioning com a fala): ~1,6x mais rapido
+REM       que o bf16 com o modelo ja carregado, qualidade julgada MAIOR em 3 de
+REM       3 comparacoes, e um plano de 337 frames fechou em 262 s sem travar.
+REM       Ver MEMORIAL 3.77. Para voltar ao anterior: distilled.
+REM   NAO use distilled-int8 aqui. MEDIDO 2026-08-28: o int8 tem 20 GB e CABE
+REM       na placa, o ComfyUI o carrega inteiro e nao sobra VRAM para o
+REM       latente -- um plano de 129 frames travou duas vezes (MEMORIAL 3.35).
+REM       O que decide o travamento e a folga DEPOIS da carga (MEMORIAL 3.51),
+REM       e o w4a8-v10 (14,9 GB) deixa mais folga que o int8 (20 GB).
 REM
 REM Ate o estagio `animatic` nada disto e usado (os stills sao FLUX), entao
 REM deixar ligado nao custa nada.
-set "LTX25_VARIANT=distilled"
+set "LTX25_VARIANT=w4a8-v10"
 REM
-REM   gguf-q6k  = GGUF Q6_K via ComfyUI-GGUF, 8 passos/CFG 1 igual distilled.
-REM               MEDIDO 2026-09-06: 37 porcento mais rapido que distilled na
-REM               mesma cena (265s contra 797s numa cena de dialogo pesada) --
-REM               `audio_conditioning` CONFIRMADO compativel (testado de
-REM               proposito, e o que sustenta o lip-sync da decupagem). Ainda
-REM               NAO testado: variante dev, upscale de 2 estagios, keyframes
-REM               -- nao trocar se o fluxo usar algum desses.
+REM   distilled = bf16, 39 GB, padrao ate 2026-09-12. Mais lento e instavel
+REM               nesta placa (nao cabe, depende de offload).
+REM   gguf-q6k  = GGUF Q6_K via ComfyUI-GGUF, 8 passos/CFG 1. Mesma velocidade
+REM               do w4a8-v10, qualidade julgada abaixo dele (MEMORIAL 3.77).
+REM               Troca o node inteiro do loader: NAO testado com dev,
+REM               upscale de 2 estagios nem keyframes.
 set "LTX_COMFY_EXTRA_ARGS=--disable-dynamic-vram"
 REM ---------------------------------------------------------------------
 

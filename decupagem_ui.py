@@ -78,12 +78,14 @@ from script_pipeline.shot_plan import STYLES  # noqa: E402
 # Sem `--disable-dynamic-vram` o mesmo plano de 81 frames nao fechava em 13 min
 # e passa a fechar em 151 s -- ver MEMORIAL.md secao 3.33. Ficam aqui pelo mesmo
 # motivo que estao no start_decupagem.bat: nao sao ajuste fino.
-# `distilled` e NAO `distilled-int8`: o int8 cabe inteiro na placa, o ComfyUI o
-# carrega todo ("full load: True") e nao sobra VRAM para o latente -- um plano de
-# 129 frames travou duas vezes. O bf16 nao cabe, o gerenciador descarrega 19 GB
-# e o mesmo plano fecha. Ver MEMORIAL 3.35.
+# `w4a8-v10` e o padrao desde 2026-09-12 (MEMORIAL 3.77): destilado em 4 bits,
+# ~1,6x mais rapido que o bf16 com o modelo carregado, qualidade julgada maior em
+# 3 de 3 comparacoes, validado nesta cadeia com I2V + fala. NAO troque por
+# `distilled-int8`: ele cabe inteiro e nao sobra VRAM para o latente -- um plano
+# de 129 frames travou duas vezes (MEMORIAL 3.35). O que decide o travamento e a
+# folga DEPOIS da carga, e o w4a8-v10 (14,9 GB) deixa mais folga (MEMORIAL 3.51).
 ENV_VIDEO = {
-    "LTX25_VARIANT": "distilled",
+    "LTX25_VARIANT": "w4a8-v10",
     "LTX_COMFY_EXTRA_ARGS": "--disable-dynamic-vram",
 }
 
@@ -942,10 +944,12 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
           altura: int, ate: str, motor: str, recast: bool,
           motor_img: str = "flux", motor_video: str = "ltx",
           motor_voz: str = "auto", consistencia: float | None = None,
-          camera_llm: bool = False, ltx_variant: str = "distilled",
+          camera_llm: bool = False, ltx_variant: str = "w4a8-v10",
           minimax_variant: str = "fp8int8", lora: str = "(nenhum)",
           lora_strength: float = 0.8, character_sheet_on: bool = False,
-          character_sheet_n: int = 4, minimax_ref_audio: bool = False) -> list:
+          character_sheet_n: int = 4, minimax_ref_audio: bool = False,
+          video_loras: list | None = None, ic_reference: str = "off",
+          ic_strength: float = 1.0, extras: list | None = None) -> list:
     cmd = [PY, "-u", "-m", "script_pipeline.run_decupagem",
            "--run-dir", str(run), "--style", estilo, "--ate", ate,
            "--width", str(int(largura)), "--height", str(int(altura)),
@@ -980,14 +984,26 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
         cmd += ["--character-sheet", "--character-sheet-candidates", str(int(character_sheet_n))]
     if minimax_ref_audio and motor_video == "minimax":
         cmd.append("--minimax-ref-audio")
+    # LoRAs de VIDEO do LTX (pedido do usuario 2026-09-12) -- so com motor ltx. O
+    # dropdown mostra "chave (forca)" do catalogo ltx_loras.py; aqui vira chave:forca.
+    if motor_video == "ltx":
+        for rotulo in video_loras or []:
+            chave, _, resto = str(rotulo).partition(" (")
+            forca = resto.rstrip(")")
+            cmd += ["--video-lora", f"{chave}:{forca}" if forca else chave]
+        if ic_reference and ic_reference != "off":
+            cmd += ["--ic-reference", ic_reference, "--ic-strength", str(ic_strength)]
+    # Lip-sync, guia do IC e pos-producao: ja chegam como argumentos prontos de _rodar_ui.
+    cmd += list(extras or [])
     return cmd
 
 
 def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, motor,
           recast, motor_img="flux", motor_video="ltx", motor_voz="auto",
-          consistencia=None, camera_llm=False, ltx_variant="distilled",
+          consistencia=None, camera_llm=False, ltx_variant="w4a8-v10",
           minimax_variant="fp8int8", lora="(nenhum)", lora_strength=0.8,
-          character_sheet_on=False, character_sheet_n=4, minimax_ref_audio=False):
+          character_sheet_on=False, character_sheet_n=4, minimax_ref_audio=False,
+          video_loras=None, ic_reference="off", ic_strength=1.0, extras=None):
     """Executa a cadeia transmitindo o stdout. Gerador: a UI recebe cada linha.
 
     O subprocesso e o MESMO que o .bat dispara. A UI nao reimplementa etapa
@@ -1023,7 +1039,8 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
     cmd = _argv(run, script, estilo, trocas, largura, altura, ate, motor, recast,
                 motor_img, motor_video, motor_voz, consistencia, camera_llm,
                 ltx_variant, minimax_variant, lora, lora_strength,
-                character_sheet_on, character_sheet_n, minimax_ref_audio)
+                character_sheet_on, character_sheet_n, minimax_ref_audio,
+                video_loras, ic_reference, ic_strength, extras)
     linhas = [f"$ {' '.join(cmd[3:])}", f"(corrida: {run})", ""]
     # Rastreio da "trilha de estagios" (a linha de status "estamos aqui" que o
     # usuario pediu): cada linha `[TAG] ...` que `run_decupagem.py::passo()`
@@ -1324,11 +1341,12 @@ def build() -> None:
                              "nativamente, nao usa TTS nenhum).")
                 with gr.Row():
                     ltx_variant = gr.Dropdown(
-                        choices=["distilled", "dev", "gguf-q6k"], value="distilled", scale=1,
+                        choices=["w4a8-v10", "distilled", "dev", "gguf-q6k"], value="w4a8-v10", scale=1,
                         label="Variante LTX 2.5 (só com Motor de vídeo = ltx)",
-                        info="MEDIDO 2026-09-06, mesma cena/seed: distilled (padrão) 13min17s -- "
-                             "gguf-q6k 4min25s, ~3x mais rápido. dev = CFG real, mais lento, "
-                             "negative prompt funciona de verdade (não comparado neste teste).")
+                        info="w4a8-v10 (padrão desde 2026-09-12): 4 bits, ~1,6x mais rápido que o "
+                             "distilled (bf16) com o modelo carregado, qualidade julgada maior em 3 de 3 "
+                             "comparações (MEMORIAL 3.77). distilled = bf16, padrão anterior. dev = CFG "
+                             "real, mais lento, negative prompt funciona de verdade.")
                     minimax_variant = gr.Dropdown(
                         choices=["fp8int8", "w4a8", "gguf-q4km"], value="fp8int8", scale=1,
                         label="Variante MiniMax H3 (só com Motor de vídeo = minimax)",
@@ -1372,6 +1390,55 @@ def build() -> None:
                     lora_strength = gr.Slider(
                         minimum=0, maximum=2, value=0.8, step=0.05, scale=1,
                         label="Força do LoRA")
+                # LoRAs de VIDEO do LTX 2.5, lip-sync e pos-producao (pedidos do usuario
+                # 2026-09-12/13): cada LoRA com liga/desliga e forca exposta, padrao =
+                # a do catalogo (ltx_loras.py). Nada liga sozinho.
+                import ltx_loras
+                with gr.Accordion("LoRAs do LTX 2.5: geração, lip-sync e pós-produção", open=False):
+                    gr.Markdown(
+                        "**LoRAs comuns na geração** (só Motor de vídeo = ltx). Treinados no 2.3, "
+                        "carregam no 2.5 (verificado); efeito a validar vendo. ATENÇÃO: "
+                        "motion-enhancer-n4w é afinado para NSFW; talking-head-av é de UM "
+                        "personagem do autor; cdrama-char puxa rostos dos atores da série. No "
+                        "w4a8 o LoRA é requantizado — se não fizer diferença, teste no gguf-q6k.")
+                    lora_chaves, lora_liga, lora_forca = [], [], []
+                    for _spec in ltx_loras.video_loras_available():
+                        with gr.Row():
+                            lora_chaves.append(_spec.key)
+                            lora_liga.append(gr.Checkbox(value=False, scale=1,
+                                                         label=f"{_spec.key}" + (f" (gatilho {_spec.trigger})" if _spec.trigger else "")))
+                            lora_forca.append(gr.Slider(minimum=0.0, maximum=1.5, value=_spec.strength,
+                                                        step=0.05, scale=2, label=f"força ({_spec.strength:g} padrão)"))
+                    with gr.Row():
+                        ic_reference = gr.Dropdown(
+                            choices=["off", "ingredients", "msr"], value="off", scale=1,
+                            label="IC-LoRA de referência de personagem",
+                            info="msr = sujeitos + cenário (melhor no teste de 2026-09-12); ingredients = "
+                                 "folha da character sheet. O still continua sendo o 1º quadro.")
+                        ic_strength = gr.Slider(minimum=0.0, maximum=1.5, value=1.0, step=0.05, scale=1,
+                                                label="força do IC-LoRA (1.0 padrão)")
+                        ic_guide_strength = gr.Slider(minimum=0.0, maximum=1.0, value=1.0, step=0.05, scale=1,
+                                                      label="força da guia (1.0 padrão)")
+                    with gr.Row():
+                        lipsync_engine = gr.Dropdown(
+                            choices=["auto", "latentsync", "wav2lip", "dubit", "none"], value="auto", scale=1,
+                            label="Lip-sync",
+                            info="auto = LatentSync/Wav2Lip (como sempre); dubit = IC-LoRA DubIt refaz a "
+                                 "boca no LTX; none = sem lip-sync, fica a boca que o LTX gerou.")
+                        dubit_audio = gr.Dropdown(choices=["congelar", "gerar"], value="congelar", scale=1,
+                                                  label="DubIt: áudio",
+                                                  info="congelar = voz do TTS; gerar = o modelo gera a fala do texto.")
+                        dubit_strength = gr.Slider(minimum=0.0, maximum=1.5, value=1.0, step=0.05, scale=1,
+                                                   label="DubIt: força (1.0 padrão)")
+                        dubit_guide = gr.Slider(minimum=0.0, maximum=1.0, value=1.0, step=0.05, scale=1,
+                                                label="DubIt: força da guia (1.0 padrão)")
+                    with gr.Row():
+                        post_deblur = gr.Checkbox(value=False, scale=1, label="Pós: Deblur 2.5")
+                        post_deblur_s = gr.Slider(minimum=0.0, maximum=1.5, value=1.0, step=0.05, scale=1,
+                                                  label="Deblur: força (1.0 padrão)")
+                        post_upscale = gr.Checkbox(value=False, scale=1, label="Pós: Upscaler x2 2.5 (lento)")
+                        post_upscale_s = gr.Slider(minimum=0.0, maximum=1.5, value=1.0, step=0.05, scale=1,
+                                                   label="Upscaler: força (1.0 padrão)")
 
             # ---------------------------------------------------------------
             # ABA 3: STILLS -- rodar/parar, rascunho, previas, regenerar
@@ -1469,12 +1536,42 @@ def build() -> None:
                                outputs=[roteiro_path, aviso_roteiro])
         usar_texto_btn.click(fn=usar_texto_colado, inputs=[roteiro_colado, runs],
                              outputs=[roteiro_path, aviso_roteiro, arquivo_roteiro])
-        btn.click(fn=rodar,
-                  inputs=[runs, roteiro_path, novo_nome, estilo, trocas, largura, altura,
+        _entradas_base = [runs, roteiro_path, novo_nome, estilo, trocas, largura, altura,
                           ate, motor, recast, motor_img, motor_video, motor_voz,
                           consistencia, camera_llm, ltx_variant, minimax_variant,
                           lora, lora_strength, character_sheet_on, character_sheet_n,
-                          minimax_ref_audio],
+                          minimax_ref_audio]
+        _entradas_lora = [ic_reference, ic_strength, ic_guide_strength, lipsync_engine,
+                          dubit_strength, dubit_guide, dubit_audio,
+                          post_deblur, post_deblur_s, post_upscale, post_upscale_s]
+
+        def _rodar_ui(*valores):
+            """Traduz os controles de LoRA/lip-sync/pos-producao em argumentos da cadeia.
+            So o que foi LIGADO vira argumento: tudo desligado = corrida de sempre."""
+            nb, nl = len(_entradas_base), len(_entradas_lora)
+            base = valores[:nb]
+            (ic_ref, ic_s, ic_g, lip, dub_s, dub_g, dub_a,
+             deb, deb_s, up, up_s) = valores[nb:nb + nl]
+            ligados = valores[nb + nl:nb + nl + len(lora_chaves)]
+            forcas = valores[nb + nl + len(lora_chaves):]
+            escolhidos = [f"{k} ({float(f):g})" for k, on, f in zip(lora_chaves, ligados, forcas) if on]
+            extras = []
+            if ic_ref != "off":
+                extras += ["--ic-guide-strength", str(ic_g)]
+            if lip != "auto":
+                extras += ["--lipsync-engine", lip]
+            if lip == "dubit":
+                extras += ["--dubit-strength", str(dub_s), "--dubit-guide-strength", str(dub_g),
+                           "--dubit-audio", dub_a]
+            if deb:
+                extras += ["--post-deblur", "--post-deblur-strength", str(deb_s)]
+            if up:
+                extras += ["--post-upscale", "--post-upscale-strength", str(up_s)]
+            yield from rodar(*base, video_loras=escolhidos, ic_reference=ic_ref,
+                             ic_strength=ic_s, extras=extras)
+
+        btn.click(fn=_rodar_ui,
+                  inputs=_entradas_base + _entradas_lora + lora_liga + lora_forca,
                   outputs=[log, galeria, video, plano, estagio_html])
         # Clicar numa imagem preenche o texto do prompt E o numero da tomada no
         # regenerador -- sem isso a pessoa teria que contar posicao na galeria

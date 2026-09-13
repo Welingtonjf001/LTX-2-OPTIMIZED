@@ -24,7 +24,9 @@ with a warning line on stdout, so the UIs keep working unmodified:
         The distilled 2.5 graph uses a fixed 8-step sigma schedule
         (ManualSigmas). A different value is reported, not applied.
   --lora
-        The official single-stage 2.5 T2V graph has no LoRA loader node.
+        HONRADO desde 2026-09-12 para LoRA comum (ver o bloco de --lora em main()):
+        o arquivo precisa estar em models/loras ou models/2.5/loras. IC-LoRA, que
+        exige guia, segue ignorado aqui com aviso -- catalogo em ltx_loras.py.
 
 `--audio-input-path` IS honoured (since 2026-08-24): the track is encoded with
 LTXVAudioVAEEncode and pinned by a per-modality noise mask, so the video is
@@ -110,8 +112,25 @@ def main() -> int:
         ignored.append("--torch-compile")
     if args.teacache_threshold is not None:
         ignored.append(f"--teacache-threshold {args.teacache_threshold}")
+    # --lora PATH STRENGTH, no formato do ltx_pipelines 2.3. Honrado desde 2026-09-12:
+    # o backend encadeia LoraLoaderModelOnly. O no aceita NOME, nao caminho -- o arquivo
+    # tem de estar numa pasta que o ComfyUI le (models/loras ou models/2.5/loras). IC-LoRA
+    # sem guia nao faz o que promete, entao so LoRA comum (ou fora do catalogo) passa.
+    loras = []
     if args.lora:
-        ignored.append(f"--lora x{len(args.lora)} (grafo 2.5 single-stage não tem loader de LoRA)")
+        import ltx_loras
+        for caminho, forca in args.lora:
+            nome = os.path.basename(caminho)
+            spec = ltx_loras.BY_LOCAL.get(nome)
+            if ltx_loras.installed_path(nome) is None:
+                ignored.append(f"--lora {caminho} (fora de models/loras e models/2.5/loras)")
+            elif spec is not None and spec.kind != "lora":
+                ignored.append(f"--lora {nome} (tipo {spec.kind}: precisa de guia, nao entra "
+                               "como LoRA comum -- ver ltx_loras.py)")
+            else:
+                loras.append((nome, float(forca)))
+        if loras:
+            print("[ltx25-shim] LoRAs: " + ", ".join(f"{n} ({s})" for n, s in loras), flush=True)
     if args.audio_input_path and not os.path.exists(args.audio_input_path):
         ignored.append(f"--audio-input-path (arquivo não encontrado: {args.audio_input_path})")
         args.audio_input_path = None
@@ -181,6 +200,7 @@ def main() -> int:
             audio_cfg=args.audio_cfg,
             audio_conditioning=args.audio_input_path,
             two_stage=args.two_stage,
+            loras=loras or None,
             log_cb=lambda m: print(m, flush=True),
         )
     except Exception as e:

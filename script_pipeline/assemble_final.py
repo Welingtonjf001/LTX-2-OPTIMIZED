@@ -38,9 +38,23 @@ def _has_audio_stream(video_path: str, *, ffmpeg: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def _video_duration(video_path: str, *, ffmpeg: str) -> float | None:
+    """Duracao da faixa de VIDEO (nao do container, que vale a maior das faixas)."""
+    ffprobe = os.environ.get("LTX_FFPROBE", str(Path(ffmpeg).with_name("ffprobe.exe")))
+    r = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=duration", "-of", "csv=p=0", video_path],
+                       capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 # Every clip fed to the concat demuxer must share ONE audio format.
 CONCAT_AUDIO_RATE = "48000"
 CONCAT_AUDIO_CHANNELS = "2"
+CONCAT_FPS = "24"            # o fps do LTX; o lip-sync devolve 25
+CONCAT_TIMESCALE = "12288"   # a timescale que o ffmpeg ja da aos clipes de 24 fps
 
 
 def _normalize_audio_for_concat(video_path: str, work_dir: Path, *, ffmpeg: str, log) -> str:
@@ -63,10 +77,26 @@ def _normalize_audio_for_concat(video_path: str, work_dir: Path, *, ffmpeg: str,
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     out_path = work_dir / (Path(video_path).stem + "_norm.mp4")
+    # MEDIDO 2026-09-13 ("O Primeiro Tour", 43 planos): depois do mix o video de cada
+    # plano de fala saia 0,1-0,16 s mais curto que o audio, e o concat demuxer
+    # empilha as duas faixas SEPARADAMENTE -- o filme terminou com 146,7 s de video
+    # contra 141,0 s de audio, a fala escorregando a cada corte. O audio de cada
+    # clipe agora tem EXATAMENTE a duracao do video (completa com silencio ou corta)
+    # antes de entrar no concat.
+    #
+    # E a causa MAIOR, medida em seguida: com o audio ja igual ao video em cada clipe
+    # (soma 138,53 s nos dois), o filme ainda saia com 144,3 s de video. Os planos de
+    # fala voltam do lip-sync a 25 fps (timebase 1/12800) e os de acao ficam a 24 fps
+    # (1/12288); o concat com -c copy mistura as bases de tempo e estica o video
+    # ~5,75 s. Todo clipe e reencodado a 24 fps com a MESMA timescale antes do concat.
+    dur_video = _video_duration(video_path, ffmpeg=ffmpeg)
+    ajuste = ["-af", f"apad=whole_dur={dur_video:.6f},atrim=0:{dur_video:.6f}"] if dur_video else []
+    video_uniforme = ["-c:v", "libx264", "-preset", "fast", "-crf", "16", "-pix_fmt", "yuv420p",
+                      "-r", CONCAT_FPS, "-video_track_timescale", CONCAT_TIMESCALE]
     if _has_audio_stream(video_path, ffmpeg=ffmpeg):
         command = [
             ffmpeg, "-y", "-v", "error", "-i", video_path,
-            "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy",
+            "-map", "0:v:0", "-map", "0:a:0", *video_uniforme, *ajuste,
             "-c:a", "aac", "-b:a", "192k", "-ar", CONCAT_AUDIO_RATE, "-ac", CONCAT_AUDIO_CHANNELS,
             str(out_path),
         ]
@@ -75,7 +105,7 @@ def _normalize_audio_for_concat(video_path: str, work_dir: Path, *, ffmpeg: str,
             ffmpeg, "-y", "-v", "error", "-i", video_path,
             "-f", "lavfi", "-i",
             f"anullsrc=channel_layout=stereo:sample_rate={CONCAT_AUDIO_RATE}",
-            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+            "-map", "0:v:0", "-map", "1:a:0", *video_uniforme,
             "-c:a", "aac", "-b:a", "192k", "-ar", CONCAT_AUDIO_RATE, "-ac", CONCAT_AUDIO_CHANNELS,
             "-shortest", str(out_path),
         ]

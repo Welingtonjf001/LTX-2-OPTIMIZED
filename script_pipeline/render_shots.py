@@ -299,6 +299,10 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
            engine: str = "ltx",
            minimax_aspect_ratio: str | None = None, minimax_megapixels: float | None = None,
            minimax_turbo: bool = True, minimax_ref_audio: bool = False,
+           video_loras: list[tuple[str, float]] | None = None,
+           ic_mode: str = "off", ic_lora: str | None = None,
+           ic_strength: float = 1.0, ic_guide_strength: float = 1.0,
+           cast_descriptors: dict[str, str] | None = None,
            log=print) -> list:
     """AGRUPE POR MODELO, NÃO POR PLANO.
 
@@ -492,6 +496,23 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         clip_path = clips_dir / f"shot{i:03d}.mp4"
         marca = clips_dir / f"shot{i:03d}.key"
         chave = f"{shot['frames']}|{_audio_key(wav_cond)}"
+        # LoRAs de video e IC-LoRA (2026-09-12) mudam o CLIPE do mesmo jeito que trocar o
+        # audio -- entram na chave, senao ligar um LoRA reaproveitaria o clipe velho em
+        # silencio. So quando ligados: corrida sem eles mantem a chave antiga e o cache.
+        prompt_video, ic_spec = shot["video_prompt"], None
+        if engine != "minimax":
+            if video_loras:
+                chave += "|loras=" + ",".join(f"{n}@{s:g}" for n, s in video_loras)
+            if ic_mode and ic_mode != "off":
+                from script_pipeline import ic_references
+                ic_spec, prompt_video, chave_ic = ic_references.shot_ic_spec(
+                    ic_mode, shot, str(still), refs, location_refs.get(cena_id),
+                    cast_descriptors, width=width, height=height, num_frames=shot["frames"],
+                    work_dir=clips_dir / f"shot{i:03d}_ic", lora=ic_lora,
+                    strength=ic_strength, guide_strength=ic_guide_strength)
+                chave += chave_ic
+                if ic_spec is None:
+                    log(f"  IC-LoRA ({ic_mode}): plano sem personagem com referencia -- so o still")
         if clip_path.exists():
             # Reaproveitar exige que o clipe CORRESPONDA ao plano atual, não só
             # que exista. MEDIDO 2026-08-26: depois que o TTS trocou as durações
@@ -559,10 +580,11 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
             else:
                 ltx25_backend.generate(
-                    shot["video_prompt"], str(clip_path),
+                    prompt_video, str(clip_path),
                     width=width, height=height, num_frames=shot["frames"],
                     frame_rate=fps, seed=seed + i,
                     image_path=str(still), image_strength=1.0,
+                    loras=video_loras or None, ic_lora=ic_spec,
                     # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
                     # propria, que depois briga com o TTS por baixo da mixagem.
                     # Com isto ele constroi o som em volta da fala real, que e o

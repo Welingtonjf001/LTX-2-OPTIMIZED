@@ -112,13 +112,16 @@ def main() -> int:
                          "fala e lip-sync NATIVOS a partir do texto do video_prompt; os "
                          "estagios 6/7 (lipsync/mix) viram passthrough pra esses planos, "
                          "ja que o audio ja vem pronto no clipe.")
-    ap.add_argument("--ltx-variant", default="distilled",
-                    choices=["distilled", "dev", "gguf-q6k"],
+    ap.add_argument("--ltx-variant", default="w4a8-v10",
+                    choices=["w4a8-v10", "distilled", "dev", "gguf-q6k"],
                     help="variante do checkpoint LTX 2.5 (so importa com "
-                         "--video-engine ltx). MEDIDO 2026-09-06, mesma cena/seed: "
-                         "distilled (bf16, padrao) 13min17s -- gguf-q6k 4min25s, "
-                         "~3x mais rapido. dev = CFG real, mais lento, negative "
-                         "prompt funciona (nao comparado neste teste).")
+                         "--video-engine ltx). Padrao w4a8-v10 desde 2026-09-12: "
+                         "destilado em 4 bits, ~1,6x mais rapido que o distilled "
+                         "(bf16) com o modelo ja carregado, qualidade julgada "
+                         "maior em 3 de 3 comparacoes, validado nesta cadeia com "
+                         "I2V + fala (MEMORIAL 3.77). distilled = bf16, padrao "
+                         "anterior. dev = CFG real, mais lento, negative prompt "
+                         "funciona.")
     ap.add_argument("--minimax-variant", default="fp8int8",
                     choices=["fp8int8", "w4a8", "gguf-q4km"],
                     help="variante do checkpoint MiniMax H3 (so importa com "
@@ -164,6 +167,34 @@ def main() -> int:
                          "nao confundir com os LoRAs de video em models/loras/). "
                          "Sem isto, nenhum LoRA (comportamento de sempre).")
     ap.add_argument("--lora-strength", type=float, default=0.8)
+    # LoRAs de VIDEO do LTX 2.5 (pedido do usuario 2026-09-12) -- so na passada de video,
+    # nunca nos stills. Catalogo, forcas, gatilhos e compatibilidade 2.3->2.5 em
+    # ltx_loras.py; montagem das referencias IC em script_pipeline/ic_references.py.
+    ap.add_argument("--video-lora", action="append", default=[], metavar="CHAVE[:FORCA]",
+                    help="LoRA comum na passada de VIDEO (repita para empilhar), ex.: "
+                         "better-human-motion:0.6. Nao confundir com --lora, que e dos stills.")
+    ap.add_argument("--ic-reference", default="off", choices=["off", "ingredients", "msr"],
+                    help="IC-LoRA de referencia no video: ingredients = folha com a character "
+                         "sheet + locacao; msr = sequencia MSR V2 (sujeitos + cenario). Opt-in; "
+                         "custo de tokens maior (a guia entra no contexto do clipe).")
+    ap.add_argument("--ic-lora", default=None, help="troca o IC-LoRA padrao do modo")
+    ap.add_argument("--ic-strength", type=float, default=1.0)
+    ap.add_argument("--ic-guide-strength", type=float, default=1.0)
+    # Lip-sync e pos-producao por IC-LoRA V2V (pedido do usuario 2026-09-13, depois de
+    # o filme de teste perder sincronia). Tudo opt-in, forcas com o padrao do model card.
+    ap.add_argument("--lipsync-engine", default="auto",
+                    choices=["auto", "latentsync", "wav2lip", "dubit", "none"],
+                    help="auto = LatentSync, Wav2Lip de reserva (como sempre); dubit = IC-LoRA "
+                         "DubIt do LTX; none = sem lip-sync (fica a boca que o LTX gerou)")
+    ap.add_argument("--dubit-strength", type=float, default=1.0)
+    ap.add_argument("--dubit-guide-strength", type=float, default=1.0)
+    ap.add_argument("--dubit-audio", default="congelar", choices=["congelar", "gerar"])
+    ap.add_argument("--post-deblur", action="store_true",
+                    help="pos-producao: Deblur 2.5 em todo clipe mixado (audio intacto)")
+    ap.add_argument("--post-deblur-strength", type=float, default=1.0)
+    ap.add_argument("--post-upscale", action="store_true",
+                    help="pos-producao: Pixel-Upscaler 2.5, filme inteiro a x2 (bem mais lento)")
+    ap.add_argument("--post-upscale-strength", type=float, default=1.0)
     # Musica de fundo continua sob o filme inteiro (pedido do usuario
     # 2026-09-12): os motores de video so geram trilha nas cenas de dialogo
     # (audio_conditioning), entao o filme montado tem trechos sem musica
@@ -367,15 +398,36 @@ def main() -> int:
                     "--engine", args.video_engine]
         if args.video_engine == "minimax" and args.minimax_ref_audio:
             cmd_video.append("--minimax-ref-audio")
+        if args.video_engine == "ltx":
+            for valor in args.video_lora:
+                cmd_video += ["--video-lora", valor]
+            if args.ic_reference != "off":
+                cmd_video += ["--ic-reference", args.ic_reference,
+                              "--ic-strength", str(args.ic_strength),
+                              "--ic-guide-strength", str(args.ic_guide_strength)]
+                if args.ic_lora:
+                    cmd_video += ["--ic-lora", args.ic_lora]
         if not passo("5-D video", cmd_video):
             return 1
 
     if ate("lipsync"):
-        passo("6 lipsync", ["-m", "script_pipeline.lipsync_scenes",
-                            "--run-dir", str(run)], obrigatorio=False)
+        cmd_lip = ["-m", "script_pipeline.lipsync_scenes", "--run-dir", str(run),
+                   "--engine", args.lipsync_engine]
+        if args.lipsync_engine == "dubit":
+            cmd_lip += ["--dubit-strength", str(args.dubit_strength),
+                        "--dubit-guide-strength", str(args.dubit_guide_strength),
+                        "--dubit-audio", args.dubit_audio]
+        passo("6 lipsync", cmd_lip, obrigatorio=False)
     if ate("mix"):
         passo("7 mix", ["-m", "script_pipeline.mix_audio",
                         "--run-dir", str(run)], obrigatorio=False)
+        if args.post_deblur or args.post_upscale:
+            cmd_post = ["-m", "script_pipeline.postprod_v2v", "--run-dir", str(run)]
+            if args.post_deblur:
+                cmd_post += ["--deblur", "--deblur-strength", str(args.post_deblur_strength)]
+            if args.post_upscale:
+                cmd_post += ["--upscale", "--upscale-strength", str(args.post_upscale_strength)]
+            passo("7b pos-producao", cmd_post, obrigatorio=False)
     if ate("final"):
         cmd_montagem = ["-m", "script_pipeline.assemble_final", "--run-dir", str(run)]
         if args.music_path:
