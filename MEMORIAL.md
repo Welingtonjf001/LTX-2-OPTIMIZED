@@ -6384,6 +6384,26 @@ Item 17 acrescentado em 2026-09-06, depois do comparativo GGUF/checkpoint
 do §3.62. Item 18 acrescentado em 2026-09-07, ideia de API hospedada pro
 enriquecimento (§3.66/§3.67).)*
 
+### P0 -- estado em 2026-09-14, para quem abrir uma sessão nova
+
+Tudo da auditoria de scripts (§3.85) está commitado (`a6e5941`). Nada rodando, servidores
+desligados. O que ficou com o usuário, em ordem:
+
+1. **Assistir uma cena inteira com o fluxo novo** (`run_decupagem --dialogue-framing auto
+   --ate final`, emoção de fala + TTS com cache + SyncNet + relatórios 8b/8c). Tudo foi
+   validado por partes, nunca numa cena montada do começo ao fim.
+2. **Decidir o motor dos planos de fala**: LTX + LatentSync (~15 min por 7 s) ou LongCat 1.5
+   (~42 min por 7 s, melhor em fala longa/hesitante, áudio 2 quadros fora). Hoje o padrão é
+   `ltx`; `longcat` é opt-in.
+3. **Offset −2 quadros do LongCat**: corrigir no mux (adiantar o áudio 80 ms) antes de usar
+   em produção. Não implementado.
+4. **Segunda RTX 3090** (analisado, não comprado): não acelera um clipe; em decupagem com fala
+   rodaria LTX e LongCat (ou TTS) em paralelo, ~40–50% menos tempo total. Exige despachante
+   por servidor em `render_shots`, tirar o `CUDA_VISIBLE_DEVICES=1`/`set_device(1)` fixos e
+   cuidar da RAM de 80 GB com dois offloads.
+5. **LoRAs do LTX**: nenhuma com ganho comprovado; `lora_ab.py` existe para testar MSR,
+   cameraman, cdrama-canny etc. um a um se o usuário quiser.
+
 ### P1 -- maior retorno, prontos para executar
 
 **1. Regerar os clipes da Lyra com TODOS os consertos de hoje combinados.**

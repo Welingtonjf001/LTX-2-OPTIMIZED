@@ -10,7 +10,9 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-13 (LoRAs de vídeo, MSR, cache de clipe, LongCat 1.5).
+Última verificação: 2026-09-14 (auditoria de scripts: SyncNet, TTS com cache, emoção de
+fala, LongCat na decupagem, A/B de LoRA, GGUF×bf16 do LongCat). Estado atual e decisões
+abertas: `MEMORIAL.md` §7 P0.
 
 ---
 
@@ -583,10 +585,13 @@ LongCat 772 s, SyncNet 9,43. ⚠️ O LongCat entrega o áudio **2 quadros (80 m
   wav2vec2, 20 passos, CFG 3 (94 min para 4 s).
 - ⚠️ **36 blocos em swap, não 25**: com 25 a VRAM transborda para a memória compartilhada
   do WDDM e o 1º passo passa de 18 min. `LONGCAT_BLOCKS_TO_SWAP` sobrepõe.
-- MEDIDO 2026-09-13 a 960x544: **57/101/125 quadros = 9/18/24 min** (~44/88/117 s/passo).
-  Sync nos closes do "O Primeiro Tour": +0,34 / +0,08 / +0,04, contra LTX + LatentSync
-  +0,38 / +0,17 / −0,29. Não superou o LTX em sync medido; atua melhor em fala curta
-  expressiva.
+- MEDIDO 2026-09-13 a 960x544: **57/101/125/177 quadros = 9/18/24/42 min** (~44/88/117/199
+  s/passo). **Sync pelo SyncNet** (LSE-C; os números de correlação antigos desta seção eram do
+  proxy, que errava): LongCat 8,86 / 7,89 / 9,43 / 7,3 contra LTX + LatentSync 7,04 / 8,54 /
+  9,73 / 4,38. Empatam em fala comum; **na fala longa e hesitante o LongCat vence** (7,3 × 4,38),
+  ao custo de ~3× o tempo.
+- **GGUF Q8 não ganha do bf16** (2026-09-14, 177 quadros): 2533 s / conf 7,28 contra 2558 s /
+  7,31 — com 36 blocos em swap o gargalo não é o tamanho do checkpoint. bf16 segue padrão.
 - ⚠️ O fp8 em `weights/LongCat-Video-Avatar-1.5/base_model_fp8` é **optimum-quanto**: o
   ComfyUI não carrega, e no caminho Python oficial mede 4h23min por passo.
 - Os "Windows fatal exception 0xc0000139" e `ConnectionResetError` no
