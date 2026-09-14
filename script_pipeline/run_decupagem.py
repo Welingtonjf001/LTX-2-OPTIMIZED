@@ -105,7 +105,7 @@ def main() -> int:
                          "flux-kontext = FLUX.1, ver MEMORIAL 3.48.")
     ap.add_argument("--recast", action="store_true",
                     help="deixa o emotion_director reescolher a VOZ de cada personagem")
-    ap.add_argument("--video-engine", default="ltx", choices=["ltx", "minimax"],
+    ap.add_argument("--video-engine", default="ltx", choices=["ltx", "minimax", "longcat"],
                     help="motor de VIDEO (nao confundir com --engine, que e o LLM de "
                          "estrutura). ltx = LTX 2.5, condicionado pela fala sintetizada "
                          "(TTS + lipsync + mix rodam normalmente). minimax = MiniMax H3 -- "
@@ -247,7 +247,11 @@ def main() -> int:
             cmd.append("--recast")
         passo("E emocao", cmd, obrigatorio=False)
 
-    if ate("tts") and not (run / "dialogue" / "lines.json").exists():
+    # Sempre roda: o synthesize_dialogue guarda chave por fala (texto + emocao + voz +
+    # motor) e so refaz o que mudou. VISTO 2026-09-13: pular quando lines.json existia
+    # fazia a emocao dirigida pelo [E] nunca chegar a voz ("Rode synthesize_dialogue de
+    # novo" ficava so no log).
+    if ate("tts"):
         cmd_tts = ["-m", "script_pipeline.synthesize_dialogue",
                   "--run-dir", str(run), "--language", args.language]
         # Sem --tts-engine (None), cai no default do proprio synthesize_dialogue.py
@@ -449,6 +453,19 @@ def main() -> int:
             cmd_montagem += ["--music-volume", str(args.music_volume)]
         if not passo("8 montagem", cmd_montagem):
             return 1
+        # Relatorios de continuidade (2026-09-13, auditoria de scripts). So MEDEM: nada e
+        # reescrito. Identidade do personagem entre clipes (ArcFace) e defeito temporal no
+        # filme montado (video_doctor, com deteccao de corte ligada -- as fronteiras entre
+        # planos nao viram falso positivo, MEMORIAL 3.36.1). O reparo continua manual,
+        # revisando as tiras antes (MEMORIAL 3.19).
+        passo("8b identidade", ["-m", "script_pipeline.clip_identity_audit",
+                                "--run-dir", str(run)], obrigatorio=False)
+        filme = run / "final" / "movie.mp4"
+        if filme.exists():
+            passo("8c doctor", [str(ROOT / "video_doctor.py"), "analyze", str(filme),
+                                "--plan", str(run / "final" / "doctor_plan.json"),
+                                "--previews", str(run / "final" / "doctor_previews")],
+                  obrigatorio=False)
         passo("9 verificacao", ["-m", "script_pipeline.verify_output",
                                 "--run-dir", str(run)], obrigatorio=False)
 

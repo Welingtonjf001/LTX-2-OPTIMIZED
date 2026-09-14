@@ -563,11 +563,18 @@ LTX (`script_pipeline/generate_storyboards.py`, mesmo bug, mesmo fix). Se o
 MiniMax H3 "morrer sem traceback" de novo num ponto específico e
 reproduzível, suspeitar do watchdog ANTES de suspeitar de crash nativo.
 
-## LongCat-Video-Avatar 1.5 — motor de fala testado, NÃO ligado na decupagem
+## LongCat-Video-Avatar 1.5 — motor dos planos de fala (`--video-engine longcat`)
 
 ComfyUI SEPARADO em `E:\Users\home\Documents\LongCat-Video\ComfyUI` (venv próprio,
 porta **8190**, WanVideoWrapper do Kijai). `longcat_video_backend.py` dirige por HTTP e
 disputa a MESMA 3090 — desligue o 8188 antes (`gpu_watchdog.free_port(8188)`).
+
+**Ligado na decupagem desde 2026-09-13** (`run_decupagem --video-engine longcat`, UI 7913):
+planos sem fala vão para o LTX, planos de fala para o LongCat; o `render_shots` faz os de
+ação primeiro e troca 8188 → 8190 sozinho uma vez. VALIDADO: wide no LTX 699 s + fala no
+LongCat 772 s, SyncNet 9,43. ⚠️ O LongCat entrega o áudio **2 quadros (80 ms) fora**
+(offset −2 constante no SyncNet). `LONGCAT_DIT_15` troca o checkpoint (GGUF Q8 em
+`diffusion_models/Avatar/`). Ver `MEMORIAL.md` §3.85.
 
 - **Padrão `--variant 1.5`**: `diffusion_models/Avatar/LongCat-Avatar-15_bf16` (31,7 GB,
   Kijai/WanVideo_comfy) + LoRA `LongCat-Avatar-15_dmd_distill_lora_rank128_bf16` (0,9, sem
@@ -678,6 +685,30 @@ nenhum motor de lip-sync salvou (−0,19 a +0,10). O close agora leva limite fí
 the head to the shoulders, mouth clearly visible, no hands or waist") e **nunca gesto de
 corpo**: LatentSync foi a +0,17 / +0,38. Se um close reprovar no sync, olhe o STILL antes do
 motor. Ver `MEMORIAL.md` §3.81.
+
+**Plano de fala: emoção sem ocupar a boca** (desde 2026-09-13). `EMOCAO_VISIVEL_FALA` troca
+"open smile"/"mouth wide" por olhos e sobrancelha, e o `video_prompt` de close perde gesto de
+corpo e riso. Sem isso o LTX fez uma fala `alegre` virar gargalhada (SyncNet 8,5 → 9,7 com o
+conserto). Ver `MEMORIAL.md` §3.85.
+
+**O TTS agora roda sempre e refaz só a fala que mudou** (`dialogue/<id>.key`: texto, emoção,
+tomada, motor). Antes pulava quando `lines.json` existia e a emoção dirigida nunca chegava à
+voz. ⚠️ Tomada emotiva muda a DURAÇÃO: a "confusa" levou uma fala de 3,97 s para 7,09 s (51%
+silêncio) — o plano cresce junto e o SyncNet cai por falta de trecho falado, não por sync ruim.
+
+**Sincronia se mede com SyncNet, não com o proxy.** `script_pipeline/syncnet_audit.py` usa o
+avaliador do próprio LatentSync (`LatentSync/.conda_env`, `syncnet_v2.model`); roda dentro do
+`lipsync_scenes` e decide o resumo. LSE-C ≥ 3 = ok; offset em quadros a 25 fps. O
+`lipsync_audit` (correlação boca × volume) reprovou 3 planos que o SyncNet aprovou com 4,4–9,7 —
+não decida por ele. `--no-syncnet` desliga.
+
+**Relatórios depois da montagem (só medem, nada é reescrito):** `8b identidade`
+(`clip_identity_audit`, ArcFace nos clipes contra o still e o personagem, limiar 0,35) e
+`8c doctor` (`video_doctor analyze` no `final/movie.mp4`, detecção de corte ligada). A/B de
+LoRA reprodutível: `python -m script_pipeline.lora_ab --run-dir DIR --shots 3 --config
+"bhm:better-human-motion:0.6"` (distilled por padrão; saída em `<run>/lora_ab/`).
+
+Scripts antigos sem referência saíram da raiz para `_arquivo/` (ver `_arquivo/LEIAME.md`).
 
 **O `--cache-none` é necessário para a passada de VÍDEO caber na placa.** Sem
 ele o mesmo clipe de 145 frames encalha a 24,2 GB de 24,5; com ele passa da carga

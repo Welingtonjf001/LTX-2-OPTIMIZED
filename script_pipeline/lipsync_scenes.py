@@ -77,6 +77,8 @@ def main(argv=None) -> int:
     parser.add_argument("--engine", default="auto", choices=["auto", "latentsync", "wav2lip", "dubit", "none"],
                         help="dubit = IC-LoRA DubIt do LTX refaz a boca sobre a fala (ver "
                              "ltx25_backend.generate_v2v); none = nao sincroniza, mantem o clipe do LTX")
+    parser.add_argument("--no-syncnet", action="store_true",
+                        help="nao medir com o SyncNet do LatentSync (fica so o proxy de correlacao)")
     parser.add_argument("--dubit-strength", type=float, default=1.0, help="forca do LoRA DubIt no modelo")
     parser.add_argument("--dubit-guide-strength", type=float, default=1.0,
                         help="quanto o clipe original prende a imagem (1 = fiel, menos = mais livre)")
@@ -159,6 +161,23 @@ def main(argv=None) -> int:
         except Exception as e:
             veredito = {"score": None, "faces_detected": 0, "frames_sampled": 0,
                         "motivo": f"auditoria falhou: {type(e).__name__}: {e}"}
+        # SyncNet (LSE-C/LSE-D), 2026-09-13: a medida padrao da area, com o avaliador que o
+        # LatentSync ja traz. O proxy acima mede mal rosto a 3/4 e fala curta expressiva --
+        # MEDIDO no mesmo dia: shot005 do "O Primeiro Tour" deu -0,29 no proxy e conf 8,5
+        # no SyncNet (boa sincronia). Registra os dois; o SyncNet e o que decide.
+        if not args.no_syncnet:
+            try:
+                from script_pipeline.syncnet_audit import LIMIAR_CONF, syncnet_score
+                sn = syncnet_score(final_video, clip["audio_path"])
+                veredito["syncnet"] = sn
+                if sn.get("conf") is not None:
+                    marca_sn = "OK" if sn["conf"] >= LIMIAR_CONF else "FRACO"
+                    log(f"  SyncNet: conf {sn['conf']:.2f} ({marca_sn}), dist {sn['min_dist']:.2f}, "
+                        f"offset {sn['av_offset']} quadro(s)")
+                else:
+                    log(f"  SyncNet: nao mediu ({sn.get('motivo')})")
+            except Exception as e:
+                veredito["syncnet"] = {"conf": None, "motivo": f"{type(e).__name__}: {e}"}
         audit_report[clip["id"]] = veredito
         if veredito["score"] is None:
             log(f"  auditoria de sync: nao foi possivel medir ({veredito['motivo']}).")
@@ -184,11 +203,22 @@ def main(argv=None) -> int:
     (lipsync_dir / "lipsync_audit.json").write_text(
         json.dumps(audit_report, ensure_ascii=False, indent=2), encoding="utf-8",
     )
+    # O resumo decide pelo SyncNet quando ele mediu. MEDIDO 2026-09-13 (teste_auditoria):
+    # o proxy marcou os 3 planos como suspeitos (0,21 / 0,03 / -0,16) e o SyncNet aprovou
+    # os 3 (conf 8,95 / 4,38 / 9,73, offset 0) -- o de -0,16 era o de MELHOR sincronia.
+    from script_pipeline.syncnet_audit import LIMIAR_CONF
+    confs = [v["syncnet"]["conf"] for v in audit_report.values()
+             if (v.get("syncnet") or {}).get("conf") is not None]
+    if confs:
+        fracos = sum(1 for c in confs if c < LIMIAR_CONF)
+        log(f"lipsync_scenes: SyncNet -- {len(confs)}/{len(audit_report)} clipe(s) medido(s), "
+            f"{fracos} fraco(s) (conf < {LIMIAR_CONF}). Relatorio: {lipsync_dir / 'lipsync_audit.json'}")
     medidos = [v["score"] for v in audit_report.values() if v["score"] is not None]
     suspeitos = sum(1 for s in medidos if s < 0.3)
-    if audit_report:
-        log(f"lipsync_scenes: auditoria de sync -- {len(medidos)}/{len(audit_report)} clipe(s) medido(s), "
-            f"{suspeitos} suspeito(s) (correlacao < 0.3). Relatorio: {lipsync_dir / 'lipsync_audit.json'}")
+    if audit_report and not confs:
+        log(f"lipsync_scenes: auditoria de sync (proxy, sem SyncNet) -- {len(medidos)}/{len(audit_report)} "
+            f"clipe(s) medido(s), {suspeitos} suspeito(s) (correlacao < 0.3). "
+            f"Relatorio: {lipsync_dir / 'lipsync_audit.json'}")
     ok_count = sum(1 for c in synced_manifest if c.get("final_video_path"))
     log(f"lipsync_scenes: {ok_count}/{len(clips)} clipe(s) com video final disponivel "
         f"({sum(1 for c in synced_manifest if c.get('lipsync_applied'))} com lip-sync aplicado).")

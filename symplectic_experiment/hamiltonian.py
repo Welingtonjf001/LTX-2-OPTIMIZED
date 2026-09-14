@@ -65,10 +65,17 @@ class SymplecticIntegrator(nn.Module):
         potencial fraco) até 104% (24 passos, potencial rígido), sendo ~6% na
         configuração usada por train_toy.py (dt=0,08, 24 frames).
         """
+        # BUGFIX 2026-09-14: `create_graph=q.requires_grad` perdia o gradiente dos
+        # parâmetros de V no PRIMEIRO meio-passo de cada rollout, quando q vem dos
+        # dados (sem grad). O que decide se o grafo é preciso é estar treinando,
+        # não q ter grad. Afetou train_hybrid/train_dissipative anteriores a esta
+        # data em 1 de 2K avaliações de força por rollout -- viés CONTRA o
+        # hamiltoniano, então não infla o resultado positivo registrado.
+        treino = torch.is_grad_enabled()
         with torch.enable_grad():
             q_g = q if q.requires_grad else q.detach().requires_grad_(True)
             v_val = self.potential(q_g, ctx).sum()
-            (grad_v,) = torch.autograd.grad(v_val, q_g, create_graph=q.requires_grad)
+            (grad_v,) = torch.autograd.grad(v_val, q_g, create_graph=treino)
         return grad_v
 
     def step(self, q: torch.Tensor, p: torch.Tensor, ctx: torch.Tensor, dt: float):

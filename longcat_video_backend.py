@@ -57,7 +57,10 @@ WAV2VEC_MODEL = "wav2vec2-chinese-base_fp16.safetensors"
 # exemplo do proprio wrapper para LoRA de destilacao: scheduler longcat_distill_euler,
 # 12 passos, shift 12, CFG 1, LoRA 0,9 sem merge. `LONGCAT_VARIANT=1.0` volta ao antigo.
 VARIANT = os.environ.get("LONGCAT_VARIANT", "1.5")
-DIT_MODEL_15 = "Avatar\\LongCat-Avatar-15_bf16.safetensors"
+# `LONGCAT_DIT_15` troca o checkpoint do 1.5 -- ex. o GGUF da comunidade
+# "Avatar\\LongCat-Avatar-15_comfy-Q8_0.gguf" (o WanVideoModelLoader lista diffusion_models
+# e unet_gguf; com GGUF o wrapper desliga o merge de LoRA sozinho).
+DIT_MODEL_15 = os.environ.get("LONGCAT_DIT_15", "Avatar\\LongCat-Avatar-15_bf16.safetensors")
 DMD_LORA_15 = "LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors"
 WHISPER_MODEL = "HuMo\\whisper_large_v3_encoder_fp16.safetensors"  # nome como o /object_info lista
 DEFAULTS = {"1.0": {"steps": 20, "cfg": 3.0, "scheduler": "unipc", "shift": 5.0},

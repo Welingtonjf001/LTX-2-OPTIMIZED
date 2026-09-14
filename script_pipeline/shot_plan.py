@@ -502,9 +502,63 @@ def emocao_visivel(emocao: str | None) -> str:
     return ""
 
 
+# Emocao em plano de FALA: a versao da EMOCAO_VISIVEL que nao ocupa a boca. MEDIDO
+# 2026-09-13 (teste_close_v2, shot005): "alegre" -> "open smile, light quick movements"
+# + acao "shakes her head, amused" = o LTX fez a personagem GARGALHAR a fala inteira e o
+# lip-sync mediu -0,29 (a boca mexia pelo riso, nao pela fala). Aqui a emocao vai para
+# olhos, sobrancelha e postura; a boca fica livre para articular.
+EMOCAO_VISIVEL_FALA = {
+    "raiva":                    "brow furrowed, hard steady stare, speaking clearly through tension",
+    "surpresa":                 "eyebrows lifting, eyes widening, speaking clearly",
+    "desanimo":                 "gaze falling, shoulders low, speaking slowly",
+    "angustia":                 "face tight, worried eyes, speaking clearly",
+    "tristeza":                 "eyes lowered and glistening, speaking softly",
+    "desapontamento":           "gaze dropping away, speaking quietly",
+    "espontanea_entusiasmada":  "eyes bright, eyebrows lifted, speaking clearly and warmly",
+    "com_medo":                 "eyes wide and darting, speaking fast but clearly",
+    "alegre":                   "smiling eyes, a light closed-lip smile between words, speaking clearly, not laughing",
+    "apaixonada":               "softened gaze held steady, speaking gently",
+    "sensual":                  "gaze held, relaxed shoulders, speaking slowly",
+    "desdem":                   "chin lifted, cool stare, speaking flatly",
+    "confusa":                  "brow knitting, head tilting slightly, speaking hesitantly",
+    "excitada":                 "eyes bright, leaning in, speaking clearly and quickly",
+    "calma":                    "steady gaze, composed, speaking evenly",
+    "neutra":                   "",
+    "grito":                    "neck tensed, eyes intense, shouting the words clearly",
+}
+
+# Gestos que em CLOSE saem do quadro ou puxam o modelo a abrir o plano / cobrir a boca.
+# VISTO 2026-09-13: "arms crossed" seguia no video_prompt do close depois de sair do still.
+_GESTO_DE_CORPO = re.compile(
+    r"(,?\s*(?:with\s+)?(?:his|her|their)?\s*(?:arms?\s+crossed|crosses\s+(?:his|her|their)\s+arms"
+    r"|hands?\s+on\s+(?:his|her|their)\s+hips|shrugs?|waves?\s+(?:his|her|their)?\s*hands?"
+    r"|gestures?\s+with\s+(?:his|her|their)\s+hands?|covers?\s+(?:his|her|their)\s+mouth"
+    r"|shakes?\s+(?:his|her|their)\s+head|nods?|laughs?|laughing|giggles?|chuckles?))",
+    re.IGNORECASE)
+
+
+def _sem_gesto_de_corpo(texto: str) -> str:
+    limpo = _GESTO_DE_CORPO.sub("", texto or "")
+    limpo = re.sub(r"\s{2,}", " ", re.sub(r"\s+([,.])", r"\1", limpo)).strip(" ,")
+    return limpo
+
+
+def emocao_visivel_fala(emocao: str | None) -> str:
+    t = (emocao or "").strip().lower()
+    if not t:
+        return ""
+    if t in EMOCAO_VISIVEL_FALA:
+        return EMOCAO_VISIVEL_FALA[t]
+    for slug, visual in EMOCAO_VISIVEL_FALA.items():
+        if slug in t:
+            return visual
+    return ""
+
+
 def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
                   quote: str | None, subject: str = "", fallback: str = "",
-                  emotion: str | None = None) -> str:
+                  emotion: str | None = None, framing: str = "",
+                  speaking: bool = False) -> str:
     """Prompt do VÍDEO. Descreve MOVIMENTO e ação -- nunca enquadramento, que
     já está fixado pela imagem de condicionamento.
 
@@ -519,12 +573,19 @@ def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
     # sobre quem está em cena nem o que acontece, o que o LTX não sustenta.
     # Movimento vazio é correto para "câmera travada", mas ação vazia não é.
     corpo = (action or "").strip().rstrip(".") or (fallback or "").strip().rstrip(".")
+    if framing in ("close", "extreme_close"):
+        # Close: gesto de corpo sai do quadro ou puxa o modelo a abrir o plano.
+        corpo = _sem_gesto_de_corpo(corpo)
+    elif speaking:
+        # Fala em qualquer plano: riso/risada ocupa a boca e derruba o lip-sync.
+        corpo = re.sub(r",?\s*\b(laugh(?:s|ing)?|giggl(?:es|ing)|chuckl(?:es|ing))\b", "",
+                       corpo, flags=re.IGNORECASE).strip(" ,")
     if not corpo:
         corpo = (f"{subject} stands in the scene, subtle natural movement"
                  if subject else "the scene continues, subtle natural movement")
     partes = [corpo]
     # Logo depois da acao e antes do descritor: e desempenho, nao aparencia.
-    visivel = emocao_visivel(emotion)
+    visivel = emocao_visivel_fala(emotion) if speaking else emocao_visivel(emotion)
     if visivel:
         partes.append(visivel)
     if quote:
@@ -766,7 +827,7 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
                 action=acao, movement=movimento, descriptor=descriptors.get(sujeito, ""),
                 look=look, quote=fala if (include_quotes and fala) else None,
                 subject=sujeito, fallback=scene.get("action_text", ""),
-                emotion=emocao_da_fala),
+                emotion=emocao_da_fala, framing=enquadre, speaking=bool(fala)),
             # Ingredientes crus, guardados so para o enriquecimento de camera
             # opcional (enrich_camera_style) poder RECONSTRUIR os dois prompts
             # acima depois de trocar movement/look -- sem isto ele teria que
@@ -1093,7 +1154,8 @@ def enrich_camera_style(plan: dict, *, engine: str, log=print) -> int:
                     action=sh.get("beat", ""), movement=sh["movement"],
                     descriptor=sh.get("descriptor", ""), look=look_efetivo,
                     quote=sh.get("quote"), subject=sh["subject"],
-                    fallback=sh.get("fallback", ""), emotion=sh.get("emotion"))
+                    fallback=sh.get("fallback", ""), emotion=sh.get("emotion"),
+                    framing=sh["framing"], speaking=sh.get("line_index") is not None)
     log(f"[camera_style] {total_mudados} plano(s) com camera/luz refinada pelo LLM "
         f"(de {sum(len(v) for v in por_cena.values())} no total).")
     return total_mudados

@@ -114,7 +114,7 @@ def main() -> int:
     ap.add_argument("--no-reference", action="store_true")
     # Ver render_shots.py: sem condicionamento o LTX inventa voz propria.
     ap.add_argument("--no-audio-conditioning", action="store_true")
-    ap.add_argument("--engine", default="ltx", choices=["ltx", "minimax"],
+    ap.add_argument("--engine", default="ltx", choices=["ltx", "minimax", "longcat"],
                     help="motor de video. ltx = LTX 2.5 via ComfyUI (8188), condicionado "
                          "pela fala sintetizada (TTS). minimax = MiniMax H3 (ComfyUI "
                          "separado, 8189) -- fala e lip-sync NATIVOS a partir do texto "

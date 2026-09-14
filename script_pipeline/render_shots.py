@@ -319,6 +319,10 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     import script_pipeline.generate_storyboards as sb
     if engine == "minimax":
         import minimax_h3_backend
+    # LongCat (2026-09-13): motor SO de planos de fala; os planos sem fala do mesmo run
+    # seguem no LTX. `engine="longcat"` = fala no LongCat, acao no LTX.
+    if engine == "longcat":
+        import longcat_video_backend
 
     stills_dir = out_dir / "stills"
     clips_dir = out_dir / "clips"
@@ -396,6 +400,11 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # aqui faria o plano 2 escrever por cima do still do plano 0.
     escolhidos = set(parse_indices(only_shots, len(todos)))
     shots = [(i, s) for i, s in enumerate(todos) if i in escolhidos]
+    if engine == "longcat" and not stills_only:
+        # LTX (8188) e LongCat (8190) disputam a mesma 3090: todos os planos SEM fala
+        # primeiro, depois os de fala, para trocar de servidor uma vez so. O indice
+        # original viaja junto, entao still/clipe/manifesto nao mudam de nome.
+        shots.sort(key=lambda par: (par[1].get("line_index") is not None, par[0]))
     if only_shots and len(shots) != len(todos):
         log(f"[render] {len(shots)} de {len(todos)} plano(s): "
             f"{sorted(i for i, _ in shots)}")
@@ -501,6 +510,9 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # 3 clipes de fala antigos, de plano medio, foram reaproveitados. Invalida uma vez
         # o cache de corridas antigas (chave nova), o que e o comportamento certo.
         chave += f"|still={_audio_key(str(still))}"
+        if engine == "longcat" and wav_cond:
+            # Mesmo plano, outro motor: sem isto um clipe LTX existente seria reaproveitado.
+            chave += f"|longcat={os.environ.get('LONGCAT_VARIANT', '1.5')}"
         # LoRAs de video e IC-LoRA (2026-09-12) mudam o CLIPE do mesmo jeito que trocar o
         # audio -- entram na chave, senao ligar um LoRA reaproveitaria o clipe velho em
         # silencio. So quando ligados: corrida sem eles mantem a chave antiga e o cache.
@@ -588,7 +600,26 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     duration_seconds=shot["frames"] / fps,
                     seed=seed + i, turbo=minimax_turbo,
                     log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
+            elif engine == "longcat" and wav_cond:
+                # Plano de FALA no LongCat-Avatar 1.5 (MEMORIAL 3.83): boca gerada junto com
+                # o video a partir do wav do TTS -- o lip-sync depois e opcional. Os planos
+                # sem fala vieram antes (ordenacao acima) no LTX; aqui a 8188 sai do ar uma
+                # vez. O modelo e treinado a 25 fps com quadros 4k+1; a montagem normaliza
+                # para 24 fps.
+                if sb.comfy_is_up("http://127.0.0.1:8188"):
+                    log("[render] motor=longcat: derrubando o ComfyUI do LTX 2.5 (8188) antes do LongCat (8190).")
+                    sb.stop_comfyui(8188, log=log)
+                nf = max(17, int(round(shot["frames"] / fps * 25)))
+                nf = ((nf - 1 + 3) // 4) * 4 + 1
+                longcat_video_backend.generate(
+                    shot["video_prompt"], str(clip_path), image_path=str(still),
+                    audio_path=wav_cond, num_frames=nf, seed=seed + i, fps=25.0,
+                    log_cb=lambda m: log(f"    {m}"))
             else:
+                if engine == "longcat" and not sb.comfy_is_up("http://127.0.0.1:8188"):
+                    longcat_video_backend.stop_server(log_cb=log)
+                    os.environ["LTX_COMFY_CACHE_NONE"] = "1"
+                    sb.ensure_comfyui_running("http://127.0.0.1:8188", log=log)
                 ltx25_backend.generate(
                     prompt_video, str(clip_path),
                     width=width, height=height, num_frames=shot["frames"],
@@ -609,7 +640,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     # proprio render_shots.
                     log_cb=lambda m: log(f"    [ltx25] {m}"), timeout=2400)
             log(f"  clipe OK em {time.time()-t0:.0f}s -> {clip_path.name}"
-                f"{' (som condicionado pela fala)' if (engine != 'minimax' and wav_cond) else ''}"
+                f"{' (boca gerada pelo LongCat 1.5)' if (engine == 'longcat' and wav_cond) else ''}"
+                f"{' (som condicionado pela fala)' if (engine == 'ltx' and wav_cond) else ''}"
                 f"{' (fala nativa do MiniMax H3)' if engine == 'minimax' else ''}")
             if "freeze" in (shot.get("post_effects") or []):
                 _apply_freeze(clip_path, log=log)

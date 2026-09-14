@@ -1390,7 +1390,7 @@ def build() -> None:
                              "nesta cadeia ate agora. Trocar o motor REFAZ os stills (ele entra "
                              "na chave de cache).")
                     motor_video = gr.Dropdown(
-                        choices=["ltx", "minimax"], value="ltx", scale=1,
+                        choices=["ltx", "minimax", "longcat"], value="ltx", scale=1,
                         label="Motor de video",
                         info="ltx: LTX 2.5, fala vem do TTS (estagios lipsync/mix rodam normal). "
                              "minimax: MiniMax H3 -- fala e lip-sync NATIVOS a partir do texto "

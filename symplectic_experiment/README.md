@@ -56,6 +56,237 @@ difusão destilada" — não uma reescrita direta do backbone existente.
   estocástico), CPU-only, poucos parâmetros — feito para rodar em minutos e
   servir de sanity check, não como benchmark de qualidade.
 
+## RESULTADO (2026-09-14): com dissipação, a vantagem da estrutura DESAPARECE
+
+[`train_dissipative.py`](train_dissipative.py), RTX 4070 (Ubuntu), 20 sementes, 2000
+iterações, mesmo protocolo do `train_hybrid.py`: 256 trajetórias de treino,
+16 novas de teste com 100 passos, parâmetros pareados (~4,5k). O disco agora
+tem arrasto linear: a velocidade decai exp(−γ·dt) por passo, com γ = 0,15.
+
+| modelo | previsão válida | desvio \|v\| (mediana) | treino | divergências |
+|---|---|---|---|---|
+| hamiltoniano conservativo | 18,6 ± 3,2 | 0,336 | 86s | 0/320 |
+| **baseline sem física** | **35,7 ± 5,9** | **0,030** | **19s** | 0/320 |
+| port-hamiltoniano (D aprendido) | 32,3 ± 11,0 | 0,041 | 95s | 0/320 |
+| piso congelado / inercial | 1,2 / 9,4 | — | — | — |
+
+Comparações pareadas (troca de sinal exata, confirmada por t pareado e Wilcoxon):
+
+| par | previsão válida | desvio \|v\| |
+|---|---|---|
+| hamiltoniano vs baseline | baseline melhor, −17,1 passos, 0/20, p < 0,0001 | baseline melhor, 0/20, p < 0,0001 |
+| port-hamiltoniano vs hamiltoniano | port melhor, +13,8 passos, 20/20, p < 0,0001 | port melhor, 20/20, p < 0,0001 |
+| **port-hamiltoniano vs baseline** | **sem efeito**: −3,3 passos, 8/20, p = 0,30 | **baseline melhor**: 8/20, p ≈ 0,03 |
+
+Leitura:
+1. **A estrutura conservativa pura quebra com perda de energia.** Ela não tem
+   como representar a desaceleração: desvio de velocidade 11× o do baseline.
+2. **O termo dissipativo conserta a quebra** (+13,8 passos em 20/20 sementes), o
+   que confirma a reformulação: impor conservação num sistema dissipativo é viés
+   errado.
+3. **Mas não sobra vantagem sobre o aluno sem estrutura.** O port-hamiltoniano
+   empata na previsão válida, acompanha pior a velocidade, custa 5× mais para
+   treinar e varia muito mais entre sementes (±11,0 contra ±5,9).
+4. **γ aprendido superestima o atrito de forma sistemática:** média 0,192 contra
+   0,15 verdadeiro, acima em todas as 20 sementes (0,157–0,278). As sementes com
+   γ mais alto foram as piores (15,9 e 18,0 passos com γ entre 0,21 e 0,28).
+
+**Somando com o caso conservativo:** a estrutura rendeu +29% (p = 0,005) no
+sistema mais favorável a ela, e deixou de render assim que o sistema passou a
+perder energia, que é o regime comum em vídeo. Sinal negativo para a tese nesta
+escala.
+
+**Reteste com o integrador corrigido (terceiro bug, abaixo): o empate se confirma.**
+A corrida original usou o integrador em que o primeiro meio-passo de cada
+rollout não propagava gradiente para V, um viés contra os modelos hamiltonianos.
+Repetida com a correção, só port-hamiltoniano vs baseline, 20 sementes:
+
+| | antes da correção | integrador corrigido |
+|---|---|---|
+| port-hamiltoniano, previsão válida | 32,3 ± 11,0 | **34,1 ± 11,1** |
+| baseline, previsão válida | 35,7 ± 5,9 | 35,7 ± 5,9 (idêntico: corrida determinística) |
+| port vs baseline, previsão válida | p = 0,30 | **p = 0,62**, 9/20 sementes |
+| port vs baseline, desvio de \|v\| | baseline melhor, p ≈ 0,03 | baseline melhor, **p ≈ 0,02** (permutação 0,019) |
+| γ aprendido (verdadeiro 0,15) | 0,192 | 0,191 |
+
+A correção subiu o port-hamiltoniano em 1,8 passo, na direção prevista, sem
+tirar do empate. O baseline continua melhor em velocidade, e o viés de atrito
+não mudou. **Conclusão robusta: com dissipação, a estrutura não dá vantagem
+sobre um aluno igualmente pequeno sem física.**
+
+## CONCLUÍDO (2026-09-14): primeiro teste em vídeo real, no Ubuntu (RTX 4070). Sem ganho da estrutura
+
+**Validação cruzada por famílias derrubou o resultado preliminar (6/6, p = 0,031)
+descrito mais abaixo.** 5 dobras, cada família de conteúdo testada uma vez, 3
+sementes por dobra, port-hamiltoniano vs baseline, MSE latente em 8 passos
+(~2,7 s). Agregado com [`agregar_cv.py`](agregar_cv.py):
+
+| dobra | família de teste | seqs | port-hamiltoniano | baseline | port vs baseline |
+|---|---|---|---|---|---|
+| 0 | 20260907_ltx_distilled + gguf2 | 76 | **0,695** | 0,766 | **+9,2%**, 3/3 |
+| 1 | 20260912_primeiro_tour_msr | 39 | 0,660 | **0,619** | **−6,7%**, 0/3 |
+| 2 | 5 corridas duplicadas 20260913_* | 30 | 0,702 (não bate o piso) | **0,637** | **−10,2%**, 0/3 |
+| 3 | palácio + lyra + rt_infantil + teste_qualidade | 19 | 1,022 | 1,012 | −1,0%, 1/3 |
+| 4 | beatriz_lucas + meili | 18 | **1,001** | 1,128 | **+11,2%**, 3/3 |
+
+**Pares (dobra, semente): port melhor em 7/15, p = 0,44. Dobras: 2/5, p = 0,69.
+Nenhuma vantagem geral.** O ganho aparece em algumas famílias e some ou se inverte
+em outras. A corrida preliminar testou justamente beatriz_lucas, lyra e
+teste_qualidade, e beatriz_lucas volta a favorecer o port na dobra 4.
+
+**Bug no agregador, corrigido antes do número final:** a primeira versão excluía a
+dobra quando QUALQUER modelo não batia o piso. Ela descartou a dobra 2, onde o
+port falhou e o baseline não: viés de seleção a favor de quem falhou. Com essa
+regra o agregado dava 7/12, p = 0,13. Agora a dobra só sai se NENHUM dos dois
+bate o piso; se só um falha, conta como derrota dele. Com isso: 7/15, p = 0,44.
+
+**Conclusão da linha de pesquisa, nesta escala (~332k parâmetros, 193 clipes):**
+
+| sistema | estrutura hamiltoniana vs aluno igualmente pequeno sem física |
+|---|---|
+| brinquedo conservativo | **ajuda**: +29% de previsão válida, p = 0,005 |
+| brinquedo dissipativo | conservativo quebra; port-hamiltoniano **empata** (p = 0,62) e custa 5× |
+| latentes reais do LTX 2.5 | **não ajuda**: validação cruzada nula (p = 0,44), e em imagem o ranking nem batia com o latente |
+
+A estrutura só rendeu no caso mais favorável a ela. No regime que o vídeo real
+ocupa (perda de energia, cortes, conteúdo aberto) ela não superou um aluno do
+mesmo tamanho sem restrições. A tese continua testável em escala maior ou com
+outro estado, mas **não há evidência a favor dela aqui**.
+
+Lições de método, todas medidas nesta linha:
+- MSE latente premia previsão média; o ranking não bateu com o PSNR em imagem.
+- Um conjunto de teste fixo pequeno produziu um "6/6, p = 0,031" que não
+  generalizou.
+- Corridas diferentes continham o mesmo conteúdo (similaridade 1,000); dividir
+  por corrida vaza.
+- Guardas de validade precisam ser simétricas, senão viram viés de seleção.
+
+## Detalhes do teste em vídeo real (passos 0 a 3)
+
+Máquina `100.99.13.105`, pasta `~/symplectic/vae_real/`. Nada disto usa a 3090
+de produção.
+
+**Passo 0: o VAE do LTX 2.5 roda fora do Windows. Passou.** Código do núcleo do
+ComfyUI deste repositório (142 MB, sem custom nodes), Python 3.13, torch
+2.11+cu128. [`vae_roundtrip.py`](vae_roundtrip.py) num clipe do LTX 2.5
+(960x544, 121 quadros):
+
+| medida | valor |
+|---|---|
+| latente | `(1, 128, 16, 17, 30)`: 128 canais, compressão temporal 8, espacial 32 |
+| encode / decode | 5,2 s / 28,7 s |
+| pico de VRAM | 5,2 GB |
+| PSNR da reconstrução | **31,2 dB** médio (33,4 no 1º quadro, 27,9 no último, mínimo 26,8) |
+
+Os 31,2 dB são a **régua**: nenhum preditor avaliado pelo decoder congelado
+passa disso. O clipe de origem já tinha passado por este decoder e por h264, então
+o número mede a perda de uma nova ida e volta.
+
+Armadilha encontrada: chamar o VAE fora de `torch.inference_mode()` quebra o
+decode em blocos com `Inplace update to inference tensor outside InferenceMode`.
+O ComfyUI executa todo node dentro desse modo. O encode passou e só o decode
+quebrou.
+
+**Passo 1: dados. Concluído.** [`extract_latents.py`](extract_latents.py) nos 193
+clipes do LTX 2.5 em 960x544 (21.249 quadros): **193 latentes, 2.632 passos de
+dinâmica, 16 corridas, 353 MB, zero falhas**, em 20 min. O 1º quadro latente
+(causal) é separado da sequência de dinâmica.
+
+**Achado: dividir por corrida vazava conteúdo duplicado.** Similaridade de
+cosseno do 1º latente de dinâmica (reduzido a 4x8); referência: mediana 0,37
+dentro da mesma corrida, 0,19 entre corridas.
+- Cinco corridas `20260913_*` (msr_g03, msr_g05, distilled_close, close_v2,
+  webui_loras) são **o mesmo plano de 6 tomadas**: mesma lista de quadros por
+  plano e similaridade **1,000** entre corridas.
+- `palacio_esmeralda_v6_ltx` × `teste_decupagem_w4a8`: **0,989** (stills
+  compartilhados).
+- Eu suspeitava das duas `20260907_ltx_*` (mesmo roteiro, variantes diferentes)
+  e **errei**: máxima 0,856, nenhum par acima de 0,95. Relacionadas, mas não
+  cópias.
+
+A divisão treino/teste passou a ser por **família de conteúdo**: união de
+corridas com similaridade máxima acima de 0,8. É conservador de propósito e une
+também as `20260907_ltx_*` e o `_lora_ic_test_palacio` (0,861).
+
+**Passo 2: preditor.** [`train_latent_dynamics.py`](train_latent_dynamics.py):
+baseline convolucional com atalho inercial vs hamiltoniano (V como campo escalar
+convolucional, força −∇V) vs port-hamiltoniano, com parâmetros pareados (~332k),
+pisos congelado e linear, e teste pareado por semente.
+
+**Passo 3: régua em imagem.** [`decode_predictions.py`](decode_predictions.py)
+decodifica os latentes previstos, separa o erro do preditor da perda do VAE e
+monta vídeo lado a lado com os pisos.
+
+### Resultado preliminar em latentes reais (`dinamica_v1`, 2026-09-14)
+
+182 sequências com pelo menos 5 passos (2.588 passos). Contexto de 2 latentes,
+treino com rollout de 3 passos e avaliação de 8 (~2,7 s). 6 sementes, 3.000
+iterações, parâmetros pareados (~332k). Integrador já corrigido (terceiro bug,
+abaixo).
+
+| modelo | MSE latente normalizado (passos 1..8) | vs piso congelado | α aprendido | treino |
+|---|---|---|---|---|
+| **port-hamiltoniano** | **0,811 ± 0,023** | **0,71×** | 0,045 | 58s |
+| baseline sem física | 0,870 ± 0,012 | 0,77× | 0,028 | 17s |
+| hamiltoniano conservativo | 1,063 ± 0,035 | 0,94×, **reprovado** | 0,032 | 56s |
+| piso congelado | 1,136 | — | — | — |
+| piso linear | 9,648 | — | — | — |
+
+- **Port-hamiltoniano vs baseline: −0,059 de MSE (−6,8%) em 6 de 6 sementes,
+  sem sobreposição** (0,771–0,841 contra 0,852–0,883). Troca de sinal p = 0,031,
+  que é o **menor p possível** com 6 sementes.
+- **O conservativo repete o padrão do brinquedo dissipativo:** acompanha no curto
+  prazo e diverge no longo (1,70 contra 1,57 do piso congelado no passo 8). O
+  amortecimento aprendido é o que estabiliza.
+- **O α de 0,03 a 0,05** confirma que quase nada da "velocidade" latente
+  persiste a 1/3 s por passo, coerente com o piso congelado ser 8× melhor que o
+  linear.
+
+**Limites e um bug na divisão:**
+1. **Bug:** as listas de treino e teste comparavam o nome da corrida com o nome
+   da família. Famílias unidas nunca entravam no teste. O teste real teve **13
+   sequências de 3 famílias** (beatriz_lucas, lyra, teste_qualidade_20260912),
+   não as 4 impressas no log. **Não houve vazamento:** todas as famílias unidas
+   ficaram no treino. Corrigido em `dividir`.
+2. **Variância de conteúdo não medida.** As sementes variam só o treino; o teste
+   é fixo e pequeno. O efeito pode ser específico desses 13 clipes. Próximo
+   passo: validação cruzada por famílias (`--n-folds`).
+3. **Em imagem, o ranking do latente NÃO se confirmou nas amostras decodificadas.**
+   `decode_predictions.py`, semente 0, 2 sequências de teste (beatriz_lucas,
+   planos 0 e 1), 8 latentes previstos (2,7 s). PSNR contra o latente real
+   decodificado:
+
+   | | seq 0 | seq 1 |
+   |---|---|---|
+   | piso congelado | **15,55** | 14,01 |
+   | baseline | 13,85 | **15,43** |
+   | port-hamiltoniano | 13,48 | 14,42 |
+   | hamiltoniano | 12,98 | 14,19 |
+   | piso linear | 10,98 | 11,62 |
+   | teto (VAE vs original) | 29,0 | 33,5 |
+
+   O baseline supera o port-hamiltoniano nas duas sequências, e na seq 0 o
+   congelado supera todos os modelos. Tudo fica em 13–15 dB, perto do nível de
+   imagens sem relação: **a 2,7 s de horizonte nenhum preditor gera vídeo útil**,
+   e as diferenças são entre modos de falhar. Explicação provável: o MSE sobre
+   latente normalizado pesa os 128 canais igualmente e premia previsões "médias",
+   que decodificam borradas ou erradas. A amostra é fraca (2 sequências, 1
+   semente, 1 família), mas basta para **não** afirmar ganho da estrutura em vídeo
+   real só pelo MSE latente. É a mesma armadilha do MEMORIAL §3.18: métrica
+   plausível sem inspeção visual. Para decidir, a métrica em imagem precisa cobrir
+   o conjunto de teste inteiro.
+4. **Custo:** o port-hamiltoniano treina 3,4× mais devagar que o baseline.
+
+### Terceiro bug no integrador (2026-09-14)
+
+`SymplecticIntegrator._force` usava `create_graph=q.requires_grad`. No primeiro
+meio-passo de cada rollout, q vem dos dados sem gradiente, e aquela força não
+propagava gradiente para os parâmetros de V. O que decide se o grafo é preciso é
+estar treinando: agora `create_graph=torch.is_grad_enabled()`. Os resultados de
+`train_hybrid.py` e `train_dissipative.py` anteriores à correção perderam 1 de
+2K avaliações de força por rollout. O viés é **contra** o hamiltoniano, então não
+infla o resultado positivo abaixo.
+
 ## ATUALIZAÇÃO (2026-09-13): com dados suficientes, o resultado de 2026-09-12 se INVERTE
 
 [`train_hybrid.py`](train_hybrid.py), RTX 4070 (Ubuntu), 5 sementes, 2000

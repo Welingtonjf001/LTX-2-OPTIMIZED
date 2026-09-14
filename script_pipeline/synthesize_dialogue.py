@@ -138,10 +138,41 @@ def main(argv=None) -> int:
         return 0
 
     log = lambda msg: run_folder.append_log(run_dir, msg)  # noqa: E731
-    log(f"synthesize_dialogue: sintetizando {len(jobs)} fala(s), engine={args.engine}, idioma={args.language}")
-    results = synthesize_batch(jobs, engine=args.engine, log=log)
+
+    # Cache POR FALA (2026-09-13). Antes o run_decupagem pulava o estagio inteiro quando
+    # lines.json existia, e a emocao dirigida pelo emotion_director nunca chegava a voz.
+    # Agora roda sempre e refaz so a fala cuja chave (texto, emocao, take de referencia,
+    # voz qwen, motor, idioma) mudou.
+    anteriores = {}
+    manifesto_path = dialogue_dir / "lines.json"
+    if manifesto_path.exists():
+        try:
+            anteriores = {e["id"]: e for e in json.loads(manifesto_path.read_text(encoding="utf-8"))}
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            anteriores = {}
+
+    def _chave(job: dict) -> str:
+        return json.dumps([job["text"], job.get("emotion"), job.get("instruct"),
+                           job.get("xtts_speaker_wav"), job.get("qwen_speaker"),
+                           args.engine, args.language], ensure_ascii=False)
+
+    pendentes, reaproveitados = [], {}
+    for job in jobs:
+        marca = dialogue_dir / f"{job['id']}.key"
+        antes = anteriores.get(job["id"]) or {}
+        if (antes.get("ok") and antes.get("audio_path") and Path(antes["audio_path"]).exists()
+                and Path(antes["audio_path"]).resolve().parent == dialogue_dir.resolve()
+                and marca.exists() and marca.read_text(encoding="utf-8") == _chave(job)):
+            reaproveitados[job["id"]] = {"id": job["id"], "ok": True, "output_path": antes["audio_path"],
+                                         "engine_used": antes.get("engine_used")}
+        else:
+            pendentes.append(job)
+    log(f"synthesize_dialogue: {len(pendentes)} fala(s) a sintetizar, {len(reaproveitados)} reaproveitada(s) "
+        f"(chave igual), engine={args.engine}, idioma={args.language}")
+    results = synthesize_batch(pendentes, engine=args.engine, log=log) if pendentes else []
 
     by_id = {r["id"]: r for r in results}
+    by_id.update(reaproveitados)
     lines_manifest = []
     failures = 0
     for job in jobs:
@@ -152,9 +183,12 @@ def main(argv=None) -> int:
             "character": job["character"], "text": job["text"], "ok": ok,
             "audio_path": result.get("output_path") if ok else None,
             "engine_used": result.get("engine_used"),
+            "emotion": job.get("emotion"),
             "duration_sec": _wav_duration_sec(result["output_path"]) if ok else None,
         }
         lines_manifest.append(entry)
+        if ok and job["id"] not in reaproveitados:
+            (dialogue_dir / f"{job['id']}.key").write_text(_chave(job), encoding="utf-8")
         if not ok:
             failures += 1
             log(f"FALHA: {job['id']} ({job['character']}): {result.get('error')}")

@@ -6249,6 +6249,131 @@ defeito do shot005; (3) testar o GGUF Q8 do LongCat 1.5 (menos swap). **Não ver
 re-render dos planos abertos sem MSR; `lipsync_audit` é um proxy fraco em rosto a ¾ e com
 dois rostos no quadro — o usuário valida vendo.
 
+## 3.85 Auditoria de scripts implementada: atuação de fala, voz com emoção, SyncNet, LongCat na decupagem (2026-09-13/14)
+
+Auditoria pedida pelo usuário ("o que pode avançar a partir de hoje nos scripts
+existentes?") e depois "siga integralmente os itens 1 a 5". Validação na corrida
+`outputs/decupagem/20260913_teste_auditoria` (cópia da `teste_close_v2`), logs
+`logs/teste_auditoria.log` e `logs/teste_auditoria_EF.log`.
+
+### 1. Dois defeitos que derrubavam o plano de fala
+
+**1.1 Emoção que ocupa a boca.** Causa do shot005 gargalhando (§3.81): emoção `alegre` →
+`EMOCAO_VISIVEL` "open smile, light quick movements" + ação "shakes her head, amused".
+`shot_plan` ganhou `EMOCAO_VISIVEL_FALA` (a emoção vai para olhos, sobrancelha, postura;
+`alegre` = "smiling eyes, a light closed-lip smile between words, speaking clearly, not
+laughing"), `_sem_gesto_de_corpo` no `video_prompt` de close (o "arms crossed" tinha saído
+só do still) e riso retirado de qualquer plano de fala. `_video_prompt(framing=, speaking=)`.
+
+**1.2 A emoção nunca chegava à voz.** `run_decupagem` pulava o TTS quando `lines.json`
+existia; o `emotion_director` só avisava "Rode synthesize_dialogue de novo". As corridas do
+dia usavam vozes neutras de outra corrida. Agora o TTS roda sempre e o
+`synthesize_dialogue` guarda `dialogue/<id>.key` (texto, emoção, tomada de referência, voz
+qwen, motor, idioma): refaz só a fala que mudou. `lines.json` passou a registrar `emotion`.
+
+Resultado (mesmos stills, LTX distilled + MSR + bhm 0,6, LatentSync):
+
+| plano | emoção | prompt antes → agora | SyncNet antes → agora |
+|---|---|---|---|
+| shot001 | apaixonada | "smirks, arms crossed" → "smirks. softened gaze, speaking gently" | — → **8,95** |
+| shot003 | confusa | "searching glances" → "head tilting slightly, speaking hesitantly" | 7,04 → 4,38 |
+| shot005 | alegre | "shakes her head… open smile" → "…not laughing" | 8,54 → **9,73**, sem gargalhada |
+
+O shot003 caiu por ATUAÇÃO + VOZ, não por sincronia: a tomada emotiva "confusa" fez a fala ir
+de 3,97 s (26% de silêncio) para **7,09 s (51% de silêncio)** e o personagem passa o plano
+olhando o mapa — pouco trecho falado e rosto inclinado baixam a confiança do SyncNet.
+
+### 2. SyncNet no lugar do proxy
+
+O LatentSync instalado traz o avaliador padrão (`eval/syncnet`, `syncnet_v2.model`,
+`sfd_face.pth`). `script_pipeline/syncnet_audit.py` o roda no conda env dele (remux a 25 fps
+com o wav da fala, diretório temporário sem espaços — o código do LatentSync monta ffmpeg sem
+aspas); vale a faixa de rosto com maior confiança. Integrado no `lipsync_scenes` (o resumo
+decide pelo SyncNet; `--no-syncnet` desliga). **LSE-C ≥ 3 = ok.**
+
+O proxy de correlação (`lipsync_audit`) reprovou os 3 planos da tabela acima (0,21 / 0,03 /
+−0,16) — o de −0,16 era o de MELHOR sincronia (9,73). **Não usar o proxy para decidir.**
+Custo: 12–33 s por clipe.
+
+Reavaliado com SyncNet o que o proxy tinha deixado em aberto (§3.83), shot003/shot005:
+LTX + LatentSync 7,04 / 8,54 (offset 0); LongCat 1.5 8,86 / 7,89 (**offset −2 quadros**,
+constante nos testes do LongCat — áudio 80 ms fora). Os dois motores sincronizam bem; a
+diferença que sobra é atuação e o offset do LongCat.
+
+### 3. LongCat como motor da decupagem
+
+`--video-engine longcat` (`run_decupagem`, `render_shots_stage --engine longcat`, dropdown da
+UI 7913): planos **sem fala** vão para o LTX e os **de fala** para o LongCat 1.5. O
+`render_shots` ordena ação primeiro e fala depois, para trocar de servidor (8188 → 8190) uma vez
+só; converte a duração para 25 fps / 4k+1 quadros; a chave do clipe ganha `|longcat=1.5`.
+VALIDADO (`_teste_auditoria_longcat`): shot004 (wide) no LTX em 699 s, troca automática,
+shot005 (fala) no LongCat em 772 s com carga do modelo, **SyncNet 9,43**, sem gargalhada.
+
+### 4. Relatórios de continuidade e A/B de LoRA
+
+- `script_pipeline/clip_identity_audit.py`: ArcFace nos CLIPES (15/50/85%) contra o still do
+  plano e o centroide do personagem; limiar 0,35. Etapa **8b** do `run_decupagem`. Na corrida
+  da WebUI marcou os 3 wides do MSR antigo (vs_still 0,18–0,31, pior quadro 0,04) — o vazamento
+  da §3.82 — sem saber dele. Na `teste_close_v2`, 3/3 ok (0,63–0,79).
+- `video_doctor analyze` no `final/movie.mp4` como etapa **8c** (só relatório, com detecção de
+  corte): na corrida da WebUI achou deformação de 13 quadros (209–221) em 54 s.
+- `script_pipeline/lora_ab.py`: mesma corrida, mesmo plano e seed, com e sem a configuração
+  (LoRA ou IC), cópias isoladas, folha lado a lado + SyncNet + identidade + corte.
+
+### 5. Manutenção
+
+- §7 itens 3 (commit) e 4 (MiniMax na decupagem) marcados FEITO.
+- 14 scripts sem nenhuma referência movidos da raiz para `_arquivo/` (11 via `git mv`, 3
+  nunca rastreados); `_arquivo/LEIAME.md` diz como trazer de volta. Os citados no MEMORIAL
+  ficaram.
+- `longcat_video_backend`: `LONGCAT_DIT_15` troca o checkpoint do 1.5 (ex. GGUF Q8 da
+  comunidade, 19 GB, baixado — `hf_hub_download` travou duas vezes; `curl -L -C -` fechou).
+- Testes sem GPU: `tests/test_auditoria_20260913.py` (emoção de fala, gesto no close, riso,
+  cache de TTS por fala com `synthesize_batch` falso, parser do `lora_ab`).
+
+### Primeiro A/B controlado de LoRA: better-human-motion 0,6 não faz diferença (2026-09-14)
+
+`lora_ab --shots 3 --config "bhm:better-human-motion:0,6"`, distilled bf16 (sem a
+requantização do w4a8), mesmo still, prompt, voz e seed 1234, 185 quadros.
+
+| | base | bhm 0,6 |
+|---|---|---|
+| tempo | 888 s | 994 s (+12%) |
+| corte interno / salto do still | nenhum / 0,0 | nenhum / 0,0 |
+| identidade vs still | 0,379 | 0,369 |
+| SyncNet do clipe CRU | 0,92 (offset −14) | 1,07 (offset −14) |
+
+Folha (`lora_ab/folha_shot003.png`): pose, enquadramento, mapa, gesto e expressão
+praticamente idênticos nos três momentos; só variação mínima de boca e cabelo. **Com a
+mesma seed, o better-human-motion 0,6 não mudou o movimento visível — e custou 12% a mais.**
+Fica fechado o "sem efeito visto" da §3.84, agora sem a desculpa da requantização.
+
+Leitura do SyncNet aqui: o `lora_ab` mede o clipe CRU do LTX, antes do lip-sync. Conf ~1
+com offset −14 é a boca do próprio LTX **sem sincronia real** — o mesmo plano com LatentSync
+mede 4,38. Confirma que, no LTX, o lip-sync depois do vídeo é obrigatório.
+
+### LongCat 1.5: GGUF Q8 não ganha do bf16 nesta placa (2026-09-14)
+
+Mesma fala do shot003 (voz "confusa", 7,09 s → 177 quadros a 25 fps), mesmo still, prompt,
+LoRA DMD 0,9, 12 passos, 36 blocos em swap; só muda o checkpoint (`LONGCAT_DIT_15`).
+
+| checkpoint | tamanho | tempo total | s/passo | SyncNet conf / offset |
+|---|---|---|---|---|
+| GGUF Q8_0 (vantagewithai) | 19,1 GB | 2533 s (42 min) | ~199 | 7,28 / −2 |
+| bf16 (Kijai) | 31,7 GB | 2558 s (43 min) | — | 7,31 / −2 |
+
+**Empate em tempo e em sincronia.** Com 36 blocos em swap o gargalo é a troca de blocos e a
+atenção sobre 177 quadros, não o tamanho do checkpoint; o GGUF ainda paga desquantização por
+passo. Ganho do GGUF só em disco/RAM. Fica o bf16 como padrão; o GGUF é alternativa para
+máquina com menos RAM.
+
+Na mesma fala longa e hesitante, **LongCat 7,3 contra LTX + LatentSync 4,38** — a primeira
+vez que o LongCat vence com folga, justamente no plano que o LTX atuou pior (olhando o mapa).
+Custo: 42 min contra ~15 min do LTX para 7 s de fala.
+
+Log: `logs/teste_auditoria_EF.log`; clipes `longcat_gguf_shot003.mp4` e
+`longcat_bf16_shot003.mp4` na corrida `20260913_teste_auditoria`.
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
@@ -6279,7 +6404,8 @@ fragmentado) faltam. Retomar com `.venv/Scripts/python.exe -u
 _atribuicao_338.py` (~70 min de GPU total, ou ~55 min pulando A de novo;
 script na raiz do repo).
 
-**3. O primeiro commit.** `git status -uall` caía de 20.944 para 380 depois do
+**3. ~~O primeiro commit.~~ FEITO** (commits recorrentes desde 2026-09; ver `git log`).
+Texto original mantido abaixo como histórico. `git status -uall` caía de 20.944 para 380 depois do
 `.gitignore` corrigido (§3.39) -- mas **nada foi commitado**. Praticamente todo
 o corpo de trabalho de várias sessões (`script_pipeline/` inteiro,
 `ltx25_backend.py`, `minimax_h3_backend.py`, `video_doctor.py`, os dois
@@ -6288,7 +6414,9 @@ mas quanto mais tempo passa, maior o commit inicial e maior o risco de perda.
 
 ### P2 -- valor real, precisa de decisão de design antes de codar
 
-**4. Plugar o MiniMax H3 na decupagem** (§3.40). O backend existe e foi
+**4. ~~Plugar o MiniMax H3 na decupagem~~ FEITO** (`--video-engine minimax`, §3.52; e
+desde 2026-09-13 também `--video-engine longcat` para planos de fala, §3.85). Texto
+original: (§3.40). O backend existe e foi
 testado com um caso real, mas três perguntas seguem abertas: ele SUBSTITUI
 TTS+lip-sync (o modelo já fala a fala) ou recebe áudio externo como o LTX?
 Ele obedece instrução de câmera em texto (não testado)? Como usar as 2
