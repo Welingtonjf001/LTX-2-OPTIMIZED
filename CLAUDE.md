@@ -10,7 +10,7 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-07.
+Última verificação: 2026-09-13 (LoRAs de vídeo, MSR, cache de clipe, LongCat 1.5).
 
 ---
 
@@ -392,14 +392,24 @@ Catálogo em `ltx_loras.py`: tipo, força, gatilho e compatibilidade de cada um.
 - MSR: a 2.3 V2 roda com nós nativos (sequência montada em
   `script_pipeline/ic_references.py`). **A 2.5 exige o custom node
   ComfyUI-LTX2.5-MSR** (slot embedding): baixada, NÃO ligada.
+- ⚠️ **MSR em I2V vaza a guia** (MEDIDO 2026-09-13, bf16 e w4a8, força 1,0 e 0,5): com
+  still aberto o vídeo larga o still no quadro 1 e vira o plano médio dos retratos; com
+  guia de 65 quadros num clipe de 73 corta seco no 57. O oficial é T2V puro. Por isso
+  `ic_references` só liga MSR fora de wide/full/insert/establishing e com a guia em no
+  máximo ⅓ do clipe (<51 quadros = sem MSR). `script_pipeline/guide_leak_audit.py` detecta
+  (corte interno + `salto_still`) e roda sozinho no `run_decupagem` com IC ligado.
+  Ver `MEMORIAL.md` §3.82.
+- **Cache**: o still entra na chave do clipe e o clipe na do lip-sync (antes, still novo
+  seguia com clipe velho). UI 7913, aba Stills: "🧹 Limpar cache". `MEMORIAL.md` §3.81.
 - Conteúdo: `motion-enhancer-n4w` é afinado para NSFW; `talking-head-av` é de UM
   personagem do autor; `cdrama-char` puxa os rostos dos atores da série.
 - Oficiais com licença (aceita 2026-09-13) BAIXADOS: Ingredients, Cinemagraph,
   Pixel-Upscaler, Deblur e Clean-Plate 2.5; Relight e DubIt 2.3 — todos 0 chave
   faltando no 2.5. `--ic-reference ingredients` passa a usar o Ingredients 2.5
-  sozinho. Ainda NÃO ligados a nenhum fluxo: Cinemagraph (LoRA comum, dá para
-  usar via `--video-lora cinemagraph-2.5`), e os V2V (upscaler, deblur,
-  clean-plate, relight, dubit) — sem pós-produção integrada ainda.
+  sozinho. Cinemagraph é LoRA comum (`--video-lora cinemagraph-2.5`). V2V ligados
+  desde 2026-09-13 (`MEMORIAL.md` §3.79): DubIt como `--lipsync-engine dubit`, Deblur e
+  Pixel-Upscaler como `--post-deblur` / `--post-upscale`; clean-plate e relight seguem
+  sem fluxo. MEDIDO: DubIt não superou o LatentSync em sync.
   Opcionais não baixados: `download --set gated-extra`.
 - Testes sem GPU: `tests/test_ltx_loras.py`, sobre a fixture do grafo real.
   ⚠️ `tests/test_pipeline_smoke.py::test_build_workflow_nao_toca_rede` **sobe o
@@ -553,6 +563,30 @@ LTX (`script_pipeline/generate_storyboards.py`, mesmo bug, mesmo fix). Se o
 MiniMax H3 "morrer sem traceback" de novo num ponto específico e
 reproduzível, suspeitar do watchdog ANTES de suspeitar de crash nativo.
 
+## LongCat-Video-Avatar 1.5 — motor de fala testado, NÃO ligado na decupagem
+
+ComfyUI SEPARADO em `E:\Users\home\Documents\LongCat-Video\ComfyUI` (venv próprio,
+porta **8190**, WanVideoWrapper do Kijai). `longcat_video_backend.py` dirige por HTTP e
+disputa a MESMA 3090 — desligue o 8188 antes (`gpu_watchdog.free_port(8188)`).
+
+- **Padrão `--variant 1.5`**: `diffusion_models/Avatar/LongCat-Avatar-15_bf16` (31,7 GB,
+  Kijai/WanVideo_comfy) + LoRA `LongCat-Avatar-15_dmd_distill_lora_rank128_bf16` (0,9, sem
+  merge) + Whisper `HuMo\whisper_large_v3_encoder_fp16` + `LongCatAvatarWhisperEmbeds`;
+  scheduler `longcat_distill_euler`, 12 passos, shift 12, CFG 1. `--variant 1.0` =
+  wav2vec2, 20 passos, CFG 3 (94 min para 4 s).
+- ⚠️ **36 blocos em swap, não 25**: com 25 a VRAM transborda para a memória compartilhada
+  do WDDM e o 1º passo passa de 18 min. `LONGCAT_BLOCKS_TO_SWAP` sobrepõe.
+- MEDIDO 2026-09-13 a 960x544: **57/101/125 quadros = 9/18/24 min** (~44/88/117 s/passo).
+  Sync nos closes do "O Primeiro Tour": +0,34 / +0,08 / +0,04, contra LTX + LatentSync
+  +0,38 / +0,17 / −0,29. Não superou o LTX em sync medido; atua melhor em fala curta
+  expressiva.
+- ⚠️ O fp8 em `weights/LongCat-Video-Avatar-1.5/base_model_fp8` é **optimum-quanto**: o
+  ComfyUI não carrega, e no caminho Python oficial mede 4h23min por passo.
+- Os "Windows fatal exception 0xc0000139" e `ConnectionResetError` no
+  `comfyui_server.log` são import de flash_attn e cliente HTTP fechando — não são crash.
+
+Ver `MEMORIAL.md` §3.83.
+
 ## Roteiro → filme (`script_pipeline/`)
 
 Duas variantes do mesmo pipeline, escolhidas pelo comando, não por acaso. Elas
@@ -637,6 +671,13 @@ iguais. Ver §3.36.4.
 mediana +0,25; o medium dá ~203 px e +0,05 — o LatentSync recorta 512x512 e rosto
 pequeno chega sem sinal de boca. `extreme_close` nunca vai para fala (só olhos
 no quadro). `--dialogue-framing close|livre` força ou solta. Ver `MEMORIAL.md` §3.80.
+
+⚠️ **O NOME do enquadramento não basta para o FLUX.** "close-up, the face filling most of
+the frame" com descritor longo + gesto de corpo ("crosses her arms") saiu plano médio, e
+nenhum motor de lip-sync salvou (−0,19 a +0,10). O close agora leva limite físico ("top of
+the head to the shoulders, mouth clearly visible, no hands or waist") e **nunca gesto de
+corpo**: LatentSync foi a +0,17 / +0,38. Se um close reprovar no sync, olhe o STILL antes do
+motor. Ver `MEMORIAL.md` §3.81.
 
 **O `--cache-none` é necessário para a passada de VÍDEO caber na placa.** Sem
 ele o mesmo clipe de 145 frames encalha a 24,2 GB de 24,5; com ele passa da carga

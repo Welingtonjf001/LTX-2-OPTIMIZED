@@ -25,13 +25,17 @@ trocados, ambientes Python, modelos instalados).
 
 ## 2. Estado por versão
 
-*(atualizado em 2026-08-25; as seções §3.x abaixo estão em ordem cronológica e
-as mais recentes ficam DEPOIS de §6 — o histórico foi crescendo por acréscimo.)*
+*(atualizado em 2026-08-25; linhas de motores e LoRAs acrescentadas em 2026-09-13. As
+seções §3.x abaixo estão em ordem cronológica e as mais recentes ficam DEPOIS de §6 — o
+histórico foi crescendo por acréscimo. **Síntese do estado de LoRAs e LongCat: §3.84.**)*
 
 | Versão | Estado | Evidência |
 |---|---|---|
 | **2.3/22b** | **produção** | UIs rodando, pipelines `distilled`/`ic_lora`/`ti2vid_*` validados, modelos em `models/` |
-| **2.5/22b** | **produção**, rota ComfyUI | clipes reais de 19,3s a 1280x704 com áudio condicionado; UIs `*_25` completas; §3.4 em diante |
+| **2.5/22b** | **produção**, rota ComfyUI | clipes reais de 19,3s a 1280x704 com áudio condicionado; UIs `*_25` completas; §3.4 em diante; padrão `w4a8-v10` desde §3.77 |
+| LoRAs / IC-LoRAs de vídeo no 2.5 | **produção**, opcional | catálogo `ltx_loras.py`, Ingredients e MSR na decupagem, V2V (DubIt/Deblur/Upscaler) na pós; MSR restrito a close/medium (§3.78–3.82) |
+| MiniMax H3 | **produção**, `--video-engine minimax` | ComfyUI próprio 8189 (§3.40–3.52) |
+| LongCat-Video-Avatar 1.5 | **testado, não ligado** | ComfyUI próprio 8190; 9–24 min por plano de fala, sync abaixo do LTX + LatentSync (§3.83) |
 
 O 2.5 **não** usa `ltx_pipelines`: usa `ltx25_backend.py` (ComfyUI via HTTP),
 com `ltx_pipelines_25.py` como shim de CLI para as UIs não precisarem saber
@@ -6115,6 +6119,135 @@ Amarrado em `shot_plan._cobertura_de_fala`:
 refazendo a decupagem da mesma corrida a 544 px: `auto` → 38/38 planos de fala em
 close; `livre` → 16 medium + 22 close, idêntico à corrida original. Planos de ação
 não mudam.
+
+## 3.81 O "close" que saía plano médio, e dois caches que reaproveitavam clipe vencido (2026-09-13)
+
+**O §3.80 amarrou o plano de fala ao close, mas o still não obedecia.** Corrida
+`20260913_teste_distilled_close` (distilled bf16, MSR, better-human-motion 0,6): os
+três planos pedidos como `close` saíram da cintura para cima, rosto ~200 px, braços
+cruzados. Prompt do still: "close-up, the face filling most of the frame" + descritor
+longo + "caught mid-gesture: crosses her arms" — o gesto de corpo obriga o FLUX a abrir
+o quadro. Resultado: nenhum motor de lip-sync salvava o plano.
+
+| motor (mesmos 3 clipes em plano médio) | shot001 | shot003 | shot005 |
+|---|---|---|---|
+| sem lip-sync (boca do LTX) | −0,12 | −0,06 | −0,10 |
+| LatentSync | −0,09 | +0,10 | −0,11 |
+| DubIt congelar (distilled, sem requantização) | +0,04 | +0,03 | −0,19 |
+
+Conserto em `shot_plan`: `SUBJECT_HINTS["close"]` com limite FÍSICO ("framed from the top
+of the head to the shoulders, face large and centered, mouth clearly visible, no hands
+or waist in frame") e **close não recebe gesto de corpo**. Refeito (`20260913_teste_close_v2`):
+rosto ~270–300 px, e o LatentSync foi a **+0,17 / +0,38 / −0,29**. O 3º reprovou por
+ATUAÇÃO, não por quadro: o LTX fez a personagem gargalhar a fala curta inteira
+("Ele sempre ganha dos alunos novos.", 2,2 s) — a boca mexe pelo riso.
+
+**Dois caches passavam clipe vencido em silêncio**, achados na mesma corrida:
+
+- chave do clipe (`render_shots`) = quadros + áudio + LoRAs, **sem o still**. Os closes
+  novos saíram e os 6 clipes antigos, de plano médio, foram reaproveitados. Agora
+  `|still=<tamanho do PNG>` entra na chave (invalida uma vez o cache de corridas antigas —
+  é o comportamento certo, still é o quadro 0 do I2V);
+- chave do lip-sync = quadros do clipe + wav, **sem o clipe**: clipe refeito com a mesma
+  duração herdava o lip-sync do velho. Agora entra o tamanho do clipe.
+
+**Limpador de cache na UI 7913** (aba Stills → Refazer/Regenerar em lote, "🧹 Limpar
+cache"): apaga os stills da seleção e a entrada no manifesto, invalida `.key` de clipe e
+de lip-sync, `_synced.mp4`, animatic e auditoria de storyboard; opcionalmente `POST /free`
+no ComfyUI 8188. Não apaga `.mp4` de clipe: sem a chave, a próxima passada refaz.
+Testes: `tests/test_limpar_cache_stills.py`.
+
+## 3.82 MSR vazando a guia: não era quantização nem força, era still aberto competindo com os retratos (2026-09-13)
+
+VISTO primeiro no w4a8 (§3.79): planos de 73 quadros com dois personagens copiavam a
+sequência de referência e cortavam seco no quadro 57. Hipótese "é a requantização do
+LoRA" DESCARTADA: distilled bf16 fez igual. Sequência de testes em shot000/shot004:
+
+| tentativa | resultado |
+|---|---|
+| guia 65 quadros, força 1,0 (bf16) | corte no 57 (onde a guia troca retratos → cenário) |
+| força 0,5 | pior: o vídeo **toca** a guia — still, retrato 1 (fundo cinza), retrato 2, corredor |
+| guia ≤ ⅓ do clipe (17 em 73), força 1,0 | corte do 57 some, mas o vídeo larga o still **no quadro 1** |
+
+Histograma 1−correl: quadro 0→1 = **0,45**, depois ~0,000. Reauditadas as duas corridas:
+os 3 planos ABERTOS saltam no quadro 1 (0,17–0,46); os closes com um personagem ficam
+abaixo de 0,015. O workflow oficial `LTX-2.3_MSR_sample_workflow_V2` é **T2V puro**
+(`EmptyLTXVLatentVideo`, 251 quadros, guia de 65 ≈ 26%): lá não existe still. No I2V da
+decupagem o still aberto (personagens pequenos no corredor) e os retratos de corpo inteiro
+da guia disputam o mesmo começo de clipe, e a guia vence.
+
+Consertos em `ic_references`:
+
+- `MSR_MAX_FRACAO = 0.34` — a guia cobre no máximo ⅓ do clipe (73→17, 129→41; <51 quadros
+  = sem MSR);
+- `MSR_SEM_ENQUADRAMENTO_ABERTO` = wide/full/insert/establishing → **sem MSR**, só o still.
+
+`script_pipeline/guide_leak_audit.py` (novo): corte interno por `video_doctor.detect_cuts`
++ `salto_still` (quadro 0→1 > 0,15), que o `detect_cuts` não vê por exigir dois quadros
+estáveis antes. Roda sozinho no `run_decupagem` depois do vídeo quando IC está ligado;
+só avisa. **Não reverificado em GPU depois do 2º conserto** (plano aberto sem MSR é I2V
+comum).
+
+## 3.83 LongCat-Video-Avatar: do 1.0 (94 min) ao 1.5 com DMD (9–24 min) (2026-09-13)
+
+`longcat_video_backend.py` (ComfyUI próprio, porta 8190, WanVideoWrapper) já existia e
+não estava ligado a nada. Primeiro teste real, shot003 da mesma cena:
+
+- **1.0 bf16**, 20 passos, CFG 3, 25 blocos em swap, 101 quadros: **94 min** (~270 s/passo),
+  sync −0,04 (still ainda em plano médio). O timeout fixo de 3600 s abandonava o job no
+  passo 13 com o servidor ainda gerando → agora estimado por quadros × passos + `--timeout`.
+- **O fp8 "1.5" que já estava em disco é formato optimum-quanto** (`_data/_scale`,
+  `quantization_format: quanto`): o carregador do ComfyUI não lê, e é o mesmo arquivo dos
+  4h23min/passo do caminho Python oficial. Não serve.
+- **O Kijai publicou o 1.5 convertido** (`Kijai/WanVideo_comfy/LongCat/`):
+  `LongCat-Avatar-15_bf16.safetensors` (31,7 GB) + `LongCat-Avatar-15_dmd_distill_lora_rank128_bf16`
+  (1,26 GB). O wrapper instalado já detecta o projetor Whisper do 1.5 (entrada 32000) e tem
+  `LongCatAvatarWhisperEmbeds`; o Whisper é o do HuMo (`HuMo\whisper_large_v3_encoder_fp16`).
+  Ajustes tirados do exemplo do próprio wrapper para LoRA de destilação: scheduler
+  `longcat_distill_euler`, 12 passos, shift 12, CFG 1, LoRA 0,9 sem merge.
+
+**Com 25 blocos em swap o 1.5 transborda**: 23,7 GB dedicados + 1,4 GB na memória
+compartilhada do WDDM, 1º passo passou de 18 min (interrompido). A LoRA não fundida sobe os
+pesos dela para a GPU a cada bloco. **Com 36 blocos: 16,4 GB e estável.**
+
+| plano (closes do §3.81) | quadros | LongCat 1.5 | sync | LTX + LatentSync |
+|---|---|---|---|---|
+| shot003 MIN-JAE, de frente | 101 | 18 min (~88 s/passo) | **+0,34** | +0,38 |
+| shot001 SEO-YEON, a ¾ | 125 | 24 min (~117 s/passo) | +0,08 | +0,17 |
+| shot005 SEO-YEON, fala curta | 57 | 9 min (~44 s/passo) | +0,04 | −0,29 |
+
+Vendo: boca articula nos três, identidade estável, sem corte; expressão mais intensa que o
+prompt. No shot005 atua melhor que o LTX (que gargalhou), mas a auditoria mede mal 2,2 s de
+fala com muita expressão; no shot001 o rosto a ¾ puxa a nota para baixo. **Não superou o
+LTX + LatentSync em sync medido; ~5× mais rápido que o 1.0; custo por plano parecido com o
+LTX.** Backend: padrão `--variant 1.5` (`LONGCAT_VARIANT=1.0` volta), `BLOCKS_TO_SWAP_15=36`
+(`LONGCAT_BLOCKS_TO_SWAP` sobrepõe). Grafo validado contra o `/object_info` do 8190 antes de
+gastar GPU — foi o que achou o caminho do Whisper. GGUF 1.5 da comunidade
+(`vantagewithai`, Q8_0 19 GB) não testado.
+
+## 3.84 Síntese: LoRAs e LongCat incorporados à rota 2.5 (estado em 2026-09-13)
+
+O que existe, onde, e o que a medição sustenta — para quem chegar sem ler §3.78–3.83.
+
+| peça | onde | estado | o que a medição diz |
+|---|---|---|---|
+| catálogo de LoRAs de vídeo | `ltx_loras.py` (list/status/download) | 24 de 29 instalados (conferido com `ltx_loras.py status`), 2.3→2.5 verificado por cabeçalho | carregar ≠ efeito; `better-human-motion` sem efeito visível no w4a8 (requantiza) |
+| LoRA comum no LTX 2.5 | `ltx25_backend.generate(loras=)`, `--video-lora chave[:força]`, UI 7913 Motores | produção | validar vendo; comparar com distilled antes de descartar |
+| IC-LoRA Ingredients | `--ic-reference ingredients` | produção | locação fora da folha por padrão (§3.78) |
+| IC-LoRA MSR 2.3 V2 | `--ic-reference msr` | produção com restrições | só close/medium, guia ≤ ⅓ do clipe (§3.82); MSR 2.5 exige plugin, não ligado |
+| recusas | backend | deliberadas | IC com fator >1 + áudio; IC + two-stage (§3.78) |
+| V2V: DubIt, Deblur, Upscaler | `generate_v2v`, `--lipsync-engine dubit`, `--post-deblur/--post-upscale` | produção, opcional | DubIt não superou LatentSync; deblur/upscale funcionam (§3.79) |
+| enquadramento de fala | `shot_plan`, `--dialogue-framing` | produção | close real → LatentSync +0,17/+0,38 (§3.80–3.81) |
+| auditoria de guia | `guide_leak_audit.py` | automática com IC | pega corte interno e salto do still |
+| cache de still/clipe/lip-sync | `render_shots`, UI "🧹 Limpar cache" | corrigido | still e clipe entram nas chaves (§3.81) |
+| LongCat Avatar 1.5 | `longcat_video_backend.py` (8190) | testado, **não ligado na decupagem** | 9–24 min/plano; sync +0,34/+0,08/+0,04 contra LTX+LatentSync +0,38/+0,17/−0,29 |
+
+**Decisões abertas, do usuário:** (1) ligar o LongCat como `--video-engine longcat` só para
+planos de fala expressivos/curtos, com LTX+LatentSync seguindo padrão; (2) dica de atuação no
+`video_prompt` ("speaks with a light smile, not laughing") quando a emoção não pede riso — o
+defeito do shot005; (3) testar o GGUF Q8 do LongCat 1.5 (menos swap). **Não verificado:**
+re-render dos planos abertos sem MSR; `lipsync_audit` é um proxy fraco em rosto a ¾ e com
+dois rostos no quadro — o usuário valida vendo.
 
 ## 7. Próximas etapas, por ordem de retorno
 

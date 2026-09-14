@@ -51,7 +51,23 @@ DIT_MODEL = "Avatar\\LongCat-Avatar_comfy_bf16.safetensors"
 VAE_MODEL = "Wan2_1_VAE_bf16.safetensors"
 TEXT_ENCODER_MODEL = "umt5-xxl-enc-bf16.safetensors"
 WAV2VEC_MODEL = "wav2vec2-chinese-base_fp16.safetensors"
+
+# Avatar 1.5 (2026-09-13): checkpoint convertido pelo Kijai (Kijai/WanVideo_comfy/LongCat),
+# audio por Whisper-large-v3 em vez de wav2vec2 e LoRA DMD2 de destilacao. Ajustes do
+# exemplo do proprio wrapper para LoRA de destilacao: scheduler longcat_distill_euler,
+# 12 passos, shift 12, CFG 1, LoRA 0,9 sem merge. `LONGCAT_VARIANT=1.0` volta ao antigo.
+VARIANT = os.environ.get("LONGCAT_VARIANT", "1.5")
+DIT_MODEL_15 = "Avatar\\LongCat-Avatar-15_bf16.safetensors"
+DMD_LORA_15 = "LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors"
+WHISPER_MODEL = "HuMo\\whisper_large_v3_encoder_fp16.safetensors"  # nome como o /object_info lista
+DEFAULTS = {"1.0": {"steps": 20, "cfg": 3.0, "scheduler": "unipc", "shift": 5.0},
+            "1.5": {"steps": 12, "cfg": 1.0, "scheduler": "longcat_distill_euler", "shift": 12.0}}
 BLOCKS_TO_SWAP = 25  # LongCat-Video tem 48 blocos; 25 offloaded cabe na 3090 (24GB)
+# MEDIDO 2026-09-13: Avatar 1.5 + LoRA DMD sem merge, 125 quadros, 25 blocos em swap =
+# 23,7 GB dedicados + 1,4 GB transbordando para a memoria compartilhada do WDDM, e o 1o
+# passo passou de 18 min (o 1.0 fazia ~270 s/passo). A LoRA nao fundida carrega os pesos
+# dela na GPU a cada bloco. `LONGCAT_BLOCKS_TO_SWAP` / `--blocks-to-swap` sobrepoem.
+BLOCKS_TO_SWAP_15 = 36
 
 DEFAULT_NEGATIVE_PROMPT = (
     "Close-up, bright tones, overexposed, static, blurred details, subtitles, style, works, "
@@ -122,7 +138,43 @@ def _stage_input(src: str, subdir: str) -> str:
 
 
 def _build_workflow(*, image_name: str, audio_name: str, prompt: str, negative_prompt: str,
-                     num_frames: int, steps: int, cfg: float, seed: int, fps: float) -> dict:
+                     num_frames: int, steps: int, cfg: float, seed: int, fps: float,
+                     variant: str = VARIANT, scheduler: str | None = None,
+                     shift: float | None = None, lora_strength: float = 0.9) -> dict:
+    v15 = variant == "1.5"
+    base = DEFAULTS["1.5" if v15 else "1.0"]
+    wf = _build_workflow_10(image_name=image_name, audio_name=audio_name, prompt=prompt,
+                            negative_prompt=negative_prompt, num_frames=num_frames, steps=steps,
+                            cfg=cfg, seed=seed, fps=fps)
+    wf["scheduler"]["inputs"].update({"scheduler": scheduler or base["scheduler"],
+                                      "shift": base["shift"] if shift is None else shift})
+    blocos = os.environ.get("LONGCAT_BLOCKS_TO_SWAP")
+    if blocos:
+        wf["blockswap"]["inputs"]["blocks_to_swap"] = int(blocos)
+    if not v15:
+        return wf
+    if not blocos:
+        wf["blockswap"]["inputs"]["blocks_to_swap"] = BLOCKS_TO_SWAP_15
+    wf["wm_model"]["inputs"]["model"] = DIT_MODEL_15
+    wf["dmd_lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {
+        "lora": DMD_LORA_15, "strength": lora_strength,
+        # merge desligado como no exemplo do wrapper: com 25 blocos em swap, fundir 1,26 GB
+        # de LoRA em bf16 pede a copia inteira dos pesos na RAM.
+        "low_mem_load": False, "merge_loras": False}}
+    wf["wm_model"]["inputs"]["lora"] = ["dmd_lora", 0]
+    # Audio do 1.5 e Whisper [T, 5, 1280]; o wav2vec2 do 1.0 da erro de shape no projetor.
+    del wf["wav2vec_model"]
+    wf["whisper_model"] = {"class_type": "WhisperModelLoader", "inputs": {
+        "model": WHISPER_MODEL, "base_precision": "fp16", "load_device": "main_device"}}
+    wf["audio_embeds"] = {"class_type": "LongCatAvatarWhisperEmbeds", "inputs": {
+        "whisper_model": ["whisper_model", 0], "audio_1": ["load_audio", 0],
+        "normalize_loudness": True, "num_frames": num_frames, "fps": fps,
+        "audio_scale": 1.0, "audio_cfg_scale": 1.0, "multi_audio_type": "para"}}
+    return wf
+
+
+def _build_workflow_10(*, image_name: str, audio_name: str, prompt: str, negative_prompt: str,
+                        num_frames: int, steps: int, cfg: float, seed: int, fps: float) -> dict:
     return {
         "wm_model": {
             "class_type": "WanVideoModelLoader",
@@ -255,8 +307,9 @@ def _submit_and_wait(workflow: dict, *, log_cb=None, timeout: int) -> dict:
 
 def generate(prompt: str, output_path: str, *, image_path: str, audio_path: str,
              negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
-             num_frames: int = 93, steps: int = 20, cfg: float = 3.0, seed: int = 42,
-             fps: float = 25.0, log_cb=None, timeout: int | None = None) -> str:
+             num_frames: int = 93, steps: int | None = None, cfg: float | None = None,
+             seed: int = 42, fps: float = 25.0, log_cb=None, timeout: int | None = None,
+             variant: str = VARIANT, lora_strength: float = 0.9) -> str:
     """Gera um clipe LongCat-Video-Avatar (imagem + audio + texto) e copia para
     *output_path*. `image_path` e' a referencia de identidade/still do plano;
     `audio_path` e' a fala real que dirige o lip-sync (mesmo papel do
@@ -266,16 +319,22 @@ def generate(prompt: str, output_path: str, *, image_path: str, audio_path: str,
     `timeout` None = estimado. MEDIDO 2026-09-13 na 3090 (bf16, 25 blocos em swap,
     960x544): 101 quadros a ~270 s/passo -- 20 passos = ~90 min. O fixo de 3600s
     abandonava o job no passo 13 com o servidor ainda gerando."""
+    base = DEFAULTS["1.5" if variant == "1.5" else "1.0"]
+    steps = base["steps"] if steps is None else steps
+    cfg = base["cfg"] if cfg is None else cfg
     if timeout is None:
-        timeout = int(600 + steps * 270 * max(1.0, num_frames / 101) * 1.5)
+        # 270 s/passo medido no 1.0 com CFG 3 (dois passes por passo); CFG 1 faz um so.
+        por_passo = 270 * (1.0 if cfg != 1.0 else 0.6)
+        timeout = int(900 + steps * por_passo * max(1.0, num_frames / 101) * 1.5)
     ensure_server(log_cb=log_cb)
     image_name = _stage_input(image_path, "img")
     audio_name = _stage_input(audio_path, "aud")
     workflow = _build_workflow(
         image_name=image_name, audio_name=audio_name, prompt=prompt,
         negative_prompt=negative_prompt, num_frames=num_frames, steps=steps,
-        cfg=cfg, seed=seed, fps=fps,
+        cfg=cfg, seed=seed, fps=fps, variant=variant, lora_strength=lora_strength,
     )
+    _log(f"[longcat] Avatar {variant}: {steps} passos, CFG {cfg:g}, timeout {timeout}s", log_cb)
     entry = _submit_and_wait(workflow, log_cb=log_cb, timeout=timeout)
     outputs = entry.get("outputs", {}).get("save", {})
     videos = outputs.get("gifs") or outputs.get("videos") or []
@@ -297,8 +356,11 @@ def _cli(argv=None) -> int:
     ap.add_argument("--audio", required=True)
     ap.add_argument("--output-path", required=True)
     ap.add_argument("--num-frames", type=int, default=93)
-    ap.add_argument("--steps", type=int, default=20)
-    ap.add_argument("--cfg", type=float, default=3.0)
+    ap.add_argument("--variant", default=VARIANT, choices=["1.0", "1.5"],
+                    help="1.5 = Whisper + LoRA DMD (padrao); 1.0 = wav2vec2, 20 passos, CFG 3")
+    ap.add_argument("--lora-strength", type=float, default=0.9, help="LoRA DMD do 1.5")
+    ap.add_argument("--steps", type=int, default=None, help="padrao por variante (1.5: 12, 1.0: 20)")
+    ap.add_argument("--cfg", type=float, default=None, help="padrao por variante (1.5: 1, 1.0: 3)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--fps", type=float, default=25.0)
     ap.add_argument("--timeout", type=int, default=None, help="segundos; padrao estimado por quadros x passos")
@@ -306,7 +368,7 @@ def _cli(argv=None) -> int:
 
     generate(args.prompt, args.output_path, image_path=args.image, audio_path=args.audio,
              num_frames=args.num_frames, steps=args.steps, cfg=args.cfg, seed=args.seed, fps=args.fps,
-             timeout=args.timeout)
+             timeout=args.timeout, variant=args.variant, lora_strength=args.lora_strength)
     return 0
 
 
