@@ -1,0 +1,49 @@
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'outputs/decupagem_06_palace_emerald/final/movie.mp4':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf60.12.101
+  Duration: 00:00:56.65, start: 0.000000, bitrate: 2167 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(tv, bt709/bt709/iec61966-2-1, progressive), 864x480, 1968 kb/s, 24 fps, 24 tbr, 12288 tbn (default)
+    Metadata:
+      handler_name    : VideoHandler
+      vendor_id       : [0][0][0][0]
+      encoder         : Lavc60.26.100 libx264
+  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 193 kb/s (default)
+    Metadata:
+      handler_name    : SoundHandler
+      vendor_id       : [0][0][0][0]
+[Parsed_volumedetect_0 @ 0000016af50766c0] n_samples: 0
+Stream mapping:
+  Stream #0:0 -> #0:0 (h264 (native) -> wrapped_avframe (native))
+  Stream #0:1 -> #0:1 (aac (native) -> pcm_s16le (native))
+Press [q] to stop, [?] for help
+Output #0, null, to 'NUL':
+  Metadata:
+    major_brand     : isom
+    minor_version   : 512
+    compatible_brands: isomiso2avc1mp41
+    encoder         : Lavf60.12.101
+  Stream #0:0(und): Video: wrapped_avframe, yuv420p(tv, bt709/bt709/iec61966-2-1, progressive), 864x480, q=2-31, 200 kb/s, 24 fps, 24 tbn (default)
+    Metadata:
+      handler_name    : VideoHandler
+      vendor_id       : [0][0][0][0]
+      encoder         : Lavc60.26.100 wrapped_avframe
+  Stream #0:1(und): Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s (default)
+    Metadata:
+      handler_name    : SoundHandler
+      vendor_id       : [0][0][0][0]
+      encoder         : Lavc60.26.100 pcm_s16le
+frame=    0 fps=0.0 q=-0.0 size=N/A time=00:00:00.51 bitrate=N/A speed=34.5x    
+frame=  928 fps=0.0 q=-0.0 size=N/A time=00:00:39.14 bitrate=N/A speed=  76x    
+[silencedetect @ 0000016af71c0b80] silence_start: 43.9407
+[silencedetect @ 0000016af71c0b80] silence_end: 44.9824 | silence_duration: 1.04169
+[out#0/null @ 0000016af5038840] video:637kB audio:10672kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: unknown
+frame= 1359 fps=0.0 q=-0.0 Lsize=N/A time=00:00:56.63 bitrate=N/A speed=78.2x    
+[Parsed_volumedetect_0 @ 0000016af50e4480] n_samples: 5464064
+[Parsed_volumedetect_0 @ 0000016af50e4480] mean_volume: -14.9 dB
+[Parsed_volumedetect_0 @ 0000016af50e4480] max_volume: -0.5 dB
+[Parsed_volumedetect_0 @ 0000016af50e4480] histogram_0db: 138
+[Parsed_volumedetect_0 @ 0000016af50e4480] histogram_1db: 1017
+[Parsed_volumedetect_0 @ 0000016af50e4480] histogram_2db: 6620

@@ -10,9 +10,11 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-14 (auditoria de scripts: SyncNet, TTS com cache, emoção de
-fala, LongCat na decupagem, A/B de LoRA, GGUF×bf16 do LongCat). Estado atual e decisões
-abertas: `MEMORIAL.md` §7 P0.
+Última verificação: 2026-09-16 (segunda auditoria de scripts, 348 arquivos catalogados, 20
+achados -- cache de still/clipe/TTS por conteúdo em vez de tamanho/nome, encadeamento
+LTX/MiniMax, concat/manifesto não declarando falha, `repair_comfyui.bat` e scripts de
+upscale sem verificação de exit code; 18/20 corrigidos, 2 parciais). Estado atual e decisões
+abertas: `MEMORIAL.md` §7 P0 e §3.86.
 
 ---
 

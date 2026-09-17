@@ -1,0 +1,14 @@
+test_01_five_interfaces_lose_vocal_fallback (__main__.Reproductions.test_01_five_interfaces_lose_vocal_fallback) ... ok
+test_02_unicode_concat_path_fails (__main__.Reproductions.test_02_unicode_concat_path_fails) ... ok
+test_03_import_without_face_missing_parent (__main__.Reproductions.test_03_import_without_face_missing_parent) ... ok
+test_04_minimax_last_frame_discarded_with_two_refs (__main__.Reproductions.test_04_minimax_last_frame_discarded_with_two_refs) ... ok
+test_05_ltx_chain_shortens_and_loses_audio (__main__.Reproductions.test_05_ltx_chain_shortens_and_loses_audio) ... ok
+test_06_chain_ignores_concat_failure (__main__.Reproductions.test_06_chain_ignores_concat_failure) ... ok
+test_07_manifest_calls_missing_video_ok (__main__.Reproductions.test_07_manifest_calls_missing_video_ok) ... ok
+test_08_audio_cache_collides_for_different_content (__main__.Reproductions.test_08_audio_cache_collides_for_different_content) ... ok
+test_09_reference_cache_ignores_directory_and_content (__main__.Reproductions.test_09_reference_cache_ignores_directory_and_content) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.553s
+
+OK

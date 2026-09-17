@@ -6374,6 +6374,143 @@ Custo: 42 min contra ~15 min do LTX para 7 s de fala.
 Log: `logs/teste_auditoria_EF.log`; clipes `longcat_gguf_shot003.mp4` e
 `longcat_bf16_shot003.mp4` na corrida `20260913_teste_auditoria`.
 
+## 3.86 Segunda auditoria de scripts (2026-09-16): 20 achados, 18 corrigidos nesta sessão
+
+Auditoria independente da §3.85 (mesmo método, escopo maior: 348 scripts catalogados,
+36 revisados a fundo). Relatório completo em `auditoria/2026-09-16/RELATORIO.md` (índice
+por script em `POR_SCRIPT.md`, evidências em `pytest.txt`/`reproduzir.py`/`reproducoes.txt`).
+Nenhum achado foi P0; o risco predominante era produzir ou reaproveitar artefato incorreto,
+ou declarar sucesso com saída incompleta, em silêncio.
+
+Desta sessão: **18 dos 20 achados corrigidos e verificados** (suíte `pytest tests/` continua
+60 passed; as 9 reproduções do defeito em `reproduzir.py` deixaram de reproduzir -- ver nota
+de verificação abaixo). 2 ficaram **parcialmente** corrigidos, com o motivo registrado.
+
+### O que foi corrigido
+
+- **A01 -- `CURRENT_LOG` sem `global`** nas cinco UIs music_maker (`v2`, `v2_25`, `v3`,
+  `v3_25`, `gguf`): o fallback de ASR depois de o Demucs falhar lançava `UnboundLocalError`
+  antes de tentar a transcrição alternativa. Adicionada a declaração `global CURRENT_LOG` em
+  `slice_audio()`. VERIFICADO em processo real (fora do harness AST da auditoria): com Demucs
+  simulado falhando, o ASR agora É chamado (`asr.called == True`) e o log registra o motivo.
+- **A02 -- `_audio_key` (`render_shots.py`) identificava por TAMANHO, não conteúdo.**
+  Trocado para SHA-1 do arquivo inteiro (áudio/still são curtos; custo desprezível).
+  VERIFICADO: dois arquivos de mesmo tamanho e conteúdo diferente agora geram chaves
+  diferentes.
+- **A03 -- `_still_key` não incluía seed/steps/cfg/guidance/weight_dtype/limiar de
+  consistência, e a referência entrava só pelo NOME.** Todos os parâmetros de amostragem
+  entraram na chave; a referência (e a segunda referência, `co_subject`) agora usam o hash
+  de conteúdo de A02. VERIFICADO: duas referências de conteúdo diferente em pastas diferentes
+  não colidem mais.
+- **A04 -- chave do clipe (vídeo) sem seed/fps/resolução/variante de checkpoint, e reuso
+  comparando `_clip_frames` contra a grade do LTX para QUALQUER motor.** Adicionados seed,
+  fps, resolução e a variante de ambiente (`LTX25_VARIANT`/`MINIMAX_H3_VARIANT`/
+  `LONGCAT_VARIANT`, mais `LTX25_TWO_STAGE`, aspect_ratio/megapixels/turbo/ref_audio do
+  MiniMax) à chave. A comparação de reuso trocou de "frames do arquivo == frames do PLANO"
+  (só correta pro LTX) para "frames do arquivo == frames GRAVADOS no marcador quando o clipe
+  foi feito" (`shotNNN.key` virou JSON `{"key":..., "frames":...}`) -- correta para os três
+  motores, cada um com sua própria grade.
+- **A05 -- encadeamento MiniMax descartava o último frame.** `(refs + [frame_anterior])[:2]`
+  mantinha os dois primeiros elementos (still + sheet) e jogava fora o frame de continuidade.
+  `_minimax_chain_generate` agora recebe a sheet como parâmetro explícito e monta
+  `[sheet, frame_anterior]` a partir do segundo sub-plano. VERIFICADO textualmente contra o
+  teste da auditoria (que precisaria ser reescrito pro harness AST reconhecer a nova
+  assinatura -- não feito, ver nota de verificação).
+- **A06 -- encadeamento LTX perdia frames (arredondamento igual em todo segmento, sem
+  distribuir o resto) e só condicionava áudio no primeiro sub-plano.** O último segmento
+  agora absorve o resto (perda máxima ~8 frames, não mais o total do arredondamento vezes
+  o número de segmentos) e a diferença é logada; um novo `_split_audio()` corta o WAV de
+  condicionamento por segmento (proporcional aos frames de cada um) em vez de mandar o WAV
+  inteiro só no primeiro e `None` no resto.
+- **A07 -- falha de `concat_videos()` (retorna `False`) era ignorada nos dois encadeamentos**
+  e `build_clips_manifest` calculava `ok` só com `bool(caminho)`, sem checar se o arquivo
+  existe. Os dois encadeamentos agora levantam `RuntimeError` se o concat falhar (cai no
+  `except` que já marca o plano como falho); `build_clips_manifest` passou a exigir
+  `Path(clip).exists()`.
+- **A08 -- plano sem still sumia de `feitos` em vez de virar falha registrada.** Os dois
+  pontos (`videos_only` sem still no disco, e `_still_for_shot` retornando `None`) agora
+  anexam `{"shot": i, "still": None, "clip": None}`, então `render_shots_stage.py` conta o
+  plano como falho em vez de `ok == len(manifesto)` bater trivialmente (inclusive 0 == 0).
+- **A09 -- `concat_list.txt` gravado em ASCII, apóstrofo sem escape.** Trocado para UTF-8 sem
+  BOM; apóstrofos escapados pela sintaxe do ffconcat (`'` → `'\''`). Mesmo conserto replicado
+  em `upscale_film.ps1` (gerava a mesma lista em ASCII).
+- **A10 -- pós-produção V2V pode reusar manifesto/efeitos obsoletos -- PARCIAL.** A
+  assinatura por EFEITO (deblur/upscale) ganhou tamanho do arquivo de entrada, o LoRA
+  catalogado e o prompt do plano (antes só tinha basename+força+guia). **Não corrigido**: o
+  snapshot `mixed_clips_pre_post.json` continua sendo copiado só na primeira execução e
+  nunca invalidado se `mixed_clips.json` for remisturado depois -- não há sinal confiável,
+  dentro deste arquivo sozinho, para distinguir "a origem mudou" de "um `postprod_v2v`
+  anterior já escreveu em cima do manifesto". Resolver direito exige o `mix_audio.py`
+  carimbar uma assinatura de origem no próprio manifesto -- mudança de contrato entre dois
+  estágios, fora do escopo seguro de uma sessão sem teste de ponta a ponta. Fica para
+  quando alguém for mexer em `mix_audio.py`/`postprod_v2v.py` juntos.
+- **A11 -- `import_reference_photo` só criava a pasta de destino no ramo COM rosto.** O
+  `out_path.parent.mkdir(parents=True, exist_ok=True)` subiu para antes da bifurcação
+  bbox/sem-bbox.
+- **A12/A13 -- scripts de upscale (PowerShell) sem checagem de `$LASTEXITCODE` e com
+  temporários fixos compartilhados entre execuções.** `upscale_video.ps1`,
+  `generate_upscale.ps1`, `upscale_film.ps1` e `install_character3d.ps1` agora conferem o
+  exit code de CADA chamada nativa (ffmpeg, realesrgan-ncnn-vulkan, powershell filho,
+  huggingface-cli) e abortam com mensagem clara em vez de seguir até "PRONTO"/"concluído".
+  As pastas temporárias (`_upscale_tmp`, `_gen_lowres.mp4`, `_film_up`) ganharam sufixo de
+  PID/timestamp, e intermediários deixam de ser apagados quando a etapa falha (ficam para
+  diagnóstico).
+- **A14 -- `repair_comfyui.bat` matava TODO Python do usuário e reinstalava torch pelo
+  índice cu124** (a máquina documenta cu128 no `.venv`, ver seção Ambientes Python no
+  `CLAUDE.md`). Reescrito: mata só processos Python cuja linha de comando cite "ComfyUI"
+  (via `Get-CimInstance Win32_Process` filtrado), confere errorlevel de cada `pip install` e
+  aborta em falha, e só reinstala torch/torchvision/torchaudio se a importação falhar --
+  pelo índice cu128, não mais cu124.
+- **A15 -- `verify_output.py` pulava clipe sem caminho/arquivo em silêncio**, e a duração do
+  filme era comparada contra a soma JÁ REDUZIDA dos clipes existentes. Adicionado achado
+  `MISSING_CLIP` por clipe ausente. **Parcial**: a reconciliação completa contra os IDs do
+  `shot_plan` (para pegar um plano que nunca chegou a entrar no manifesto de jeito nenhum,
+  não só "entrou mas o arquivo sumiu") não foi implementada -- exigiria cruzar três fontes
+  (shot_plan, clips.json, disco) e não há caso de teste real disponível para validar sem
+  rodar uma decupagem completa.
+- **A16 -- `audio_encoder` duplicado** em `ModelLedger` (`model_ledger.py`): a segunda
+  definição (corpo idêntico) sobrescrevia a primeira em silêncio. Removida.
+- **A17 -- modo combinado do MiniMax H3 derrubava o ComfyUI do FLUX antes de gerar os
+  stills que ainda faltavam.** `render()` agora recusa (`ValueError` explícito) a combinação
+  `engine="minimax"` com `stills_only=False` e `videos_only=False`, apontando para as duas
+  passadas -- o orquestrador de produção (`run_decupagem.py`) já usa duas passadas e não é
+  afetado; só a chamada direta/avulsa estava exposta.
+- **A18 -- `start_character3d.bat` sem `cd /d %~dp0`.** Adicionado; `start` também ganhou
+  `/D "%~dp0"` para o processo filho herdar o diretório certo mesmo chamado de outro lugar.
+- **A19 -- cache do TTS por fala (`synthesize_dialogue.py`) identificava a amostra de voz
+  pelo CAMINHO, não conteúdo.** `_chave()` agora usa hash SHA-1 do `xtts_speaker_wav`
+  (mesmo padrão de A02): substituir a amostra mantendo o mesmo caminho não reaproveita mais
+  a fala com a voz antiga.
+- **A20 -- normalização de áudio para concat (`assemble_final.py`) sobrescrevia entradas de
+  pastas diferentes com o mesmo basename** (`Path(video_path).stem + "_norm.mp4"` num
+  diretório comum). Nome do arquivo intermediário ganhou o índice de posição na lista.
+
+### Nota de verificação
+
+`pytest tests/ -q -k "not attention_norms_materialize_from_accelerate_offload"` continua
+**60 passed** depois de todas as correções. As 9 reproduções de `auditoria/2026-09-16/
+reproduzir.py` (que passavam quando o defeito estava presente) agora **falham ou erram**
+contra o código corrigido -- é o resultado esperado, mas em alguns casos (test_04, 05, 06,
+08, 09) o motivo é a assinatura de função ter mudado (o harness isola UMA função por AST,
+sem os módulos irmãos que ela agora chama: `_split_audio`, `hashlib`, `_audio_key`), não
+uma confirmação direta de comportamento. A01, A02, A03, A07, A08, A09 e A11 foram
+confirmados também por execução direta da função real no módulo completo (não só o harness
+isolado) -- ver histórico desta sessão. `reproduzir.py` não foi reescrito para a nova
+assinatura porque é evidência congelada da auditoria, não parte do pipeline.
+
+### O que ficou de fora desta sessão
+
+- **A10 e A15**, parciais -- ver acima.
+- **As "Melhorias de arquitetura e consistência" do relatório** (centralizar assinaturas de
+  cache, contrato único de saída por plano, extrair núcleo comum das 5 UIs music_maker,
+  etc.) não foram tocadas -- são refactors maiores, fora do escopo de uma sessão de correção
+  pontual.
+- **`_still_key`/`_audio_key` continuam sem versão explícita na chave** (um `hashlib.sha1`
+  trocado por outra função de hash não invalidaria o cache sozinho) -- risco baixo (ninguém
+  troca de algoritmo de hash sem querer), não tratado.
+- Nenhum código foi COMMITADO nesta sessão -- ver `reference_ltx_git_uncommitted` na memória
+  do usuário: confirmar escopo com o usuário antes de commitar.
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
@@ -6384,10 +6521,18 @@ Item 17 acrescentado em 2026-09-06, depois do comparativo GGUF/checkpoint
 do §3.62. Item 18 acrescentado em 2026-09-07, ideia de API hospedada pro
 enriquecimento (§3.66/§3.67).)*
 
-### P0 -- estado em 2026-09-14, para quem abrir uma sessão nova
+### P0 -- estado em 2026-09-16, para quem abrir uma sessão nova
 
-Tudo da auditoria de scripts (§3.85) está commitado (`a6e5941`). Nada rodando, servidores
-desligados. O que ficou com o usuário, em ordem:
+**Segunda auditoria de scripts concluída e corrigida (§3.86), AINDA NÃO COMMITADA.** 18 dos
+20 achados corrigidos nesta sessão (A10 e A15 parciais, ver §3.86); `pytest tests/` continua
+60 passed. Confirme o escopo com o usuário antes de commitar (`git status` mostrava trabalho
+de feature já em andamento -- encadeamento LTX/MiniMax, `--minimax-no-still`,
+`--ltx-no-still` -- misturado às correções da auditoria nos mesmos arquivos; não são a mesma
+mudança, mas tocam os mesmos arquivos e por isso não dá para separar em dois commits sem
+reescrever o diff à mão).
+
+Tudo da auditoria de scripts ANTERIOR (§3.85) está commitado (`a6e5941`). Nada rodando,
+servidores desligados. O que ficou com o usuário, em ordem:
 
 1. **Assistir uma cena inteira com o fluxo novo** (`run_decupagem --dialogue-framing auto
    --ate final`, emoção de fala + TTS com cache + SyncNet + relatórios 8b/8c). Tudo foi
