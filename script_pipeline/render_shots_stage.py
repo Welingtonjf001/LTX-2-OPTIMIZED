@@ -74,7 +74,19 @@ def build_clips_manifest(feitos: list, plan: dict, dialogue: dict, engine: str =
             "character": shot.get("subject") or None,
             "video_path": f.get("clip"),
             "audio_path": wav,
-            "ok": bool(f.get("clip")),
+            # Fix #6 (avaliacao visual 2026-09-17): distingue plano de ACAO de
+            # verdade (sem fala nenhuma) de plano de fala do MiniMax (audio_path
+            # tambem None, mas ha fala -- nativa, embutida no clipe, sem TTS de
+            # referencia). Sem isto os dois caiam no MESMO log "cena de acao,
+            # pulando lip-sync" e a fala do MiniMax nunca era auditada -- nem
+            # SyncNet, nem correlacao boca-audio, nada. Ver lipsync_scenes.py.
+            "minimax_native_speech": bool(
+                engine == "minimax" and shot.get("line_index") is not None),
+            # BUGFIX auditoria 2026-09-16 (A07): `bool(caminho)` so confere que a
+            # STRING nao e vazia, nao que o ARQUIVO existe -- um concat que falhou
+            # (ver A07 em render_shots.py) podia deixar `clip` apontando pra um
+            # caminho que nunca foi escrito, e mesmo assim entrar como ok=True.
+            "ok": bool(f.get("clip")) and Path(f["clip"]).exists(),
             # Campos extras da decupagem: os estágios seguintes ignoram o que
             # não conhecem, e eles ficam disponíveis para inspeção humana.
             "framing": shot.get("framing"),
@@ -128,6 +140,34 @@ def main() -> int:
                          "MiniMax H3 (timbre/cadencia reais -- MEMORIAL 3.74). So tem efeito com "
                          "--engine minimax E dialogue/lines.json disponivel. Opt-in: validado so "
                          "com uma fala isolada ate agora, nao com a cadeia de producao inteira.")
+    ap.add_argument("--minimax-no-still", action="store_true",
+                    help="MiniMax H3: NAO manda o still deste plano como referencia de imagem -- "
+                         "so o TEXTO guia a identidade (a sheet do personagem, se existir, continua "
+                         "indo -- ela ancora ENTRE planos; tirar tambem devolveria o drift que o "
+                         "still existe pra evitar). Pedido do usuario 2026-09-16, pra comparar "
+                         "continuidade puramente textual contra a rota com still. So --engine "
+                         "minimax; nao tem efeito no LTX/LongCat.")
+    ap.add_argument("--ltx-no-still", action="store_true",
+                    help="LTX 2.5: NAO manda o still do plano como image_path (I2V) -- gera "
+                         "T2V puro, so o texto guia identidade/composicao. ltx25_backend.generate "
+                         "ja aceita image_path=None; sem esta flag o caminho da decupagem sempre "
+                         "ancorava no still. So --video-engine ltx.")
+    ap.add_argument("--ltx-chain-max-seconds", type=float, default=None,
+                    help="LTX 2.5: planos mais longos que isto viram sub-planos curtos "
+                         "encadeados por ultimo-frame (mesmo principio do continuous_chain.py, "
+                         "aplicado dentro do plano da decupagem). Sem isto (padrao), cada plano "
+                         "e sempre uma chamada so. So --video-engine ltx.")
+    ap.add_argument("--minimax-chain-max-seconds", type=float, default=None,
+                    help="MiniMax H3: planos mais longos que isto sao divididos em sub-planos "
+                         "encadeados (ultimo frame decodificado + sheet do personagem alimentam o "
+                         "sub-plano seguinte), em vez de UMA chamada longa -- MEDIDO em "
+                         "_test_minimax_duration_cap.py que planos de ~16s+ ficam instaveis "
+                         "(30min+ sem terminar) numa chamada so. 6.0 e o ponto de partida "
+                         "conservador ja validado (MEMORIAL 3.41/3.47/3.49). Sem isto (padrao), "
+                         "cada plano e SEMPRE uma chamada so, comportamento de sempre. So "
+                         "--engine minimax; a fala inteira do plano vai pra CADA sub-plano (nao "
+                         "divide o dialogo) -- revise a sincronia visualmente antes de confiar "
+                         "em producao continua.")
     ap.add_argument("--consistency-threshold", type=float, default=None,
                     help="auditoria automatica de consistencia facial (insightface) contra a "
                          "imagem de referencia do plano -- ver MEMORIAL 3.53. Sem isto, desligado "
@@ -263,7 +303,11 @@ def main() -> int:
                        lora_name=args.lora, lora_strength=args.lora_strength,
                        engine=args.engine, minimax_aspect_ratio=args.minimax_aspect_ratio,
                        minimax_megapixels=args.minimax_megapixels,
-                       minimax_turbo=args.minimax_turbo, minimax_ref_audio=args.minimax_ref_audio, log=log)
+                       minimax_turbo=args.minimax_turbo, minimax_ref_audio=args.minimax_ref_audio,
+                       minimax_no_still=args.minimax_no_still,
+                       minimax_chain_max_seconds=args.minimax_chain_max_seconds,
+                       ltx_no_still=args.ltx_no_still,
+                       ltx_chain_max_seconds=args.ltx_chain_max_seconds, log=log)
     if args.stills_only:
         print(f"[5-D] {sum(1 for f in feitos if f.get('still'))} still(s); "
               "rode de novo com --videos-only para os clipes.")

@@ -108,6 +108,20 @@ IMAGE_ENGINES = {
         "descricao": "FLUX.1 Kontext dev -- editor por instrucao; aqui so txt2img "
                      "(sem imagem de entrada, ver generate_scene_storyboard), bf16 grande",
     },
+    # Z-Image-Turbo (pedido do usuario 2026-09-17): NAO e ComfyUI -- roda num
+    # servidor HTTP proprio (zimage_backend.py, porta 8191, instalacao SEPARADA
+    # em E:\Users\home\Documents\Z-Image). "checkpoint" aqui e so um sentinela
+    # pra detect_architecture() reconhecer a arquitetura e desviar do grafo
+    # ComfyUI inteiro dentro de generate_scene_storyboard -- nao existe arquivo
+    # nenhum com esse nome. Aceita reference_image via img2img (mesmos pesos,
+    # ZImageImg2ImgPipeline) -- MEDIDO: fotorrealismo e adesao ao prompt bem
+    # acima do FLUX Klein no mesmo teste (roupa/penteado do roteiro).
+    "zimage": {
+        "checkpoint": "zimage-turbo", "clip": "", "vae": "",
+        "steps": 9, "cfg": 0.0, "guidance": 0.0,
+        "descricao": "Z-Image-Turbo (6B, servidor proprio porta 8191) -- fotorrealista, "
+                     "~19s/still depois do 1o (carga ~220s), aceita referencia via img2img",
+    },
 }
 
 # Nomes dos encoders do SD 3.5 quando o chamador nao passa a tripla explicita
@@ -254,6 +268,8 @@ def detect_architecture(checkpoint: str) -> str:
     Detectar pelo nome e fragil, mas e o que os tres formatos tem em comum aqui:
     o chamador passa um nome de arquivo, nao um tipo."""
     nome = checkpoint.lower()
+    if "zimage" in nome:
+        return "zimage"
     # "flux1-..." (Krea/Kontext/dev/schnell) precisa vir ANTES do "flux" generico:
     # os dois nomes contem "flux", mas so o FLUX.2 Klein usa o CLIPLoader Qwen3
     # unico que o branch "flux" abaixo monta.
@@ -615,6 +631,57 @@ def _stage_reference(image_path: str, tag: str) -> str:
     return staged
 
 
+def _wire_img2img_reference(workflow: dict, reference_image: str, tag: str, *,
+                            denoise: float = 0.55, log=print) -> None:
+    """Referencia de personagem pra SD3.5/FLUX.1 (Krea/Kontext) -- NENHUM dos
+    dois tem a rota ReferenceLatent que o FLUX.2 Klein usa (nao ha IPAdapter/
+    InstantID/PuLID instalado neste ComfyUI pra dar uma referencia "de
+    verdade" a esses dois). Pedido do usuario 2026-09-16: "conceda meios de
+    uso de foto de referencia" em vez de gerar sem nenhuma.
+
+    Mecanismo (funciona em qualquer arquitetura, e por isso serve aqui):
+    troca o latente vazio (ruido puro) pelo latente CODIFICADO da propria
+    foto de referencia, com denoise PARCIAL em vez de 1.0 -- e um img2img, nao
+    um txt2img. Em `denoise` baixo o modelo preserva bastante da composicao/
+    identidade da foto original; em alto, ele se aproxima de gerar do zero.
+
+    NAO E EQUIVALENTE ao ReferenceLatent do FLUX.2: aqui a foto dirige a
+    COMPOSICAO inteira (pose, enquadramento, fundo), nao so a identidade --
+    a referencia e um retrato de rosto/busto, entao o resultado tende a favor
+    planos medium/close (perto da moldura da propria foto) e a brigar mais
+    num wide, onde o prompt pede um enquadramento bem diferente do da foto.
+    NAO VALIDADO em producao ainda -- primeiro uso e o teste A/B pedido pelo
+    usuario; ver MEMORIAL antes de virar padrao."""
+    ksampler = workflow.get("8")
+    empty_latent = workflow.get(ksampler["inputs"]["latent_image"][0], {})
+    # A foto de referencia tem SUA PROPRIA resolucao (retrato, ex. 637x960) --
+    # sem redimensionar pro tamanho do plano (paisagem, ex. 960x544), o VAE a
+    # codifica do jeito que ela e e o still sai com a resolucao ERRADA
+    # (descoberto porque o ffmpeg recusava montar o animatic: "Nothing was
+    # written... Invalid argument" -- quadros de tamanhos diferentes).
+    largura = empty_latent.get("inputs", {}).get("width", 960)
+    altura = empty_latent.get("inputs", {}).get("height", 544)
+    vaedecode = workflow.get("9")
+    vae_link = vaedecode["inputs"]["vae"]
+    novo_id_img = "9001"
+    novo_id_scale = "9003"
+    novo_id_encode = "9002"
+    staged = _stage_reference(reference_image, f"img2img_{tag}")
+    workflow[novo_id_img] = {"class_type": "LoadImage", "inputs": {"image": staged}}
+    workflow[novo_id_scale] = {"class_type": "ImageScale",
+                               "inputs": {"image": [novo_id_img, 0], "upscale_method": "lanczos",
+                                          "width": largura, "height": altura, "crop": "center"}}
+    workflow[novo_id_encode] = {"class_type": "VAEEncode",
+                                "inputs": {"pixels": [novo_id_scale, 0], "vae": vae_link}}
+    ksampler["inputs"]["latent_image"] = [novo_id_encode, 0]
+    ksampler["inputs"]["denoise"] = denoise
+    # O node antigo (EmptyLatentImage/EmptySD3LatentImage) fica no grafo sem
+    # nada apontando pra ele -- ComfyUI ignora node orfao, mais simples que
+    # remover e reindexar.
+    log(f"[img2img-ref] denoise={denoise} a partir de {Path(reference_image).name} "
+        f"redimensionada para {largura}x{altura}")
+
+
 def generate_scene_storyboard(
     scene: dict, cast: dict, *, server: str, checkpoint: str, width: int, height: int,
     steps: int, cfg: float, seed: int, out_path: Path, log=print,
@@ -624,6 +691,23 @@ def generate_scene_storyboard(
     weight_dtype: str = "default", lora_name: str = "", lora_strength: float = 0.8,
 ) -> bool:
     architecture = detect_architecture(checkpoint)
+    if architecture == "zimage":
+        # Desvia do grafo ComfyUI inteiro: Z-Image-Turbo roda num servidor HTTP
+        # PROPRIO (zimage_backend.py, porta 8191), nao no ComfyUI de `server`.
+        # `art_directed`/lora/dual-reference (so FLUX tem esse grafo) nao se
+        # aplicam aqui -- se precisar deles, use --image-engine flux.
+        import zimage_backend
+        prompt = prompt_override if prompt_override else build_prompt(scene, cast)
+        ok = zimage_backend.generate(
+            prompt, out_path, width=width, height=height, steps=steps, seed=seed,
+            reference_image=reference_image, log=log)
+        if ok:
+            log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
+        return ok
+    # Guardado ANTES do reset abaixo (reference_image vira None pra qualquer
+    # arquitetura que nao seja "flux") -- e o que _wire_img2img_reference usa
+    # pra dar a sd35/flux1 uma referencia aproximada (ver comentario la).
+    img2img_reference = reference_image
     # A character reference photo routes through the ReferenceLatent graph, which a
     # controlled test in this project showed FLUX.2 Klein genuinely honours: same
     # prompt + same seed produced an unrelated person WITHOUT the reference and the
@@ -678,6 +762,9 @@ def generate_scene_storyboard(
             reference_image_2, f"{scene['index']:02d}_{out_path.stem}_2"
         )
     workflow = _fill_template(template, values)
+    if img2img_reference and architecture in ("sd35", "flux1") and not used_reference_template:
+        _wire_img2img_reference(workflow, img2img_reference,
+                                f"{scene['index']:02d}_{out_path.stem}", log=log)
     if lora_name:
         arch_key = "flux-ref" if (used_reference_template or used_dual_reference) else architecture
         _apply_lora(workflow, arch_key, lora_name, lora_strength)

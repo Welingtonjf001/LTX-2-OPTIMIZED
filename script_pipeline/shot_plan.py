@@ -317,7 +317,12 @@ def appearance_only(descriptor: str) -> str:
     ja_tem = bool(m) and re.search(r"wearing|dressed in|vestindo",
                                    m.group(1), re.IGNORECASE)
     if not ja_tem:
-        w = re.search(r"\b(wearing|dressed in|vestindo)\b([^).]{3,220})",
+        # BUGFIX 2026-09-15 (achado por auditoria externa nos 4 filmes-teste):
+        # exigia o gerundio "wearing" -- um descritor escrito na 3a pessoa do
+        # presente ("She wears special-forces fatigues...", em vez de
+        # "wearing...") nunca casava aqui. Ampliado para cobrir "wears"/"is
+        # wearing" tambem.
+        w = re.search(r"\b(wearing|is wearing|wears|dressed in|vestindo)\b([^).]{3,220})",
                       descriptor, re.IGNORECASE)
         if w:
             # SEM parentese de apresentacao, o que vem ANTES do "wearing" nao e
@@ -331,7 +336,21 @@ def appearance_only(descriptor: str) -> str:
             # continua valendo.
             inicio = w.start() if m else 0
             pedacos.append(descriptor[inicio:w.end()].strip().rstrip(",;"))
-    return ", ".join(pedacos) if pedacos else descriptor.strip()
+    resultado = ", ".join(pedacos) if pedacos else descriptor.strip()
+    # FALHA SEGURA 2026-09-15: um parentese incidental (ex.: "(tied back)",
+    # uma nota de pose que nao e a apresentacao do personagem) sem "wearing"
+    # em lugar nenhum do descritor produzia um resultado de poucos
+    # caracteres -- e a funcao devolvia ISSO em vez do descritor inteiro,
+    # contradizendo o proprio docstring ("perder aparencia e pior que
+    # carregar um pouco de acao junto"). MEDIDO no cast real: "Ha-eun has
+    # dark brown wavy shoulder-length hair (tied back), ..." virava so
+    # "tied back", descartando cabelo/expressao/figurino inteiros. Um
+    # resultado pequeno demais, perto do descritor original, e sinal de
+    # extracao ruim, nao de descritor curto de verdade -- cai pro texto
+    # inteiro.
+    if len(resultado) < 20 and len(descriptor.strip()) > 40:
+        return descriptor.strip()
+    return resultado
 
 
 def _character_in(texto: str, personagens: list) -> str:
@@ -417,7 +436,7 @@ def frames_for(seconds: float, fps: float) -> int:
 def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
                        time_of_day: str, look: str, descriptor: str,
                        screen_side: str | None, interior: str = "",
-                       pose: str = "") -> str:
+                       pose: str = "", co_subject: str = "", co_descriptor: str = "") -> str:
     """Prompt do STILL. Carrega enquadramento e ângulo -- que o vídeo não
     consegue estabelecer no frame 0.
 
@@ -437,6 +456,15 @@ def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
         if SUBJECT_HINTS.get(framing):
             clausula += f", {SUBJECT_HINTS[framing]}"
         partes.append(clausula)
+    # BUGFIX (auditoria externa 2026-09-16, achado #4): plano com DOIS
+    # personagens so carregava a aparencia do subject principal -- o still
+    # inventava a roupa/cabelo do co_subject do zero, e o caso medido foi as
+    # duas saindo vestidas IGUAIS (a segunda copiando a primeira, que e o que
+    # sobra quando o modelo nao tem nada escrito sobre ela). co_subject entra
+    # como uma segunda pessoa explicita no quadro, com a PROPRIA aparencia.
+    if co_subject and co_subject != subject:
+        clausula_co = f"{co_subject}{', ' + co_descriptor if co_descriptor else ''}"
+        partes.append(f"with {clausula_co}")
     pose_curta = (pose or "").strip().rstrip(".")
     # Close nao leva gesto de corpo: "arms crossed" obrigou o FLUX a abrir ate a cintura
     # (VISTO 2026-09-13, shot001_close.png). A expressao ja vem pelo descritor/emocao.
@@ -558,7 +586,7 @@ def emocao_visivel_fala(emocao: str | None) -> str:
 def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
                   quote: str | None, subject: str = "", fallback: str = "",
                   emotion: str | None = None, framing: str = "",
-                  speaking: bool = False) -> str:
+                  speaking: bool = False, co_subject: str = "", co_descriptor: str = "") -> str:
     """Prompt do VÍDEO. Descreve MOVIMENTO e ação -- nunca enquadramento, que
     já está fixado pela imagem de condicionamento.
 
@@ -588,14 +616,34 @@ def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
     visivel = emocao_visivel_fala(emotion) if speaking else emocao_visivel(emotion)
     if visivel:
         partes.append(visivel)
-    if quote:
-        partes.append(f'speaking, saying: "{quote}"')
     if descriptor:
         partes.append(descriptor)
+    # BUGFIX (auditoria externa 2026-09-16, achado #4): mesmo problema do
+    # still, so que no prompt de VIDEO -- sem a aparencia do co_subject aqui,
+    # o clipe tambem inventa/copia a roupa dela do zero, plano a plano.
+    if co_subject and co_subject != subject and co_descriptor:
+        partes.append(f"{co_subject}, {co_descriptor}")
     if MOVEMENTS.get(movement):
         partes.append(MOVEMENTS[movement])
     if look:
         partes.append(look)
+    if quote:
+        # BUGFIX (auditoria externa 2026-09-16, achado #8): a fala citada
+        # colada junto do resto do texto (aparencia, cenario) deixava o
+        # MiniMax H3 vazar vocabulario de aparencia pra dentro da fala GERADA
+        # (medido: a palavra do figurino "buyao" apareceu falada em voz alta).
+        # A fala agora fica isolada no FIM do prompt, com marcacao explicita
+        # de que e a UNICA coisa a ser dita -- nada do texto anterior (que
+        # descreve o QUADRO, nao a voz) deve soar.
+        partes.append(f'The only words spoken aloud, exactly and only these: "{quote}"')
+    # BUGFIX (auditoria externa 2026-09-16, achado #2): sem isto, nada no
+    # prompt proibe texto/legenda/marca d'agua na imagem -- e o modelo as
+    # vezes desenha um sozinho (medido: caracteres sobre o tecido de uma
+    # personagem). Prompt POSITIVO de proposito: o negative_prompt nao tem
+    # efeito em variantes de poucos passos/CFG baixo (MiniMax w4a8-v10, LTX
+    # distilled) -- so o que esta escrito no prompt principal conta ali.
+    partes.append("no on-screen text, no captions, no subtitles, no watermark, "
+                  "no logos, plain fabric with no writing or symbols on it")
     return ". ".join(p for p in partes if p) + "."
 
 
@@ -677,7 +725,8 @@ def _plano_de_estabelecimento(scene: dict, style: dict, tensao: float | None,
 def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24.0,
                descriptors: dict | None = None, include_quotes: bool = False,
                sides: dict | None = None, durations: dict | None = None,
-               estabelecer: bool = False, style_por_plano=None) -> list:
+               estabelecer: bool = False, style_por_plano=None,
+               off_screen: set | None = None) -> list:
     """Decupagem de UMA cena. Sem LLM. `sides` vem de plan_all, global.
 
     `estabelecer`: esta e a primeira cena neste local -- quem decide e plan_all,
@@ -692,7 +741,12 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
         _nome0 = next((n for n, v in STYLES.items() if v is style), "")
         def style_por_plano(_pos, _n=_nome0, _s=style):
             return _n, _s
-    personagens = list(scene.get("characters") or [])
+    off_screen = off_screen or set()
+    # Fonte de audio sem presenca fisica (VOZ/radio/narrador, ver
+    # cast_characters._is_offscreen_voice) nunca deve virar sujeito de plano
+    # nem entrar no calculo de lado de tela -- sem isto ela recebia close
+    # normal e um still inventava corpo pra ela (achado 2026-09-15).
+    personagens = [p for p in (scene.get("characters") or []) if p not in off_screen]
     lados = sides if sides is not None else assign_screen_sides(personagens)
     funcao = (struct or {}).get("function")
     tensao = (struct or {}).get("tension")
@@ -727,6 +781,18 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
     dialogo = scene.get("dialogue") or []
     planos = []
     ultimo_falante = None
+    # Fix #1 (auditoria externa 2026-09-16, achado #1): personagem "duplicada"
+    # dentro do proprio quadro. MEDIDO no still real da cena do palacio: a
+    # princesa aparecia DUAS vezes no mesmo still. O padrao comum e o CO-
+    # SUJEITO de um plano ja ter tido plano PROPRIO antes, nesta mesma cena --
+    # nesse ponto ela ja esta "no palco" e repetir o descritor fisico
+    # INTEIRO dela como co-sujeito (corpo, cabelo, figurino, tudo de novo)
+    # no mesmo prompt do sujeito principal e o que convida o FLUX a tratar as
+    # duas mencoes como PESSOAS diferentes, nao a mesma. Uma vez que um
+    # personagem ja teve seu proprio plano na cena, mencoes dela como
+    # co-sujeito daqui pra frente usam so o NOME (sem o descritor), como uma
+    # segunda pessoa ja estabelecida em cena precisa ser mencionada.
+    ja_com_plano_proprio: set = set()
     # Conta as falas da cena. E este ordinal, nao `pos`, que gira a escada de
     # enquadramento: as falas ocupam posicoes de paridade fixa quando ha planos
     # de acao entre elas, e por `pos` o ciclo simplesmente nao gira para elas.
@@ -741,7 +807,12 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
         if item.get("type") == "dialogue":
             li = item.get("line_index", 0)
             linha = dialogo[li] if 0 <= li < len(dialogo) else {}
-            sujeito = linha.get("character") or ""
+            falante_bruto = linha.get("character") or ""
+            fala_fora_de_quadro = falante_bruto in off_screen
+            # Fala de fonte fora de quadro (radio, narracao) nao tem rosto pra
+            # enquadrar -- sujeito vazio evita referencia/close nela; o
+            # enquadramento em si vira insert mais abaixo.
+            sujeito = "" if fala_fora_de_quadro else falante_bruto
             acao = linha.get("beat_visual") or scene.get("visual_prompt") or ""
             co_sujeito = _other_character_in(acao, personagens, sujeito)
             fala = linha.get("text") or ""
@@ -754,6 +825,12 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             else:
                 # Mesmo falante emendando: fecha, em vez de repetir o degrau.
                 enquadre = "close" if "close" in escada else escada[-1]
+            if fala_fora_de_quadro:
+                # Sem rosto pra fechar -- nunca close/medium (pediria rosto
+                # que nao existe). Insert = "no face in frame", o que a fonte
+                # de audio fora de quadro exige (achado 2026-09-15, VOZ
+                # virando personagem holografico pra caber num close).
+                enquadre = "insert"
             ultimo_falante = sujeito or ultimo_falante
             n_fala += 1
         else:
@@ -766,7 +843,16 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             # que é o enquadramento oposto do que a ação pede. Inserto é para
             # detalhe de objeto, e é assim que ele volta a ser usado: só quando
             # a ação não nomeia ninguém.
-            sujeito = _character_in(acao, personagens)
+            # Fix #5 (auditoria externa 2026-09-16, achado #5): prefere o "actor"
+            # que o LLM de enriquecimento atribuiu explicitamente (parse_screenplay
+            # .build_enrich_system_prompt) sobre o heuristico _character_in, que so
+            # acha o primeiro nome de `personagens` que aparece no texto -- e por
+            # ordem da LISTA, nao da frase, confundindo quem AGE com quem so e
+            # mencionado/observado ("Ana caminha enquanto Bia observa"). Cai pro
+            # heuristico quando o LLM nao informou actor, ou informou um nome que
+            # nao bate com nenhum personagem conhecido da cena.
+            actor_llm = _character_in(item.get("actor") or "", personagens)
+            sujeito = actor_llm or _character_in(acao, personagens)
             co_sujeito = _other_character_in(acao, personagens, sujeito) if sujeito else ""
             if sujeito:
                 enquadre = cobertura[pos % len(cobertura)]
@@ -798,6 +884,9 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
         movimento = estilo["movements"].get(enquadre, "static")
         lado = lados.get(sujeito)
 
+        co_descriptor_efetivo = ("" if co_sujeito in ja_com_plano_proprio
+                                 else descriptors.get(co_sujeito, ""))
+
         planos.append({
             "scene": scene.get("index"),
             "position": pos,
@@ -822,12 +911,14 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
                 framing=enquadre, angle=angulo, subject=sujeito,
                 location=scene.get("location", ""), time_of_day=scene.get("time_of_day", ""),
                 look=look, descriptor=descriptors.get(sujeito, ""),
-                screen_side=lado, interior=interior, pose=acao),
+                screen_side=lado, interior=interior, pose=acao,
+                co_subject=co_sujeito, co_descriptor=co_descriptor_efetivo),
             "video_prompt": _video_prompt(
                 action=acao, movement=movimento, descriptor=descriptors.get(sujeito, ""),
                 look=look, quote=fala if (include_quotes and fala) else None,
                 subject=sujeito, fallback=scene.get("action_text", ""),
-                emotion=emocao_da_fala, framing=enquadre, speaking=bool(fala)),
+                emotion=emocao_da_fala, framing=enquadre, speaking=bool(fala),
+                co_subject=co_sujeito, co_descriptor=co_descriptor_efetivo),
             # Ingredientes crus, guardados so para o enriquecimento de camera
             # opcional (enrich_camera_style) poder RECONSTRUIR os dois prompts
             # acima depois de trocar movement/look -- sem isto ele teria que
@@ -838,6 +929,8 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             "beat": acao, "quote": fala if (include_quotes and fala) else None,
             "emotion": emocao_da_fala, "fallback": scene.get("action_text", ""),
         })
+        if sujeito:
+            ja_com_plano_proprio.add(sujeito)
 
     # O estabelecimento vem na frente e so quando a cobertura ainda nao abriu o
     # quadro sozinha. Renumerar `position` depois mantem a numeracao contigua --
@@ -922,7 +1015,8 @@ def style_for_scene(index: int, base: str, changes: dict) -> str:
 def plan_all(scenes: list, structure: dict | None, *, style_name: str = "classico",
              fps: float = 24.0, descriptors: dict | None = None,
              include_quotes: bool = False, style_changes: dict | None = None,
-             durations: dict | None = None, dialogue_close_only: bool = False) -> dict:
+             durations: dict | None = None, dialogue_close_only: bool = False,
+             off_screen: set | None = None) -> dict:
     global DIALOGO_SO_CLOSE
     DIALOGO_SO_CLOSE = bool(dialogue_close_only)
     if style_name not in STYLES:
@@ -930,10 +1024,11 @@ def plan_all(scenes: list, structure: dict | None, *, style_name: str = "classic
     style_changes = style_changes or {}
     por_cena = {s["index"]: s for s in (structure or {}).get("scenes", [])}
     # Lados de tela decididos UMA vez, na ordem de primeira aparição no filme.
+    off_screen = off_screen or set()
     ordem = []
     for sc in scenes:
         for nome in (sc.get("characters") or []):
-            if nome not in ordem:
+            if nome not in ordem and nome not in off_screen:
                 ordem.append(nome)
     lados = assign_screen_sides(ordem)
     planos = []
@@ -961,7 +1056,7 @@ def plan_all(scenes: list, structure: dict | None, *, style_name: str = "classic
         novos = plan_scene(sc, por_cena.get(idx), estilo, fps=fps,
                            descriptors=descriptors, include_quotes=include_quotes,
                            sides=lados, durations=durations, estabelecer=novo_local,
-                           style_por_plano=por_plano)
+                           style_por_plano=por_plano, off_screen=off_screen)
         # `style` de cada plano vem do resolvedor, nao daqui: dentro da mesma
         # cena dois planos podem ter nascido sob estilos diferentes.
         for pl in novos:
@@ -1258,10 +1353,16 @@ def main() -> int:
     # Descritores do cast: só a APARÊNCIA entra, ver appearance_only().
     cast_path = Path(args.cast) if args.cast else sp_default_cast(sp_run=args.run, scenes_path=sp)
     descritores = {}
+    off_screen = set()
     if cast_path and cast_path.exists():
         cast = json.load(open(cast_path, encoding="utf-8"))
         descritores = {n: appearance_only(v.get("descriptor", "")) for n, v in cast.items()}
-        print(f"[shot_plan] cast: {len(descritores)} descritor(es) de {cast_path.name}")
+        # on_screen=False (ver cast_characters._is_offscreen_voice): fonte de
+        # audio sem corpo em cena (VOZ/radio/narrador) -- nunca vira sujeito
+        # nem ganha close (2026-09-15).
+        off_screen = {n for n, v in cast.items() if v.get("on_screen") is False}
+        print(f"[shot_plan] cast: {len(descritores)} descritor(es) de {cast_path.name}"
+              + (f", {len(off_screen)} fora de quadro ({', '.join(sorted(off_screen))})" if off_screen else ""))
     else:
         print("[shot_plan] sem cast.json: os stills sairao sem figurino/idade do roteiro.")
 
@@ -1278,7 +1379,7 @@ def main() -> int:
     plan = plan_all(scenes, structure, style_name=args.style, fps=args.fps,
                     include_quotes=args.include_quotes, style_changes=changes,
                     descriptors=descritores, durations=duracoes,
-                    dialogue_close_only=so_close)
+                    dialogue_close_only=so_close, off_screen=off_screen)
     if args.camera_llm:
         enrich_camera_style(plan, engine=args.engine, log=print)
     out = Path(args.out) if args.out else sp.parent / "shot_plan.json"

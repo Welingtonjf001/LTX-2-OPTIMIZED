@@ -113,6 +113,40 @@ def main(argv=None) -> int:
             continue
 
         if not clip.get("audio_path"):
+            if clip.get("minimax_native_speech"):
+                # Fix #6 (avaliacao visual 2026-09-17): fala do MiniMax e nativa,
+                # embutida no proprio clipe -- nao ha WAV de TTS para o Wav2Lip/
+                # LatentSync sincronizar contra (por isso audio_path e None), mas
+                # ha fala de verdade, e ela nunca era auditada. O SyncNet aceita
+                # audio=None e usa o audio JA EMBUTIDO no video -- mede se a boca
+                # bate com a PROPRIA fala do MiniMax, o que da sinal de sincronia
+                # real ainda que NAO verifique se o TEXTO falado bate com o
+                # roteiro (isso exigiria transcricao/ASR, fora de escopo aqui).
+                final_video = clip["video_path"]
+                synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": False})
+                log(f"{clip['id']}: fala nativa do MiniMax (sem TTS de referencia); "
+                    "medindo sincronia contra o audio embutido no proprio clipe.")
+                veredito = {"score": None, "faces_detected": None, "frames_sampled": None,
+                            "motivo": "MiniMax: sem TTS de referencia -- so sync labial medido, "
+                                      "conteudo da fala nao verificado.",
+                            "audio_source": "minimax_native"}
+                if not args.no_syncnet:
+                    try:
+                        from script_pipeline.syncnet_audit import LIMIAR_CONF, syncnet_score
+                        sn = syncnet_score(final_video)
+                        veredito["syncnet"] = sn
+                        if sn.get("conf") is not None:
+                            marca_sn = "OK" if sn["conf"] >= LIMIAR_CONF else "FRACO"
+                            log(f"  SyncNet (audio nativo MiniMax): conf {sn['conf']:.2f} "
+                                f"({marca_sn}), dist {sn['min_dist']:.2f}, offset "
+                                f"{sn['av_offset']} quadro(s) -- so sincronia, sem checar "
+                                "conteudo da fala.")
+                        else:
+                            log(f"  SyncNet: nao mediu ({sn.get('motivo')})")
+                    except Exception as e:
+                        veredito["syncnet"] = {"conf": None, "motivo": f"{type(e).__name__}: {e}"}
+                audit_report[clip["id"]] = veredito
+                continue
             # Action-only clip: nothing to sync, pass through as-is.
             synced_manifest.append({**clip, "final_video_path": clip["video_path"], "lipsync_applied": False})
             log(f"{clip['id']}: sem fala (cena de acao); mantendo clipe original.")

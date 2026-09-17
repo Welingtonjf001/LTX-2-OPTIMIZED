@@ -170,9 +170,22 @@ def verify(run_dir: Path, *, output_name: str, min_audio_db: float,
     signatures: list[tuple[str, list[int] | None]] = []
     for clip in clips:
         path = clip.get("mixed_video_path") or clip.get("video_path")
+        clip_id = clip.get("id") or (Path(path).stem if path else "?")
         if not path or not Path(path).exists():
+            # BUGFIX auditoria 2026-09-16 (A15): um clipe sem caminho ou com o
+            # arquivo ausente era simplesmente pulado -- `total_clip_seconds`
+            # e a checagem de variedade nunca sabiam que ele faltava, e
+            # SHORT_FILM compara o filme contra essa soma JA REDUZIDA: um
+            # filme truncado exatamente pelos planos que faltavam no
+            # manifesto/disco podia bater com a soma reduzida e passar limpo.
+            findings.append({
+                "code": "MISSING_CLIP", "severity": "error", "clip": clip_id,
+                "detail": f"Clipe do manifesto sem caminho ou arquivo ausente "
+                          f"({path or 'sem video_path'}) -- nao entrou na duracao "
+                          "nem na checagem de variedade; o filme pode estar "
+                          "faltando este plano sem que a duracao acuse.",
+            })
             continue
-        clip_id = clip.get("id", Path(path).stem)
         total_clip_seconds += probe_duration(path)
 
         # A clip that carries a dialogue line must actually be audible.
@@ -230,6 +243,65 @@ def verify(run_dir: Path, *, output_name: str, min_audio_db: float,
             "detail": f"O filme tem {film_seconds:.1f}s mas os clipes somam "
                       f"{total_clip_seconds:.1f}s -- provavelmente clipes foram descartados.",
         })
+
+    # --- duracao PLANEJADA vs PRODUZIDA (auditoria externa 2026-09-16, achado
+    # #10): a checagem acima so pega clipe perdido na concatenacao -- nao pega
+    # o motor de video arredondando a duracao pra grade PROPRIA dele (MEDIDO:
+    # MiniMax H3 pediu 52,75s de shot_plan e produziu 56,6s, quase 4s de
+    # deriva silenciosa, sem nenhum clipe faltando). So AVISA (nao gera
+    # finding de erro): arredondar pra grade do motor e esperado; o valor
+    # aqui existe pra alguem notar deriva grande antes de assumir "bateu
+    # certinho" so porque nenhum clipe sumiu.
+    shot_plan_path = run_dir / "parse" / "shot_plan.json"
+    if shot_plan_path.exists():
+        try:
+            plano = json.loads(shot_plan_path.read_text(encoding="utf-8"))
+            planned_seconds = sum(s.get("seconds", 0.0) for s in plano.get("shots", []))
+        except (OSError, json.JSONDecodeError):
+            planned_seconds = 0.0
+        if planned_seconds:
+            deriva = film_seconds - planned_seconds
+            report["checks"].append({
+                "check": "duration_vs_plan", "planned_seconds": round(planned_seconds, 2),
+                "film_seconds": round(film_seconds, 2), "drift_seconds": round(deriva, 2),
+            })
+            # 10% OU 2s, o que for maior -- planos curtos (poucos segundos)
+            # nao devem disparar por um arredondamento de fracao de frame.
+            limite = max(planned_seconds * 0.1, 2.0)
+            if abs(deriva) > limite:
+                findings.append({
+                    "code": "DURATION_DRIFT", "severity": "warning",
+                    "detail": f"Plano pedia {planned_seconds:.1f}s, filme final tem "
+                              f"{film_seconds:.1f}s (deriva de {deriva:+.1f}s). Nenhum "
+                              "clipe falta -- e o motor de video arredondando pra sua "
+                              "propria grade (ex.: MiniMax H3, 5+17k frames). Revise se "
+                              "a deriva e grande o bastante pra afetar ritmo/sincronia.",
+                })
+
+    # Fix #6 (avaliacao visual 2026-09-17): a fala do MiniMax e nativa (sem TTS
+    # de referencia) e so o SIGNAL LABIAL e medido (SyncNet contra o audio
+    # embutido no proprio clipe, ver lipsync_scenes.py) -- o CONTEUDO da fala
+    # (se ela corresponde ao roteiro) nunca e verificado, ao contrario do
+    # caminho LTX (audio_conditioning vem do TTS, que sintetiza o texto real).
+    # Isto so avisa que existe essa lacuna nesta corrida -- nao e um defeito
+    # em si, e informativo, para nao deixar passar como "auditado igual".
+    lipsync_audit_path = run_dir / "lipsync" / "lipsync_audit.json"
+    if lipsync_audit_path.exists():
+        try:
+            audit = json.loads(lipsync_audit_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            audit = {}
+        nativos = [cid for cid, v in audit.items() if v.get("audio_source") == "minimax_native"]
+        if nativos:
+            findings.append({
+                "code": "MINIMAX_SPEECH_UNVERIFIED", "severity": "info",
+                "detail": f"{len(nativos)} plano(s) com fala nativa do MiniMax H3 "
+                          f"({', '.join(nativos[:5])}{'...' if len(nativos) > 5 else ''}) -- "
+                          "so a sincronia labial foi medida (SyncNet contra o audio do "
+                          "proprio clipe); o CONTEUDO da fala (se bate com o roteiro) nao "
+                          "foi verificado. Se a fala exata importa, confira --minimax-ref-audio "
+                          "ou trate a trilha do TTS+lipsync como a autoritativa.",
+            })
 
     _check_enrichment(run_dir, report, findings)
     return report

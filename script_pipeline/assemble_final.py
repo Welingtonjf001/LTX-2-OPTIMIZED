@@ -57,7 +57,8 @@ CONCAT_FPS = "24"            # o fps do LTX; o lip-sync devolve 25
 CONCAT_TIMESCALE = "12288"   # a timescale que o ffmpeg ja da aos clipes de 24 fps
 
 
-def _normalize_audio_for_concat(video_path: str, work_dir: Path, *, ffmpeg: str, log) -> str:
+def _normalize_audio_for_concat(video_path: str, work_dir: Path, *, ffmpeg: str, log,
+                                 indice: int = 0) -> str:
     """Return a copy of this clip whose audio is AAC/48kHz/stereo, inventing a silent
     track when the clip has none. Video is stream-copied (only audio is re-encoded).
 
@@ -76,7 +77,13 @@ def _normalize_audio_for_concat(video_path: str, work_dir: Path, *, ffmpeg: str,
     Hence: normalise EVERY clip to identical audio parameters, not just the silent ones.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    out_path = work_dir / (Path(video_path).stem + "_norm.mp4")
+    # BUGFIX auditoria 2026-09-16 (A20): nomear so pelo stem colide quando dois
+    # clipes de PASTAS diferentes compartilham o basename (ex.: a/clip.mp4 e
+    # b/clip.mp4, ou o padrao "shotNNN.mp4" repetido entre cenas com paths
+    # relativos distintos) -- a segunda normalizacao sobrescreve a primeira, e
+    # a lista final do concat aponta duas vezes para o MESMO arquivo. O indice
+    # de posicao na lista de entrada garante nome unico independente do path.
+    out_path = work_dir / f"{indice:04d}_{Path(video_path).stem}_norm.mp4"
     # MEDIDO 2026-09-13 ("O Primeiro Tour", 43 planos): depois do mix o video de cada
     # plano de fala saia 0,1-0,16 s mais curto que o audio, e o concat demuxer
     # empilha as duas faixas SEPARADAMENTE -- o filme terminou com 146,7 s de video
@@ -122,15 +129,22 @@ def concat_videos(video_paths: list[str], output_path: Path, *, work_dir: Path, 
 
     norm_dir = work_dir / "_audio_normalized"
     n_silent = sum(1 for p in video_paths if not _has_audio_stream(p, ffmpeg=ffmpeg))
-    video_paths = [_normalize_audio_for_concat(p, norm_dir, ffmpeg=ffmpeg, log=log) for p in video_paths]
+    video_paths = [_normalize_audio_for_concat(p, norm_dir, ffmpeg=ffmpeg, log=log, indice=idx)
+                  for idx, p in enumerate(video_paths)]
     log(f"assemble_final: audio normalizado para AAC {CONCAT_AUDIO_RATE}Hz estereo em "
         f"{len(video_paths)} clipe(s) ({n_silent} sem audio receberam silencio). "
         "Sem isso o concat descarta o audio dos clipes que divergem do primeiro.")
 
+    # BUGFIX auditoria 2026-09-16 (A09): `encoding="ascii"` derruba com
+    # UnicodeEncodeError em qualquer pasta/nome com acento (ex.: "João",
+    # "ação") -- MEDIDO: reproduzido antes mesmo de chamar o ffmpeg. E os
+    # apostrofos (nomes com "'") nao eram escapados, o que quebra a sintaxe do
+    # ffconcat (cada `'` fecha a string do caminho no meio do nome). UTF-8 sem
+    # BOM e o escape padrao do formato (`'` -> `'\''`) resolvem os dois.
     concat_list = work_dir / "concat_list.txt"
-    with open(concat_list, "w", encoding="ascii") as handle:
+    with open(concat_list, "w", encoding="utf-8", newline="\n") as handle:
         for path in video_paths:
-            safe_path = os.path.abspath(path).replace("\\", "/")
+            safe_path = os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
             handle.write(f"file '{safe_path}'\n")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

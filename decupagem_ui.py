@@ -1014,6 +1014,8 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
           minimax_variant: str = "fp8int8", lora: str = "(nenhum)",
           lora_strength: float = 0.8, character_sheet_on: bool = False,
           character_sheet_n: int = 4, minimax_ref_audio: bool = False,
+          minimax_no_still: bool = False, minimax_chain_max_seconds: float | None = None,
+          ltx_no_still: bool = False, ltx_chain_max_seconds: float | None = None,
           video_loras: list | None = None, ic_reference: str = "off",
           ic_strength: float = 1.0, extras: list | None = None) -> list:
     cmd = [PY, "-u", "-m", "script_pipeline.run_decupagem",
@@ -1050,6 +1052,18 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
         cmd += ["--character-sheet", "--character-sheet-candidates", str(int(character_sheet_n))]
     if minimax_ref_audio and motor_video == "minimax":
         cmd.append("--minimax-ref-audio")
+    # Pedido do usuario 2026-09-16: "e se usarmos so os descritivos?" (sem
+    # still) e a opcao de dividir plano longo em sub-planos encadeados por
+    # ultimo-frame (MEDIDO em _test_minimax_duration_cap.py: ~16s+ trava
+    # 30min+ numa chamada so). Os dois so tem efeito com motor_video minimax.
+    if minimax_no_still and motor_video == "minimax":
+        cmd.append("--minimax-no-still")
+    if minimax_chain_max_seconds and motor_video == "minimax":
+        cmd += ["--minimax-chain-max-seconds", str(minimax_chain_max_seconds)]
+    if ltx_no_still and motor_video == "ltx":
+        cmd.append("--ltx-no-still")
+    if ltx_chain_max_seconds and motor_video == "ltx":
+        cmd += ["--ltx-chain-max-seconds", str(ltx_chain_max_seconds)]
     # LoRAs de VIDEO do LTX (pedido do usuario 2026-09-12) -- so com motor ltx. O
     # dropdown mostra "chave (forca)" do catalogo ltx_loras.py; aqui vira chave:forca.
     if motor_video == "ltx":
@@ -1069,6 +1083,8 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
           consistencia=None, camera_llm=False, ltx_variant="w4a8-v10",
           minimax_variant="fp8int8", lora="(nenhum)", lora_strength=0.8,
           character_sheet_on=False, character_sheet_n=4, minimax_ref_audio=False,
+          minimax_no_still=False, minimax_chain_max_seconds=None,
+          ltx_no_still=False, ltx_chain_max_seconds=None,
           video_loras=None, ic_reference="off", ic_strength=1.0, extras=None):
     """Executa a cadeia transmitindo o stdout. Gerador: a UI recebe cada linha.
 
@@ -1106,6 +1122,8 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
                 motor_img, motor_video, motor_voz, consistencia, camera_llm,
                 ltx_variant, minimax_variant, lora, lora_strength,
                 character_sheet_on, character_sheet_n, minimax_ref_audio,
+                minimax_no_still, minimax_chain_max_seconds,
+                ltx_no_still, ltx_chain_max_seconds,
                 video_loras, ic_reference, ic_strength, extras)
     linhas = [f"$ {' '.join(cmd[3:])}", f"(corrida: {run})", ""]
     # Rastreio da "trilha de estagios" (a linha de status "estamos aqui" que o
@@ -1421,6 +1439,22 @@ def build() -> None:
                              "checkpoints menos comprimidos. gguf-q4km 16min26s, o mais lento "
                              "dos três -- só vale se VRAM for o limite.")
                 with gr.Row():
+                    ltx_no_still = gr.Checkbox(
+                        value=False, scale=1,
+                        label="LTX 2.5: sem still (T2V puro, só descritivo textual)",
+                        info="Não manda o still do plano como imagem inicial (I2V) -- gera "
+                             "puro texto-para-vídeo. ltx25_backend já aceita isso "
+                             "(image_path=None); sem esta opção o caminho da decupagem sempre "
+                             "ancorava no still. Pedido do usuário 2026-09-16, para comparar "
+                             "continuidade puramente textual. Só com Motor de vídeo = ltx.")
+                    ltx_chain_max_seconds = gr.Number(
+                        value=None, scale=1, precision=1,
+                        label="LTX 2.5: dividir plano acima de N segundos (encadeado)",
+                        info="Mesmo princípio do continuous_chain.py, aplicado dentro do plano "
+                             "da decupagem: sub-planos curtos encadeados por último frame "
+                             "decodificado. Vazio = desligado (comportamento de sempre). Só "
+                             "com Motor de vídeo = ltx.")
+                with gr.Row():
                     minimax_ref_audio = gr.Checkbox(
                         value=False, scale=1,
                         label="MiniMax H3: usar áudio de referência real (voz do TTS)",
@@ -1431,15 +1465,39 @@ def build() -> None:
                              "com uma fala isolada até agora, não com a cadeia de produção "
                              "inteira -- acompanhe o log do estágio '5-D video' na primeira vez.")
                 with gr.Row():
+                    minimax_no_still = gr.Checkbox(
+                        value=False, scale=1,
+                        label="MiniMax H3: sem still (só descritivo textual guia a identidade)",
+                        info="Não manda o still do plano como referência de imagem -- só o "
+                             "TEXTO (descritor do personagem no prompt) guia a identidade. A "
+                             "sheet do personagem, quando existe, continua indo (é ela que "
+                             "ancora a identidade ENTRE planos; sem ela o drift entre planos "
+                             "tende a piorar). Pedido do usuário 2026-09-16, para comparar "
+                             "continuidade puramente textual contra a rota com still. Só tem "
+                             "efeito com Motor de vídeo = minimax.")
+                    minimax_chain_max_seconds = gr.Number(
+                        value=None, scale=1, precision=1,
+                        label="MiniMax H3: dividir plano acima de N segundos (encadeado)",
+                        info="Planos mais longos que N viram sub-planos curtos encadeados "
+                             "(último frame decodificado + sheet do personagem alimentam o "
+                             "sub-plano seguinte) em vez de uma chamada só -- MEDIDO em "
+                             "_test_minimax_duration_cap.py que planos de ~16s+ ficam "
+                             "instáveis (30min+ sem terminar) numa chamada única. 6.0 é o "
+                             "ponto de partida conservador já validado. Vazio = desligado "
+                             "(comportamento de sempre, cada plano é uma chamada só). A fala "
+                             "inteira do plano vai para CADA sub-plano -- revise a sincronia "
+                             "visualmente antes de confiar em produção contínua.")
+                with gr.Row():
                     largura = gr.Number(value=960, label="Largura", precision=0)
                     altura = gr.Number(value=544, label="Altura", precision=0)
                 with gr.Row():
                     character_sheet_on = gr.Checkbox(
-                        value=False, scale=1, label="Gerar character sheet automática (Fase A, medoid)",
-                        info="Gera N retratos candidatos por personagem ANTES dos stills e "
-                             "escolhe o MEDOID -- maior similaridade facial média aos outros "
-                             "candidatos -- como reference_image, em vez do primeiro still que "
-                             "acontecer de sair. Revise/troque a escolha na aba Decupagem > "
+                        value=False, scale=1, label="Forçar character sheet (Fase A, medoid) com 1 só personagem",
+                        info="Já liga sozinho com 2+ personagens no cast (evita identidade roubada "
+                             "entre coadjuvantes). Gera N retratos candidatos por personagem ANTES "
+                             "dos stills e escolhe o MEDOID -- maior similaridade facial média aos "
+                             "outros candidatos -- como reference_image. Marque aqui só para forçar "
+                             "com 1 personagem só. Revise/troque a escolha na aba Decupagem > "
                              "Character sheet > \"Revisar candidatos da última corrida\".")
                     character_sheet_n = gr.Number(
                         value=4, precision=0, scale=1, label="Candidatos por personagem")
@@ -1619,7 +1677,8 @@ def build() -> None:
                           ate, motor, recast, motor_img, motor_video, motor_voz,
                           consistencia, camera_llm, ltx_variant, minimax_variant,
                           lora, lora_strength, character_sheet_on, character_sheet_n,
-                          minimax_ref_audio]
+                          minimax_ref_audio, minimax_no_still, minimax_chain_max_seconds,
+                          ltx_no_still, ltx_chain_max_seconds]
         _entradas_lora = [ic_reference, ic_strength, ic_guide_strength, lipsync_engine,
                           dubit_strength, dubit_guide, dubit_audio,
                           post_deblur, post_deblur_s, post_upscale, post_upscale_s]

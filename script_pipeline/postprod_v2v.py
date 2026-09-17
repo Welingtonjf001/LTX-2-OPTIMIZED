@@ -4,13 +4,18 @@ Roda DEPOIS do mix e ANTES da montagem: o audio de cada clipe ja esta pronto e e
 recolocado sobre a imagem refeita (ltx25_backend.generate_v2v, audio="remux"), com a
 mesma duracao -- o sincronismo nao tem como mudar aqui.
 
-  --deblur    Lightricks Deblur 2.5: recupera nitidez de take com desfoque/derretimento.
-  --upscale   Lightricks Pixel-Spatial-Upscaler 2.5: re-renderiza a x2.
+  --deblur           Lightricks Deblur 2.5: recupera nitidez de take com desfoque/derretimento.
+  --upscale          Lightricks Pixel-Spatial-Upscaler 2.5: re-renderiza a x2.
+  --strip-subtitles  Corta a faixa de legenda queimada do LTX (ver script_pipeline/
+                      strip_subtitles.py) -- ffmpeg puro, sem GPU/LoRA.
 
 Upscale e tudo ou nada: o filme precisa de UMA resolucao. Clipe que falhar no upscale
 generativo sobe x2 por lanczos no ffmpeg, para a montagem nao misturar tamanhos.
+--strip-subtitles segue a MESMA regra e por isso: aplicado a TODOS os clipes sempre que
+pedido (nunca so nos "suspeitos" -- ver a nota Fix #5 abaixo), senao a montagem mistura
+alturas.
 
-CLI: python -m script_pipeline.postprod_v2v --run-dir DIR [--deblur] [--upscale]
+CLI: python -m script_pipeline.postprod_v2v --run-dir DIR [--deblur] [--upscale] [--strip-subtitles]
 Le e reescreve <run>/intermediate/mixed_clips.json (copia em mixed_clips_pre_post.json).
 """
 from __future__ import annotations
@@ -59,11 +64,30 @@ def main(argv=None) -> int:
     ap.add_argument("--upscale-strength", type=float, default=1.0)
     ap.add_argument("--upscale-guide-strength", type=float, default=1.0)
     ap.add_argument("--only", default=None, help="ids de clipe separados por virgula (teste)")
+    # Fix #5 (avaliacao visual 2026-09-17): texto/legenda queimado em clipes de fala do
+    # LTX 2.5 distilled/w4a8-v10 -- ltx25_backend.py ja documenta que essa variante roda
+    # em CFG=1, onde negative prompt degenera pra cond e nao tem efeito nenhum sobre o
+    # texto. Sem OCR disponivel nesta maquina (nem pytesseract nem tesseract.exe
+    # instalados) pra detectar automaticamente ONDE/SE apareceu, isto fica deliberadamente
+    # OPT-IN e uniforme: confirme visualmente que ha legenda antes de ligar, e calibre a
+    # faixa com `python -m script_pipeline.strip_subtitles CLIPE.mp4 --measure` -- o
+    # DEFAULT_KEEP do modulo foi medido no LTX 2.3, nao no 2.5. Alternativa que EVITA em
+    # vez de reparar: `--ltx-variant dev` no run_decupagem (CFG real, negative prompt
+    # funciona) -- mais lento, mas sem crop nenhum.
+    ap.add_argument("--strip-subtitles", action="store_true",
+                    help="corta a faixa inferior do quadro pra remover legenda queimada do "
+                         "LTX (ver strip_subtitles.py) -- so use depois de confirmar "
+                         "visualmente que ha legenda nesta corrida. Alternativa que evita em "
+                         "vez de reparar: --ltx-variant dev (CFG real).")
+    ap.add_argument("--strip-subtitles-keep", type=float, default=None,
+                    help="fracao da altura a manter (padrao: strip_subtitles.DEFAULT_KEEP, "
+                         "calibrado no LTX 2.3 -- confira com --measure no 2.5 antes de usar).")
     args = ap.parse_args(argv)
 
     import ltx25_backend
     import ltx_loras
     from script_pipeline import run_folder
+    from script_pipeline import strip_subtitles
 
     run_dir = Path(args.run_dir).resolve()
     work = run_folder.subdir(run_dir, "intermediate")
@@ -71,8 +95,8 @@ def main(argv=None) -> int:
     log = lambda m: run_folder.append_log(run_dir, m)  # noqa: E731
     pedidos = [(n, getattr(args, f"{n}_strength"), getattr(args, f"{n}_guide_strength"))
                for n in PASSOS if getattr(args, n)]
-    if not pedidos:
-        log("postprod_v2v: nenhum passo pedido (--deblur/--upscale); nada a fazer.")
+    if not pedidos and not args.strip_subtitles:
+        log("postprod_v2v: nenhum passo pedido (--deblur/--upscale/--strip-subtitles); nada a fazer.")
         return 0
     for nome, _, _ in pedidos:
         local = ltx_loras.BY_KEY[PASSOS[nome][0]].local
@@ -97,7 +121,16 @@ def main(argv=None) -> int:
             chave, escala, apoio = PASSOS[nome]
             destino = work / f"{clip['id']}_{nome}.mp4"
             marca = destino.with_suffix(".key")
-            assinatura = f"{Path(atual).name}|{forca:g}|{guia:g}"
+            # BUGFIX auditoria 2026-09-16 (A10, parcial): a assinatura usava so
+            # o NOME do arquivo de entrada, nao seu conteudo, nem o LoRA/prompt
+            # usados -- um clipe remontado com o MESMO nome (padrao "shotNNN"
+            # de render_shots.py) mas conteudo diferente, ou uma troca de LoRA
+            # catalogado pra mesma `chave` (`ltx_loras.py` atualizado), passava
+            # pela mesma assinatura e reaproveitava a saida velha.
+            assinatura = "|".join([
+                Path(atual).name, f"{Path(atual).stat().st_size}" if Path(atual).exists() else "?",
+                f"{forca:g}", f"{guia:g}", chave, prompt,
+            ])
             if destino.exists() and marca.exists() and marca.read_text(encoding="utf-8") == assinatura:
                 log(f"{clip['id']}: {nome} ja feito com a mesma forca, reaproveitando")
                 atual = str(destino)
@@ -120,8 +153,23 @@ def main(argv=None) -> int:
                         atual = reserva
         clip["mixed_video_path"] = atual
 
+    if args.strip_subtitles:
+        keep_kwargs = {"keep": args.strip_subtitles_keep} if args.strip_subtitles_keep else {}
+        for clip in clips:
+            fonte = clip.get("mixed_video_path")
+            if not fonte or (so and clip["id"] not in so):
+                continue
+            destino = work / f"{clip['id']}_nosub.mp4"
+            if strip_subtitles.crop(fonte, str(destino), **keep_kwargs):
+                log(f"{clip['id']}: legenda cortada -> {destino.name}")
+                clip["mixed_video_path"] = str(destino)
+            else:
+                falhas += 1
+                log(f"{clip['id']}: strip_subtitles FALHOU -- mantendo o clipe sem cortar.")
+
     manifest_path.write_text(json.dumps(clips, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"postprod_v2v: {', '.join(n for n, _, _ in pedidos)} aplicado(s); {falhas} falha(s).")
+    nomes_aplicados = [n for n, _, _ in pedidos] + (["strip-subtitles"] if args.strip_subtitles else [])
+    log(f"postprod_v2v: {', '.join(nomes_aplicados)} aplicado(s); {falhas} falha(s).")
     return 0 if falhas == 0 else 1
 
 

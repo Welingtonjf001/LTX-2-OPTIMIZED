@@ -14,6 +14,7 @@ CLI: python -m script_pipeline.synthesize_dialogue --run-dir DIR [--engine auto]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -151,9 +152,26 @@ def main(argv=None) -> int:
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             anteriores = {}
 
+    def _hash_arquivo(caminho) -> str | None:
+        # BUGFIX auditoria 2026-09-16 (A19): a chave usava o CAMINHO do WAV de
+        # referencia, nao o conteudo. Substituir a amostra de voz mantendo o
+        # mesmo nome de arquivo (import_voices.py normaliza pra um caminho
+        # fixo por ID) mantinha a chave antiga e reaproveitava a fala com a
+        # voz VELHA, sem sinal nenhum de que a referencia mudou.
+        if not caminho:
+            return None
+        try:
+            h = hashlib.sha1()
+            with open(caminho, "rb") as f:
+                for bloco in iter(lambda: f.read(1 << 20), b""):
+                    h.update(bloco)
+            return h.hexdigest()[:16]
+        except OSError:
+            return None
+
     def _chave(job: dict) -> str:
         return json.dumps([job["text"], job.get("emotion"), job.get("instruct"),
-                           job.get("xtts_speaker_wav"), job.get("qwen_speaker"),
+                           _hash_arquivo(job.get("xtts_speaker_wav")), job.get("qwen_speaker"),
                            args.engine, args.language], ensure_ascii=False)
 
     pendentes, reaproveitados = [], {}

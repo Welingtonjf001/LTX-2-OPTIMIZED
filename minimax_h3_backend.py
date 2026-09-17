@@ -116,6 +116,12 @@ MINIMAX_VARIANTS = {
             "qwen3vl_32b_minimax_h3-w4a8_convrot.safetensors"),
     "gguf-q4km": ("minimax_h3_ref2va-Q4_K_M.gguf",
                  "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
+    # Baixado 2026-09-15 (sugestao do usuario) -- NAO validado ainda em
+    # producao, so testado isolado (ver MEMORIAL). Precisa de torch cu13.0+
+    # (medido presente nesta maquina). CLIP igual ao fp8int8 -- e o mesmo
+    # int8_convrot, ja era o padrao antes desta variante existir.
+    "int8convrot": ("minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+                    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
 }
 DEFAULT_MINIMAX_VARIANT = os.environ.get("MINIMAX_H3_VARIANT", "fp8int8").strip().lower()
 if DEFAULT_MINIMAX_VARIANT not in MINIMAX_VARIANTS:
@@ -128,6 +134,24 @@ CLIP_FILENAME = os.environ.get("MINIMAX_H3_CLIP", _variant_clip)
 
 DEFAULT_ASPECT = "16:9 (Widescreen)"
 DEFAULT_MEGAPIXELS = 0.4
+
+# LoRA de realismo (fal/MiniMax-H3-Realism-People-LoRA), empilhada POR CIMA da
+# turbo -- TESTADA 2026-09-16 (teste isolado, 5s): tempo igual ao padrao sem
+# ela (~571s, dentro da faixa normal), e o usuario julgou a qualidade
+# "similar/ligeiramente superior" ao teste sem a LoRA. Ligada por padrao;
+# MINIMAX_H3_REALISM_LORA=0 desliga, MINIMAX_H3_REALISM_STRENGTH ajusta a forca
+# (0.7 validado, o mesmo valor do teste).
+REALISM_LORA_FILE = "h3-realism-people-t2v-i2v-r2v.safetensors"
+REALISM_LORA_ENABLED = os.environ.get("MINIMAX_H3_REALISM_LORA", "1").strip() not in ("0", "false", "False")
+REALISM_LORA_STRENGTH = float(os.environ.get("MINIMAX_H3_REALISM_STRENGTH", "0.7"))
+
+# SageAttention (patch experimental do proprio ComfyUI-KJNodes -- ver
+# `MiniMaxH3MemoryEfficientSageAttentionPatch`). TESTADO 2026-09-16 (5s,
+# RTX 3090/sm86, sageattention 2.2.0.post4 cu130torch2.9.0): 327.6s contra
+# 571.6s do mesmo teste sem o patch (~43% mais rapido), sem erro nem aviso de
+# fallback. So UM teste isolado ate agora -- opt-in, default DESLIGADO (o
+# proprio node se marca "EXPERIMENTAL"). MINIMAX_H3_SAGEATTN=1 liga.
+SAGEATTN_ENABLED = os.environ.get("MINIMAX_H3_SAGEATTN", "0").strip() in ("1", "true", "True")
 
 _server_proc = None
 _server_log_handle = None
@@ -388,6 +412,21 @@ def base_api() -> dict:
                 "class_type": "MiniMaxH3TRTVAELoader",
                 "inputs": {"decoder": TRT_DECODER_ENGINE, "encoder": TRT_ENCODER_ENGINE},
             }
+        if REALISM_LORA_ENABLED:
+            # Empilhada DEPOIS do switch da turbo ("141", ComfySwitchNode entre
+            # UNET cru e UNET+turbo) -- e o mesmo ponto usado no teste isolado
+            # 2026-09-16. O BasicGuider ("126") e quem hoje consome o model do
+            # switch; passa a consumir da LoRA de realismo em vez disso.
+            api["9010"] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {"model": ["141", 0], "lora_name": REALISM_LORA_FILE,
+                          "strength_model": REALISM_LORA_STRENGTH},
+            }
+            api["126"]["inputs"]["model"] = ["9010", 0]
+        if SAGEATTN_ENABLED:
+            api["9020"] = {"class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+                           "inputs": {"model": api["126"]["inputs"]["model"]}}
+            api["126"]["inputs"]["model"] = ["9020", 0]
         _base_api_cache = api
     return json.loads(json.dumps(_base_api_cache))  # copia rasa por job
 

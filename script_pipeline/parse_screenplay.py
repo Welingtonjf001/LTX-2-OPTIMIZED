@@ -237,6 +237,12 @@ class Scene:
     location: str
     time_of_day: str
     action_text: str = ""
+    # Texto de acao acumulado desde a ULTIMA fala da cena (reseta a cada
+    # dialogue.append) -- serve so pra checagem de fechamento narrativo
+    # (Fix #7, auditoria externa 2026-09-16, achado #7): se a cena termina com
+    # acao muda sobre a fala final e o shot_list do LLM parou na ultima fala,
+    # esse texto identifica o que ficou de fora. Nao entra em to_dict/render.
+    action_tail: str = ""
     characters: list = dataclasses.field(default_factory=list)
     dialogue: list = dataclasses.field(default_factory=list)  # list[DialogueLine]
     visual_prompt: Optional[str] = None  # filled by LLM enrichment
@@ -338,6 +344,7 @@ def parse_structure(text: str) -> list[Scene]:
                     text=text_joined,
                     parenthetical=pending_parenthetical,
                 ))
+                current.action_tail = ""
                 if pending_speaker not in current.characters:
                     current.characters.append(pending_speaker)
         pending_speaker = None
@@ -416,6 +423,7 @@ def parse_structure(text: str) -> list[Scene]:
             text = inline.group(2).strip()
             if name and text:
                 current.dialogue.append(DialogueLine(character=name, text=text))
+                current.action_tail = ""
                 if name not in current.characters:
                     current.characters.append(name)
             continue
@@ -431,8 +439,10 @@ def parse_structure(text: str) -> list[Scene]:
             dialogue_buffer.append(stripped)
         else:
             current.action_text = (current.action_text + " " + stripped).strip()
+            current.action_tail = (current.action_tail + " " + stripped).strip()
 
     flush_dialogue()
+    _add_silent_present_characters(scenes)
     if not scenes:
         # Neither line-based convention (INT./EXT. nor "Cena N -- ...") found a
         # single heading anywhere -- try the freeform-paragraph fallback before
@@ -442,6 +452,43 @@ def parse_structure(text: str) -> list[Scene]:
         if freeform is not None:
             scenes = [freeform]
     return scenes
+
+
+def _add_silent_present_characters(scenes: list[Scene]) -> None:
+    """Personagens PRESENTES numa cena mas sem fala nela nunca entravam em
+    `scene.characters` -- só quem fala é registrado (ver `flush_dialogue` /
+    `INLINE_DIALOGUE_RE` acima), porque é dali que vem o nome. Resultado
+    (achado por auditoria externa, 2026-09-15): "Min-jun surge atrás delas"
+    numa cena sem fala dele não deixava rastro nenhum -- `cast_characters`
+    nunca soube que ele estava ali, e a decupagem (`shot_plan.py`) não tinha
+    como montar um `co_subject`/referência pra ele num plano de grupo.
+
+    Correção conservadora: usa quem FALA em QUALQUER cena do roteiro como o
+    elenco conhecido (nomes reais, não um palpite), e varre o `action_text`
+    de cada cena procurando esses nomes por substring normalizada (sem
+    caixa, sem hífen/espaço -- o cue vem "MIN-JUN", a ação escreve
+    "Min-jun"). Não inventa personagem novo nenhum: só marca como presente
+    quem o roteiro já provou existir em outro lugar e que o texto desta
+    cena claramente nomeia."""
+    def norm(x: str) -> str:
+        return "".join(c for c in x.lower() if c.isalnum())
+
+    elenco = set()
+    for scene in scenes:
+        for line in scene.dialogue:
+            if line.character:
+                elenco.add(line.character)
+    if not elenco:
+        return
+    elenco_norm = {norm(nome): nome for nome in elenco if norm(nome)}
+
+    for scene in scenes:
+        texto_norm = norm(scene.action_text or "")
+        if not texto_norm:
+            continue
+        for nome_norm, nome in elenco_norm.items():
+            if nome_norm in texto_norm and nome not in scene.characters:
+                scene.characters.append(nome)
 
 
 def scenes_to_json(scenes: list[Scene]) -> list[dict]:
@@ -488,7 +535,8 @@ def build_enrich_system_prompt(*, translate_scenes_to_english: bool, language: s
         '{"visual_prompt": "...", "location": "...", "time_of_day": "...", '
         '"art_direction": "...", '
         '"line_visuals": {"0": "...", "1": "..."}, '
-        '"shot_list": [{"action": "..."}, {"line": 0}, {"action": "..."}, {"line": 1}], '
+        '"shot_list": [{"action": "...", "actor": "NOME ou null"}, {"line": 0}, '
+        '{"action": "...", "actor": "NOME ou null"}, {"line": 1}], '
         '"line_emotions": {"0": "...", "2": "..."}}. '
         f"visual_prompt: {visual_lang_instruction}, estilo cinematografico, descrevendo o que a "
         "camera ve no INICIO desta cena (local, iluminacao, atmosfera, personagens presentes). "
@@ -520,9 +568,14 @@ def build_enrich_system_prompt(*, translate_scenes_to_english: bool, language: s
         "APARECEM NA TELA, do primeiro ao ultimo, misturando acao e dialogo. "
         "Use {\"line\": N} para o plano em que a fala de indice N e dita (N e o indice "
         "0-based da lista 'Todas as falas EM ORDEM'), e "
-        f"{{\"action\": \"...\"}} para um momento SEM ninguem falando, com uma frase curta "
-        f"{line_visual_lang} no presente descrevendo o que a camera ve (ex: a chuva na rua, "
-        "o onibus chegando, a porta abrindo, alguem entrando, o veiculo partindo). "
+        f"{{\"action\": \"...\", \"actor\": \"NOME\"}} para um momento SEM ninguem falando, "
+        f"com uma frase curta {line_visual_lang} no presente descrevendo o que a camera ve "
+        "(ex: a chuva na rua, o onibus chegando, a porta abrindo, alguem entrando, o "
+        "veiculo partindo). actor: o NOME do personagem que fisicamente EXECUTA a acao "
+        "descrita (quem se move, quem gesticula, quem age) -- null se a acao nao tem "
+        "personagem executando (ex: chuva, um objeto, um veiculo) ou se mais de um "
+        "personagem age igualmente. NAO confunda com quem e so mencionado ou observado: "
+        "em 'Ana caminha ate a porta enquanto Bia observa', actor e 'Ana', nao 'Bia'. "
         "REGRAS OBRIGATORIAS: (a) siga a ordem cronologica do texto de acao -- o que "
         "acontece antes no texto vem antes na lista; (b) TODAS as falas devem aparecer, "
         "exatamente uma vez cada, e na ordem crescente de indice (0, depois 1, depois 2...); "
@@ -823,7 +876,17 @@ def _apply_shot_list(scene: Scene, payload: dict, *, log=print) -> None:
         else:
             visual = str(item.get("action") or "").strip()
             if visual:
-                shots.append({"type": "action", "visual": visual})
+                # Fix #5 (auditoria externa 2026-09-16, achado #5): "actor" e a
+                # atribuicao EXPLICITA do LLM de quem executa a acao -- shot_plan.py
+                # prefere isto sobre o heuristico "primeiro nome no texto"
+                # (_character_in), que confundia observador com quem age
+                # ("Ana caminha enquanto Bia observa" atribuia a Bia se ela
+                # aparecesse primeiro na lista de personagens). None quando o
+                # modelo nao souber ou nao houver um unico executor -- cai pro
+                # heuristico de sempre.
+                actor = item.get("actor")
+                actor = str(actor).strip() if isinstance(actor, str) else None
+                shots.append({"type": "action", "visual": visual, "actor": actor or None})
 
     missing = [i for i in range(len(scene.dialogue)) if i not in seen_lines]
     for line_index in missing:
@@ -851,6 +914,33 @@ def _apply_shot_list(scene: Scene, payload: dict, *, log=print) -> None:
             rebuilt.append({"type": "dialogue", "line_index": line_index})
         rebuilt.extend({"type": "action", "visual": v} for v in pending)
         shots = rebuilt
+
+    # Fix #7 (auditoria externa 2026-09-16, achado #7): fechamento narrativo
+    # ausente. O LLM as vezes para de decupar na ULTIMA fala e nunca cobre a
+    # rubrica de acao que a segue (reacao final, gesto de saida, o "silencio
+    # depois" que fecha a cena) -- o filme perde a cena inteira de closing
+    # beat. `scene.action_tail` e o texto de acao acumulado desde a ultima
+    # fala (mudo pelo parser, nao pelo LLM: nao pode estar errado sobre o que
+    # o roteiro diz). Se o shot_list nao tem NENHUM plano de acao depois do
+    # ultimo plano de dialogo mas esse texto existe e tem substancia, ele
+    # ficou de fora -- anexa como plano de fechamento em vez de descartar.
+    tail = (scene.action_tail or "").strip()
+    if tail and len(tail) >= 12 and (not shots or shots[-1]["type"] != "action"):
+        # Fix #4 (avaliacao visual 2026-09-17): o fechamento recuperado pelo Fix
+        # #7 as vezes e um paragrafo inteiro com VARIAS transicoes dramaticas
+        # emendadas (MEDIDO no Palacio: danca -> susto -> corrida -> pose
+        # regia, tudo num beat so) -- um unico plano generico nao da conta
+        # disso. Quebra por SENTENCA (mesmo criterio ja usado em
+        # collect_characters para separar trechos de acao): cada sentenca vira
+        # seu proprio plano de fechamento, na ordem em que o roteiro escreveu.
+        sub_beats = [s.strip() for s in re.split(r"(?<=[.!?])\s+", tail) if s.strip()]
+        personagens_cena = list(scene.characters or [])
+        for sub in sub_beats:
+            ator = next((p for p in personagens_cena if p in sub or p.title() in sub), None)
+            shots.append({"type": "action", "visual": sub, "actor": ator})
+        log(f"[parse_screenplay] cena {scene.index}: fechamento narrativo apos a "
+            f"ultima fala nao estava no shot_list; anexado em {len(sub_beats)} "
+            f"plano(s) ({tail[:80]!r}...).")
 
     scene.shot_list = shots
     n_action = sum(1 for s in shots if s["type"] == "action")

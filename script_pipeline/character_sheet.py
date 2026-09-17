@@ -38,25 +38,46 @@ from pathlib import Path
 LogFn = None  # tipagem só documental, log=print por padrão
 
 
-def _reference_prompt(name: str, descriptor: str) -> str:
+# LIMIAR DE ACEITACAO -- achado da avaliacao visual 2026-09-17: a sheet do
+# Palacio Esmeralda aceitou Mei-Li com score 0.475 (o candidato mais "central"
+# do lote, mas o lote inteiro ja tinha drift de roupa/idade entre si -- o
+# medoid so garante que o ESCOLHIDO parece com os OUTROS candidatos do MESMO
+# lote, nunca que o lote inteiro bate com o descritor pedido). Abaixo disto,
+# o lote e tratado como baixa confianca e um segundo lote roda com o prompt
+# reforcado antes de aceitar.
+CONSISTENCY_SCORE_THRESHOLD = 0.55
+
+
+def _reference_prompt(name: str, descriptor: str, *, reinforce: bool = False) -> str:
     """Prompt do candidato: retrato NEUTRO -- sem ação, sem enquadramento de
     cena, sem cenário específico. É uma folha de referência, não um plano do
     filme; qualquer viés de pose/luz aqui contaminaria a comparação de
     similaridade entre candidatos (dois candidatos podem ter o MESMO rosto e
-    ainda assim medir baixo se um está de perfil e o outro de frente)."""
+    ainda assim medir baixo se um está de perfil e o outro de frente).
+
+    `reinforce`: segunda tentativa depois de um lote com score baixo -- repete
+    o descritor como uma restricao explicita de figurino/penteado/epoca, em
+    vez de uma frase solta entre outras. Duas doses do MESMO texto pesam mais
+    no condicionamento do que uma, e a segunda vem em tom de restricao
+    ('must match', 'no deviation'), nao de descricao."""
     partes = [
         "medium shot, framed from the waist up, eye-level angle.",
         f"{name}, {descriptor}" if descriptor else name,
         "neutral standing pose, facing camera directly, calm relaxed expression.",
         "plain neutral studio background, soft even lighting, no props, no other people.",
     ]
+    if reinforce and descriptor:
+        partes.append(
+            f"Wardrobe, hairstyle, accessories and era must exactly match this "
+            f"description, with no deviation and no generic or modern clothing "
+            f"substituted in: {descriptor}")
     return " ".join(p for p in partes if p)
 
 
 def generate_character_candidates(
     cast: dict, run_dir: Path, *, n_candidates: int = 4, image_engine: str = "flux",
     width: int = 960, height: int = 544, seed_base: int = 1009, log=print,
-    lora_name: str = "", lora_strength: float = 0.8,
+    lora_name: str = "", lora_strength: float = 0.8, force: bool = False,
 ) -> dict:
     """Gera `n_candidates` retratos por personagem e escolhe o medoid (maior
     similaridade facial MÉDIA aos outros candidatos do mesmo personagem).
@@ -71,19 +92,20 @@ def generate_character_candidates(
 
     engine = sb.IMAGE_ENGINES[image_engine]
     server = "http://127.0.0.1:8188"
-    sb.ensure_comfyui_running(server, wait_seconds=180, watch_stalls=False)
+    # Z-Image-Turbo nao usa ComfyUI (servidor HTTP proprio, ver zimage_backend.py)
+    # -- generate_scene_storyboard sobe/fala com ele sozinho quando precisa.
+    if image_engine != "zimage":
+        sb.ensure_comfyui_running(server, wait_seconds=180, watch_stalls=False)
 
     out_dir = Path(run_dir) / "characters" / "sheet_candidates"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    resultado = {}
-    for idx_nome, (name, info) in enumerate(cast.items()):
-        descriptor = info.get("descriptor", "")
-        prompt = _reference_prompt(name, descriptor)
+    def _gerar_lote(name, idx_nome, descriptor, *, reinforce, sufixo, seed_offset):
+        prompt = _reference_prompt(name, descriptor, reinforce=reinforce)
         candidatos = []
         for i in range(n_candidates):
-            seed = seed_base + idx_nome * 1000 + i * 101
-            out_path = out_dir / f"{name}_{i}.png"
+            seed = seed_base + idx_nome * 1000 + seed_offset + i * 101
+            out_path = out_dir / f"{name}_{sufixo}{i}.png"
             ok = sb.generate_scene_storyboard(
                 {"index": 0}, {}, server=server, checkpoint=engine["checkpoint"],
                 width=width, height=height, steps=engine["steps"], cfg=engine["cfg"],
@@ -92,51 +114,101 @@ def generate_character_candidates(
                 lora_name=lora_name, lora_strength=lora_strength)
             if ok and out_path.exists():
                 candidatos.append(out_path)
-        if not candidatos:
-            log(f"[character_sheet] {name}: nenhum candidato gerado -- pulando.")
-            continue
+        return candidatos
 
+    def _escolher_medoid(candidatos):
         embeddings = {}
         for c in candidatos:
             emb = face_embedding(str(c))
             if emb is not None:
                 embeddings[c] = emb
-
         if len(embeddings) < 2:
-            escolhido = candidatos[0]
-            score = None
+            return (candidatos[0], None) if candidatos else (None, None)
+        escolhido, melhor_media = None, -2.0
+        for c, emb in embeddings.items():
+            sims = [float(np.dot(emb, outro)) for oc, outro in embeddings.items() if oc != c]
+            media = sum(sims) / len(sims)
+            if media > melhor_media:
+                escolhido, melhor_media = c, media
+        return escolhido, melhor_media
+
+    resultado = {}
+    for idx_nome, (name, info) in enumerate(cast.items()):
+        # Fix #3 acoplado a fotos externas (pedido do usuario 2026-09-17,
+        # roteiro dos piratas): character-sheet virou padrao com 2+
+        # personagens (ver run_decupagem.py), e sem este guard ela
+        # SOBRESCREVIA a foto de referencia REAL que import_reference.py ja
+        # tinha importado para cada personagem -- apply_to_cast() troca
+        # `reference_image` sem perguntar. Uma foto real ja resolve o
+        # problema que a sheet existe pra resolver (ancora de identidade
+        # estavel); gerar candidatos sinteticos e substitui-la e regressao,
+        # nao melhoria. So mexe em quem AINDA nao tem `reference_image`.
+        if info.get("reference_image") and not force:
+            log(f"[character_sheet] {name}: ja tem reference_image "
+                f"({Path(info['reference_image']).name}) -- pulando (--force sobrescreve).")
+            continue
+        descriptor = info.get("descriptor", "")
+        candidatos = _gerar_lote(name, idx_nome, descriptor, reinforce=False,
+                                 sufixo="", seed_offset=0)
+        if not candidatos:
+            log(f"[character_sheet] {name}: nenhum candidato gerado -- pulando.")
+            continue
+
+        escolhido, score = _escolher_medoid(candidatos)
+        if score is None:
             log(f"[character_sheet] {name}: rosto detectavel em menos de 2 "
-                f"candidatos ({len(embeddings)}/{len(candidatos)}) -- usando "
-                f"o primeiro gerado, sem escolha por similaridade.")
+                f"candidatos -- usando o primeiro gerado, sem escolha por similaridade.")
         else:
-            escolhido, melhor_media = None, -2.0
-            for c, emb in embeddings.items():
-                sims = [float(np.dot(emb, outro)) for oc, outro in embeddings.items() if oc != c]
-                media = sum(sims) / len(sims)
-                if media > melhor_media:
-                    escolhido, melhor_media = c, media
-            score = melhor_media
-            log(f"[character_sheet] {name}: {len(embeddings)}/{len(candidatos)} "
-                f"com rosto detectavel -- escolhido {escolhido.name} "
+            log(f"[character_sheet] {name}: escolhido {escolhido.name} "
                 f"(similaridade media aos outros: {score:.3f}).")
+
+            # Fix #2 (avaliacao visual 2026-09-17): score baixo e sinal de que o
+            # LOTE inteiro variou demais (roupa/idade/estilo), nao so o
+            # candidato descartado -- um segundo lote com o descritor repetido
+            # como restricao costuma convergir melhor que escolher o "menos
+            # ruim" do primeiro.
+            if score < CONSISTENCY_SCORE_THRESHOLD and descriptor:
+                log(f"[character_sheet] {name}: score {score:.3f} abaixo do limiar "
+                    f"({CONSISTENCY_SCORE_THRESHOLD}) -- gerando um segundo lote com "
+                    "prompt reforcado.")
+                candidatos2 = _gerar_lote(name, idx_nome, descriptor, reinforce=True,
+                                          sufixo="r", seed_offset=500)
+                if candidatos2:
+                    escolhido2, score2 = _escolher_medoid(candidatos2)
+                    if score2 is not None and score2 > score:
+                        log(f"[character_sheet] {name}: segundo lote melhorou "
+                            f"({score:.3f} -> {score2:.3f}) -- usando o reforcado.")
+                        escolhido, score = escolhido2, score2
+                        candidatos = candidatos2
+                    else:
+                        log(f"[character_sheet] {name}: segundo lote nao melhorou "
+                            f"(mantendo o primeiro, score {score:.3f}).")
+                if score < CONSISTENCY_SCORE_THRESHOLD:
+                    log(f"[character_sheet] {name}: AVISO -- ainda abaixo do limiar "
+                        f"depois do reforco ({score:.3f}); revise "
+                        f"characters/sheet_candidates/{name}_*.png antes de confiar no still.")
 
         resultado[name] = {
             "reference_image": str(escolhido),
             "score": score,
             "candidates": [str(c) for c in candidatos],
+            "needs_review": bool(score is not None and score < CONSISTENCY_SCORE_THRESHOLD),
         }
     return resultado
 
 
 def apply_to_cast(cast: dict, resultado: dict) -> dict:
     """Grava `reference_image` escolhido de volta no dicionario de cast (o
-    mesmo formato que `cast_characters.build_cast` produz) -- SUBSTITUI
-    qualquer `reference_image` que já existisse (essa é a etapa que decide
-    isso agora, não o acaso do primeiro still)."""
+    mesmo formato que `cast_characters.build_cast` produz). So sobrescreve
+    quem esta em `resultado` -- personagens com `reference_image` (foto
+    externa importada, ou sheet anterior) ja saem de `generate_character_
+    candidates` pulados (ver o guard la), entao nunca chegam aqui a menos
+    que `--force` tenha sido passado."""
     for name, info in resultado.items():
         if name in cast:
             cast[name]["reference_image"] = info["reference_image"]
             cast[name]["reference_sheet_score"] = info["score"]
+            cast[name]["reference_needs_review"] = info.get("needs_review", False)
     return cast
 
 
@@ -148,7 +220,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--n-candidates", type=int, default=4)
-    ap.add_argument("--image-engine", default="flux", choices=["flux", "sd35", "sdxl"])
+    ap.add_argument("--image-engine", default="flux",
+                    choices=["flux", "sd35", "sdxl", "zimage"])
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=544)
     ap.add_argument("--apply", action="store_true",
@@ -158,6 +231,11 @@ def main(argv=None) -> int:
                     help="LoRA opcional aplicado aos candidatos (models/loras_images/). "
                          "Sem isto, nenhum LoRA.")
     ap.add_argument("--lora-strength", type=float, default=0.8)
+    ap.add_argument("--force", action="store_true",
+                    help="gera candidatos mesmo para personagem que ja tem reference_image "
+                         "(foto externa importada, ou sheet anterior) e substitui. Sem isto, "
+                         "quem ja tem foto e pulado -- ela e a ancora de identidade mais forte "
+                         "que existe, gerar uma sintetica por cima seria regressao.")
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir).resolve()
@@ -166,7 +244,7 @@ def main(argv=None) -> int:
 
     resultado = generate_character_candidates(
         cast, run_dir, n_candidates=args.n_candidates, image_engine=args.image_engine,
-        width=args.width, height=args.height,
+        width=args.width, height=args.height, force=args.force,
         lora_name=args.lora, lora_strength=args.lora_strength)
 
     report_path = run_dir / "characters" / "sheet_report.json"

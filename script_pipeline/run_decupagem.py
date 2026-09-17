@@ -64,7 +64,7 @@ PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
 # de revisao barato que a documentacao manda usar primeiro -- pulava o estagio
 # dos stills, e o rascunho saia sem nenhuma imagem. Ao mexer aqui, confira
 # contra a sequencia de `if ate(...)` la embaixo.
-PARADAS = ["parse", "cast", "emocao", "tts", "estrutura", "plano", "sheet",
+PARADAS = ["parse", "cast", "emocao", "tts", "estrutura", "plano", "motion", "sheet",
            "stills", "animatic", "render", "lipsync", "mix", "final"]
 
 
@@ -134,10 +134,35 @@ def main() -> int:
                     help="MiniMax H3: manda o WAV do TTS ja sintetizado para cada fala como "
                          "ref_audios (timbre/cadencia reais -- MEMORIAL 3.74). So com "
                          "--video-engine minimax. Opt-in, validado so com uma fala isolada.")
-    ap.add_argument("--consistency-threshold", type=float, default=None,
+    ap.add_argument("--minimax-no-still", action="store_true",
+                    help="MiniMax H3: NAO manda o still do plano como referencia -- so o TEXTO "
+                         "guia a identidade (a sheet do personagem, se existir, continua indo, "
+                         "pra nao perder a ancora ENTRE planos). So com --video-engine minimax.")
+    ap.add_argument("--minimax-chain-max-seconds", type=float, default=None,
+                    help="MiniMax H3: planos mais longos que isto viram sub-planos curtos "
+                         "encadeados por ultimo-frame + sheet, em vez de uma chamada longa "
+                         "instavel (MEDIDO: ~16s+ ja trava 30min+). 6.0 e o ponto de partida "
+                         "validado. Sem isto (padrao), sempre uma chamada so. So com "
+                         "--video-engine minimax.")
+    ap.add_argument("--ltx-no-still", action="store_true",
+                    help="LTX 2.5: NAO manda o still como image_path -- T2V puro, so texto. "
+                         "So com --video-engine ltx.")
+    ap.add_argument("--ltx-chain-max-seconds", type=float, default=None,
+                    help="LTX 2.5: planos mais longos que isto viram sub-planos encadeados por "
+                         "ultimo-frame (mesmo principio do continuous_chain.py). Sem isto "
+                         "(padrao), sempre uma chamada so. So com --video-engine ltx.")
+    ap.add_argument("--consistency-threshold", type=float, default=0.35,
                     help="auditoria automatica de consistencia facial dos STILLS "
-                         "(insightface) -- ver MEMORIAL 3.53. Sem isto, desligado.")
+                         "(insightface) -- ver MEMORIAL 3.53. Fix #3 (avaliacao visual "
+                         "2026-09-17): agora GATE por padrao, nao so relatorio -- um "
+                         "still abaixo do limiar contra a reference_image do personagem "
+                         "e regerado (ate --consistency-max-retries vezes) antes de "
+                         "aceitar o de maior score. 0.35 e o mesmo limiar do "
+                         "clip_identity_audit (ArcFace). --no-consistency-check desliga.")
     ap.add_argument("--consistency-max-retries", type=int, default=2)
+    ap.add_argument("--no-consistency-check", action="store_true",
+                    help="desliga o gate de consistencia facial dos stills (volta ao "
+                         "comportamento antigo: gera uma vez, nao compara com a referencia).")
     ap.add_argument("--tts-engine", default=None, choices=["auto", "xtts", "qwen", "fish"],
                     help="motor de VOZ (nao confundir com --engine, LLM, nem --video-engine). "
                          "Sem isto, usa o default do synthesize_dialogue.py (\"auto\", XTTS/Qwen "
@@ -149,15 +174,24 @@ def main() -> int:
                          "plano, dentro do vocabulario permitido pelo Estilo escolhido "
                          "-- ver CAMERA_STYLE_VOCAB em shot_plan.py. Opt-in: sem isto, "
                          "so a decupagem deterministica de sempre.")
+    ap.add_argument("--motion-conditioning", action="store_true",
+                    help="compila a decupagem em movimento por personagem: acrescenta um "
+                         "motion_prompt curto ao LTX/MiniMax e salva parse/motion_plan.json "
+                         "como contrato para um adaptador MotionBricks/retarget. Nao exige "
+                         "o runtime 3D e e opt-in para preservar prompts ja validados.")
     ap.add_argument("--character-sheet", action="store_true",
-                    help="Fase A da consistencia de personagem (MEMORIAL 3.72): gera N "
-                         "retratos candidatos por personagem (mesmo descritor do cast, "
-                         "seeds diferentes) e escolhe o MEDOID -- maior similaridade "
-                         "facial media aos outros candidatos -- como reference_image, em "
-                         "vez do primeiro still que acontecer de sair no estagio normal. "
-                         "Opt-in: sem isto, comportamento de sempre (primeiro still de "
-                         "perto vira referencia). Roda antes dos stills, so precisa do "
-                         "cast.json pronto.")
+                    help="Forca a Fase A da consistencia de personagem (MEMORIAL 3.72) mesmo "
+                         "com 1 personagem so no cast. Normalmente desnecessario: com 2+ "
+                         "personagens ela liga sozinha (ver --no-character-sheet).")
+    ap.add_argument("--no-character-sheet", action="store_true",
+                    help="Desliga a Fase A mesmo com 2+ personagens no cast. Volta ao "
+                         "comportamento antigo (primeiro still de perto vira referencia). "
+                         # BUGFIX (auditoria externa 2026-09-16, achado #3): com 2+
+                         # personagens no cast, o primeiro still de perto travar como
+                         # referencia (design de sempre) e o que produz identidade
+                         # "roubada" entre coadjuvantes -- gera N candidatos e escolhe
+                         # o medoid por padrao nesse caso; opt-out explicito aqui.
+                         "Use se character_sheet.py estiver indisponivel/lento demais.")
     ap.add_argument("--character-sheet-candidates", type=int, default=4,
                     help="quantos retratos candidatos gerar por personagem (--character-sheet).")
     from script_pipeline.generate_storyboards import available_loras_images
@@ -196,6 +230,16 @@ def main() -> int:
     ap.add_argument("--post-deblur", action="store_true",
                     help="pos-producao: Deblur 2.5 em todo clipe mixado (audio intacto)")
     ap.add_argument("--post-deblur-strength", type=float, default=1.0)
+    ap.add_argument("--post-strip-subtitles", action="store_true",
+                    help="Fix #5 (avaliacao visual 2026-09-17): corta a faixa de legenda "
+                         "queimada do LTX distilled/w4a8-v10 (CFG=1, negative prompt sem "
+                         "efeito) de TODOS os clipes uniformemente -- ver postprod_v2v.py "
+                         "e strip_subtitles.py. So ligue depois de confirmar visualmente "
+                         "que ha legenda nesta corrida; alternativa que evita em vez de "
+                         "reparar: --ltx-variant dev.")
+    ap.add_argument("--post-strip-subtitles-keep", type=float, default=None,
+                    help="fracao da altura a manter (padrao calibrado no LTX 2.3 -- "
+                         "confira com strip_subtitles.py --measure antes de confiar no 2.5).")
     ap.add_argument("--post-upscale", action="store_true",
                     help="pos-producao: Pixel-Upscaler 2.5, filme inteiro a x2 (bem mais lento)")
     ap.add_argument("--post-upscale-strength", type=float, default=1.0)
@@ -284,12 +328,50 @@ def main() -> int:
                "--out", str(run / "parse" / "shot_plan.json")]
         if args.style_changes:
             cmd += ["--style-changes", args.style_changes]
+        if args.video_engine == "minimax":
+            # BUGFIX (achado critico do proprio usuario, corrigido manualmente
+            # antes desta sessao de fixes -- ver MEMORIAL): sem isto o MiniMax
+            # H3 gera fala NATIVA a partir so do video_prompt, sem a fala real
+            # embutida como texto -- "nao tem um unico audio correto", ele
+            # inventa palavras. --include-quotes bota a fala literal no
+            # video_prompt. LTX nao precisa (usa audio_conditioning, que ja
+            # carrega o WAV real do TTS) -- so liga aqui pra minimax.
+            cmd += ["--include-quotes"]
         if args.camera_llm:
             cmd += ["--camera-llm", "--engine", args.engine]
         if not passo("P decupagem", cmd):
             return 1
 
-    if ate("sheet") and args.character_sheet:
+    # MotionBricks e um gerador de movimento esqueletico, nao um endpoint de
+    # video. Esta etapa produz ao mesmo tempo o condicionamento textual que os
+    # dois motores aceitam hoje e o score espacial que um adaptador 3D pode
+    # executar depois. Roda depois da decupagem porque depende de sujeito,
+    # co-sujeito, lado de tela e beat ja resolvidos.
+    if ate("motion") and args.motion_conditioning:
+        plan_path = run / "parse" / "shot_plan.json"
+        if not plan_path.exists():
+            print("[M movimento] shot_plan.json ausente; nao ha decupagem para condicionar", file=sys.stderr)
+            return 1
+        # Opcional, como --camera-llm e a character-sheet: enriquecimento que
+        # falha nao derruba a corrida -- sem ele o plano segue com o
+        # video_prompt da decupagem de sempre.
+        passo("M movimento", ["-m", "script_pipeline.motion_conditioner",
+                              "--plan", str(plan_path), "--apply"], obrigatorio=False)
+
+    quer_sheet = args.character_sheet or args.no_character_sheet
+    if ate("sheet") and not args.no_character_sheet and not quer_sheet:
+        cast_path = run / "characters" / "cast.json"
+        if cast_path.exists():
+            try:
+                n_personagens = len(json.loads(cast_path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                n_personagens = 0
+            if n_personagens >= 2:
+                print(f"[C character-sheet] {n_personagens} personagens no cast -- "
+                      "ligando por padrao (--no-character-sheet desliga)")
+                quer_sheet = True
+
+    if ate("sheet") and quer_sheet and not args.no_character_sheet:
         if (run / "characters" / "sheet_report.json").exists():
             print("[C character-sheet] ja feito, reaproveitando")
         else:
@@ -314,7 +396,7 @@ def main() -> int:
                      "--run-dir", str(run), "--width", str(args.width),
                      "--height", str(args.height), "--stills-only",
                      "--image-engine", args.image_engine]
-        if args.consistency_threshold is not None:
+        if not args.no_consistency_check and args.consistency_threshold is not None:
             cmd_stills += ["--consistency-threshold", str(args.consistency_threshold),
                            "--consistency-max-retries", str(args.consistency_max_retries)]
         if args.lora:
@@ -407,6 +489,14 @@ def main() -> int:
                     "--engine", args.video_engine]
         if args.video_engine == "minimax" and args.minimax_ref_audio:
             cmd_video.append("--minimax-ref-audio")
+        if args.video_engine == "minimax" and args.minimax_no_still:
+            cmd_video.append("--minimax-no-still")
+        if args.video_engine == "minimax" and args.minimax_chain_max_seconds:
+            cmd_video += ["--minimax-chain-max-seconds", str(args.minimax_chain_max_seconds)]
+        if args.video_engine == "ltx" and args.ltx_no_still:
+            cmd_video.append("--ltx-no-still")
+        if args.video_engine == "ltx" and args.ltx_chain_max_seconds:
+            cmd_video += ["--ltx-chain-max-seconds", str(args.ltx_chain_max_seconds)]
         if args.video_engine == "ltx":
             for valor in args.video_lora:
                 cmd_video += ["--video-lora", valor]
@@ -436,12 +526,16 @@ def main() -> int:
     if ate("mix"):
         passo("7 mix", ["-m", "script_pipeline.mix_audio",
                         "--run-dir", str(run)], obrigatorio=False)
-        if args.post_deblur or args.post_upscale:
+        if args.post_deblur or args.post_upscale or args.post_strip_subtitles:
             cmd_post = ["-m", "script_pipeline.postprod_v2v", "--run-dir", str(run)]
             if args.post_deblur:
                 cmd_post += ["--deblur", "--deblur-strength", str(args.post_deblur_strength)]
             if args.post_upscale:
                 cmd_post += ["--upscale", "--upscale-strength", str(args.post_upscale_strength)]
+            if args.post_strip_subtitles:
+                cmd_post += ["--strip-subtitles"]
+                if args.post_strip_subtitles_keep:
+                    cmd_post += ["--strip-subtitles-keep", str(args.post_strip_subtitles_keep)]
             passo("7b pos-producao", cmd_post, obrigatorio=False)
     if ate("final"):
         cmd_montagem = ["-m", "script_pipeline.assemble_final", "--run-dir", str(run)]

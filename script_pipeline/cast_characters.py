@@ -143,6 +143,66 @@ def _audit_and_fix_descriptors(characters: dict, *, model: str | None, log=print
     return characters
 
 
+# FIDELIDADE AO ROTEIRO-FONTE -- achado da avaliacao visual 2026-09-17 (Palacio
+# Esmeralda): a auditoria de COMPLETUDE acima (_check_descriptor_completeness)
+# so confere se as 4 CATEGORIAS estao presentes, nunca se o CONTEUDO bate com
+# o que o roteiro realmente diz. MEDIDO: o roteiro descreve Mei-Li vestindo
+# "a luxurious, flowing Hanfu of celestial blue silk... classical high-bun...
+# buyao", e o descritor gerado (qwen3.6, via Ollama) saiu "chin-length
+# chestnut-brown bob... fitted crimson velvet tunic... dark grey linen
+# trousers" -- 4 categorias cobertas, zero relacao com o texto-fonte. Isso
+# passa a auditoria de completude porque ela nunca olha PARA o roteiro, so
+# para a FORMA do descritor.
+_FIDELITY_STOPWORDS = {
+    "the", "a", "an", "and", "or", "with", "of", "in", "on", "her", "his",
+    "she", "he", "is", "was", "were", "to", "at", "by", "for", "that", "this",
+    "into", "onto", "their", "them", "she's", "his's", "its", "as", "while",
+}
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-zA-Z]{4,}", (text or "").lower())
+            if w not in _FIDELITY_STOPWORDS}
+
+
+def _ground_truth_snippet(snippets: list[str]) -> Optional[str]:
+    """A apresentacao visual do PROPRIO roteiro, se ele deu uma: o primeiro
+    trecho de acao que descreve como o personagem esta VESTIDO (mesmo sinal
+    de 'wearing' que shot_plan.appearance_only() ja usa como ancora de
+    apresentacao). Trechos vem em ordem de aparicao no roteiro -- o primeiro
+    que bate e a apresentacao, nao uma mencao de acao posterior."""
+    for s in snippets:
+        low = s.lower()
+        if len(s) > 30 and any(k in low for k in
+                               ("wearing", "dressed in", "veste ", "vestindo")):
+            return s
+    return None
+
+
+def _enforce_descriptor_fidelity(name: str, descriptor: str, anchor: str, log=print) -> str:
+    """Compara o descritor final contra a apresentacao original por
+    sobreposicao lexical de palavras de conteudo. Pouca sobreposicao e sinal
+    forte de invencao (o LLM tem plena liberdade para escolher OUTRAS
+    palavras para a MESMA roupa, mas nao para descrever uma roupa totalmente
+    diferente) -- quando isso acontece, o roteiro vence: descarta o
+    descritor gerado e usa o texto original (limpo de dialogo) no lugar."""
+    anchor_words = _content_words(anchor)
+    if not anchor_words:
+        return descriptor
+    overlap = anchor_words & _content_words(descriptor)
+    ratio = len(overlap) / len(anchor_words)
+    if ratio < 0.2:
+        log(f"[cast_characters] AUDITORIA: descritor de {name} contradiz a apresentacao "
+            f"do roteiro (\"{anchor[:90]}...\") -- {ratio:.0%} de sobreposicao, "
+            "substituindo pelo texto original do roteiro.")
+        cleaned = _clean_descriptor(anchor)
+        if len(cleaned) > 300:
+            corte = cleaned.rfind(" ", 0, 300)
+            cleaned = cleaned[:corte if corte > 0 else 300].rstrip(",;: ") + "..."
+        return cleaned
+    return descriptor
+
+
 def _load_scenes(run_dir: Path) -> list[dict]:
     parse_dir = run_dir / "parse"
     enriched = parse_dir / "scenes_enriched.json"
@@ -566,6 +626,12 @@ def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: d
         for name, info in characters.items():
             info["descriptor"] = _default_descriptor(name, info["snippets"])
 
+    for name, info in characters.items():
+        anchor = _ground_truth_snippet(info["snippets"])
+        if anchor:
+            info["descriptor"] = _enforce_descriptor_fidelity(
+                name, info["descriptor"], anchor, log=log)
+
     characters = _audit_and_fix_descriptors(characters, model=engine, log=log)
 
     voices = assign_voices(characters)
@@ -573,18 +639,43 @@ def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: d
     refs = reference_images or {}
     cast = {}
     for name, info in characters.items():
+        on_screen = not _is_offscreen_voice(name)
         cast[name] = {
-            "descriptor": info["descriptor"],
+            # Fonte fora de quadro (ver _is_offscreen_voice): sem descritor
+            # visual nenhum -- gerar um so daria ao shot_plan/render um corpo
+            # pra inventar. Achado por auditoria externa 2026-09-15: "VOZ"
+            # (roteiro 2, voz misteriosa pelo radio) virava silhueta
+            # holografica com cabelo e tunica, contradizendo o proprio
+            # enquadramento pedido ("no face in frame").
+            "descriptor": info["descriptor"] if on_screen else "",
             "line_count": info["line_count"],
             "voice": voices[name],
             # None => identity comes from the text descriptor only (the "automatic"
             # mode); a path => that photo anchors this character's look.
             "reference_image": refs.get(name),
             # Auditoria de completude (ver _check_descriptor_completeness) -- vazio
-            # quando as 4 categorias exigidas estao cobertas.
+            # quando as 4 categorias estao cobertas.
             "descriptor_gaps": info.get("descriptor_gaps", []),
+            # on_screen=False: personagem nunca deve virar sujeito de um still
+            # nem receber close (shot_plan.py filtra isso ao montar o plano).
+            "on_screen": on_screen,
         }
     return cast
+
+
+# Nomes convencionais de fonte de audio SEM presenca fisica em cena -- a
+# convencao de roteiro pra isso e um cue generico como "VOZ" (radio,
+# narracao, interfone), nunca um nome proprio de personagem. Comparado sem
+# acento/caixa; lista pequena e explicita de proposito -- e melhor deixar
+# passar um narrador nao-convencional (fica com descritor normal) do que
+# apagar por engano um personagem real que se chame parecido.
+_OFFSCREEN_VOICE_NAMES = {"voz", "voice", "narrador", "narrator", "narracao",
+                           "radio", "interfone", "vo", "off"}
+
+
+def _is_offscreen_voice(name: str) -> bool:
+    norm = "".join(c for c in (name or "").lower() if c.isalpha())
+    return norm in _OFFSCREEN_VOICE_NAMES
 
 
 def main(argv=None) -> int:

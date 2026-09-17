@@ -74,7 +74,9 @@ def parse_indices(spec: str | None, total: int) -> list:
 
 
 def _still_key(shot: dict, reference: str | None, width: int, height: int,
-               checkpoint: str = "", lora_name: str = "", lora_strength: float = 0.8) -> str:
+               checkpoint: str = "", lora_name: str = "", lora_strength: float = 0.8,
+               seed: int = 0, steps: int = 0, cfg: float = 0.0, guidance: float = 0.0,
+               weight_dtype: str = "", consistency_threshold: float | None = None) -> str:
     """Chave de cache de um still: tudo o que muda a IMAGEM.
 
     Existe porque reaproveitar por NOME DE ARQUIVO é o mesmo defeito que já
@@ -84,14 +86,21 @@ def _still_key(shot: dict, reference: str | None, width: int, height: int,
     O still velho seria reusado e a personagem apareceria com o figurino
     antigo, sem nenhum sinal de que algo ficou para trás.
 
-    A referência entra pelo NOME, não pelo conteúdo: ela é sempre um still
-    deste mesmo lote, e se ele mudou a chave dele já mudou junto."""
+    BUGFIX auditoria 2026-09-16 (A03): a referência entrava só pelo NOME do
+    arquivo, não pelo conteúdo -- trocar a character sheet ou importar outra
+    foto MANTENDO o mesmo caminho (ex.: `characters/fulano/ref.png`, que é
+    como `cast_characters.py`/`import_reference.py` salvam) devolvia
+    exatamente o still anterior, sem nenhum sinal de que a referência mudou.
+    Agora usa `_audio_key` (hash de conteúdo) na referência. Seed, steps, cfg,
+    guidance, weight_dtype e o limiar de consistência também faltavam: ajustar
+    qualidade/nitidez ou ligar a auditoria de consistência reaproveitava o
+    still gerado com os parâmetros antigos."""
     material = "|".join([
         shot.get("storyboard_prompt", ""),
         shot.get("framing", ""),
         shot.get("angle", ""),
         str(shot.get("screen_side")),
-        Path(reference).name if reference else "",
+        _audio_key(reference),
         f"{width}x{height}",
         # O MOTOR entra na chave: FLUX e SD 3.5 desenham o mesmo prompt de jeitos
         # muito diferentes, e sem isto trocar de motor reusaria o still do outro
@@ -102,21 +111,56 @@ def _still_key(shot: dict, reference: str | None, width: int, height: int,
         # sem isto, ligar/desligar um LoRA (ou trocar a força) reaproveitaria
         # o still antigo em silêncio.
         f"{lora_name}@{lora_strength}" if lora_name else "",
+        f"seed={seed}", f"steps={steps}", f"cfg={cfg}", f"guidance={guidance}",
+        weight_dtype or "",
+        f"consist={consistency_threshold}" if consistency_threshold is not None else "",
     ])
     return hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
 
 
 def _audio_key(wav: str | None) -> str:
-    """Identidade do audio de condicionamento, para a chave de reuso do clipe.
+    """Identidade de CONTEUDO de um arquivo (audio ou still) usado na chave de
+    reuso do clipe/still.
 
-    Tamanho em bytes basta: o wav do TTS e reescrito inteiro a cada sintese, e
-    qualquer mudanca de texto, voz, emocao ou velocidade muda a duracao."""
+    BUGFIX auditoria 2026-09-16 (A02): media so pelo TAMANHO (st_size) colidia
+    arquivos diferentes -- WAVs PCM de mesma duracao (mesma frase, voz trocada)
+    ou dois stills PNG de tamanho parecido frequentemente tem o MESMO numero de
+    bytes. MEDIDO: substituir o conteudo de um wav mantendo o tamanho preservava
+    a chave antiga, e o clipe velho era reaproveitado. Hash SHA-1 do conteudo
+    inteiro -- os arquivos aqui sao curtos (uma fala, um still), entao o custo e
+    desprezivel perto de uma geracao de video."""
     if not wav:
         return "sem-audio"
     try:
-        return str(Path(wav).stat().st_size)
+        h = hashlib.sha1()
+        with open(wav, "rb") as f:
+            for bloco in iter(lambda: f.read(1 << 20), b""):
+                h.update(bloco)
+        return h.hexdigest()[:16]
     except OSError:
         return "sem-audio"
+
+
+def _extrair_ultimo_frame(video_path: str, out_path: Path) -> bool:
+    """Ultimo frame decodificado de um clipe, pra alimentar o proximo elo do
+    encadeamento MiniMax (ver `_minimax_chain_generate`). Porte de
+    `_test_minimax_duration_cap.py::extrair_ultimo_frame`."""
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return False
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if n <= 0:
+        cap.release()
+        return False
+    cap.set(cv2.CAP_PROP_POS_FRAMES, n - 1)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(out_path), frame))
 
 
 def _load_manifest(stills_dir: Path) -> dict:
@@ -206,9 +250,12 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
     # A chave de cache tem de incluir a 2a referencia -- sem isso, um plano
     # gerado ANTES do fix (so uma referencia) seria reaproveitado como se
     # nada tivesse mudado, mesmo com o co_subject novo disponivel agora.
-    chave = _still_key(shot, reference, width, height, checkpoint, lora_name, lora_strength)
+    chave = _still_key(shot, reference, width, height, checkpoint, lora_name, lora_strength,
+                       seed=seed, steps=steps, cfg=cfg, guidance=guidance,
+                       weight_dtype=weight_dtype, consistency_threshold=consistency_threshold)
     if reference_2:
-        chave = f"{chave}|ref2={Path(reference_2).name}"
+        # Conteúdo, não nome -- mesmo raciocínio do BUGFIX A03 acima.
+        chave = f"{chave}|ref2={_audio_key(reference_2)}"
     man = _load_manifest(out_dir)
     guardado = man.get(str(idx)) or {}
     if out.exists() and guardado.get("key") == chave:
@@ -299,6 +346,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
            engine: str = "ltx",
            minimax_aspect_ratio: str | None = None, minimax_megapixels: float | None = None,
            minimax_turbo: bool = True, minimax_ref_audio: bool = False,
+           minimax_no_still: bool = False, minimax_chain_max_seconds: float | None = None,
+           ltx_no_still: bool = False, ltx_chain_max_seconds: float | None = None,
            video_loras: list[tuple[str, float]] | None = None,
            ic_mode: str = "off", ic_lora: str | None = None,
            ic_strength: float = 1.0, ic_guide_strength: float = 1.0,
@@ -323,6 +372,20 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # seguem no LTX. `engine="longcat"` = fala no LongCat, acao no LTX.
     if engine == "longcat":
         import longcat_video_backend
+
+    # BUGFIX auditoria 2026-09-16 (A17): o modo combinado (nem stills_only nem
+    # videos_only) gera os stills no MESMO laço em que troca de servidor para o
+    # MiniMax H3 -- e a troca acontece ANTES do laço, entao qualquer still ainda
+    # nao cacheado tenta submeter ao ComfyUI do FLUX (8188) depois dele ja ter
+    # sido derrubado. O orquestrador de producao (`run_decupagem.py`) sempre usa
+    # duas passadas (--stills-only depois --videos-only) e nunca bate nisso; so a
+    # chamada direta/avulsa (CLI ou função) expõe a combinação perigosa.
+    if engine == "minimax" and not stills_only and not videos_only:
+        raise ValueError(
+            "engine=minimax exige duas passadas: chame render() com stills_only=True "
+            "primeiro (todos os stills, com o ComfyUI do FLUX no ar) e depois "
+            "videos_only=True (troca para o ComfyUI do MiniMax H3). O modo combinado "
+            "derrubaria o 8188 antes de gerar os stills que ainda faltam.")
 
     stills_dir = out_dir / "stills"
     clips_dir = out_dir / "clips"
@@ -349,7 +412,12 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # storyboard -> submit_and_wait quebra com ConnectionRefusedError. Preciso
     # de FLUX no ar sempre que vamos gerar QUALQUER still (stills_only OU o
     # modo combinado antigo, nao so videos_only).
-    if (stills_only or not videos_only) and not sb.comfy_is_up("http://127.0.0.1:8188"):
+    # Z-Image-Turbo (pedido do usuario 2026-09-17) nao usa ComfyUI -- roda no
+    # servidor HTTP proprio de zimage_backend.py, que generate_scene_storyboard
+    # sobe sozinho quando precisa. So sobe o ComfyUI do FLUX aqui para as
+    # outras arquiteturas de still.
+    if ((stills_only or not videos_only) and sb.detect_architecture(checkpoint) != "zimage"
+            and not sb.comfy_is_up("http://127.0.0.1:8188")):
         sb.ensure_comfyui_running("http://127.0.0.1:8188", log=log)
 
     # Motor de video decide qual instancia de ComfyUI sobe -- as duas (LTX 2.5
@@ -437,7 +505,18 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         sujeito = shot.get("subject") or ""
         cena_id = shot.get("scene")
         ref = refs.get(sujeito) if (use_reference and sujeito) else None
-        if ref is None and use_reference:
+        # BUGFIX (auditoria externa 2026-09-16, achado #9): este fallback
+        # disparava mesmo com um SUJEITO nomeado que so ainda nao tinha
+        # still-ancora proprio -- um still de LOCACAO (as vezes o rosto de
+        # OUTRO personagem, ou nenhum rosto) virava a "referencia de
+        # identidade" dele em silencio. MEDIDO: o score de consistencia de
+        # Mei-Li saiu negativo (~-0.03) num plano cuja referencia registrada
+        # era, na real, um still de Xiao-Lan/cenario. Location_ref so faz
+        # sentido pra plano SEM sujeito (continuidade de cenario); com
+        # sujeito e sem still proprio ainda, o certo e ficar SEM referencia
+        # (texto puro) -- errado e melhor que uma referencia errada that
+        # parece certa.
+        if ref is None and use_reference and not sujeito:
             ref = location_refs.get(cena_id)
         # SEGUNDA referencia (opcao B, 2026-09-10): o plano tem um segundo
         # personagem NOMEADO no proprio texto (`co_subject`, de shot_plan.py)
@@ -466,18 +545,39 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 still = achados[0] if achados else None
             if still is None:
                 log(f"  sem still para o plano {i}; rode --stills-only antes")
+                # BUGFIX auditoria 2026-09-16 (A08): sem registrar a falha,
+                # este plano desaparecia de `feitos` (nao so do vídeo) -- e
+                # `render_shots_stage.build_clips_manifest` so entende "falhou"
+                # o que ESTA no manifesto com ok=False; o que nunca chega nem
+                # aparece. Um plano faltando podia deixar `ok == len(manifesto)`
+                # trivialmente verdadeiro (inclusive 0 == 0) e marcar o estagio
+                # como concluido com o filme incompleto.
+                feitos.append({"shot": i, "still": None, "clip": None})
                 continue
         else:
+            # BUGFIX (achado testando o Fix #3, avaliacao visual 2026-09-17): o
+            # gate de consistencia facial e um checagem de ROSTO -- sem sentido
+            # (e sem chance de passar) num plano SEM sujeito, onde `ref` e a
+            # foto de LOCACAO (fallback de `location_refs`, ver acima) ou o
+            # enquadramento e `insert` ("no face in frame" por definicao do
+            # proprio prompt). MEDIDO: insert e wide sem sujeito gastavam as 3
+            # geracoes (1 + 2 retries) do gate, sempre abaixo do limiar (0.07 a
+            # 0.23), porque nao ha rosto de personagem pra comparar -- so o
+            # tempo de GPU. So aplica o gate quando ha um SUJEITO de verdade.
+            gate_consistencia = consistency_threshold if sujeito else None
             still = _still_for_shot(shot, i, out_dir=stills_dir, width=width,
                                     height=height, checkpoint=checkpoint, clip=clip,
                                     vae=vae, seed=seed, reference=ref, reference_2=co_ref, log=log,
                                     steps=passos, cfg=escala_cfg, guidance=escala_guidance,
                                     weight_dtype=escala_weight_dtype,
-                                    consistency_threshold=consistency_threshold,
+                                    consistency_threshold=gate_consistencia,
                                     consistency_max_retries=consistency_max_retries,
                                     lora_name=lora_name, lora_strength=lora_strength)
         if still is None:
             log(f"  still falhou; pulando o plano {i}")
+            # BUGFIX auditoria 2026-09-16 (A08): ver comentario equivalente no
+            # ramo `videos_only` acima.
+            feitos.append({"shot": i, "still": None, "clip": None})
             continue
         # Só vira referência quem foi enquadrado perto o bastante para mostrar
         # o rosto -- um wide como referência ensinaria o cenário, não a pessoa.
@@ -505,14 +605,64 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         clip_path = clips_dir / f"shot{i:03d}.mp4"
         marca = clips_dir / f"shot{i:03d}.key"
         chave = f"{shot['frames']}|{_audio_key(wav_cond)}"
+        # BUGFIX auditoria 2026-09-16 (A04): seed, fps e resolucao faltavam na
+        # chave -- mudar qualquer um dos tres muda o CLIPE (composicao,
+        # movimento amostrado) mas nao o numero de frames nem o audio, entao o
+        # cache antigo nunca via a diferenca.
+        chave += f"|seed={seed}|fps={fps}|{width}x{height}"
         # O STILL e o quadro 0 do I2V: still refeito com clipe velho e o mesmo modo de falha
         # silenciosa. VISTO 2026-09-13 (teste_close_v2): os closes novos foram gerados e os
         # 3 clipes de fala antigos, de plano medio, foram reaproveitados. Invalida uma vez
         # o cache de corridas antigas (chave nova), o que e o comportamento certo.
         chave += f"|still={_audio_key(str(still))}"
+        # BUGFIX 2026-09-15: o MOTOR de video (ltx/minimax/longcat) faltava na
+        # chave pra minimax -- so longcat entrava (linha abaixo, ja existia).
+        # MEDIDO: trocar --video-engine ltx por --video-engine minimax no MESMO
+        # run-dir reaproveitou os 14 clipes do LTX em silencio ("clipe ja existe
+        # e bate com o plano"), sem gerar um unico frame no MiniMax -- o mesmo
+        # modo de falha silenciosa que o comentario abaixo ja resolvia so pro
+        # longcat. `engine` sempre entra agora, independente de qual for.
+        chave += f"|engine={engine}"
+        # BUGFIX 2026-09-16: o TEXTO do video_prompt faltava na chave. Pro LTX
+        # isso quase nunca importa sozinho (o audio_conditioning real dirige a
+        # boca, nao o texto), mas pro MiniMax H3 e onde a FALA em si mora
+        # (comentario mais abaixo: "fala nativa a partir do texto do prompt").
+        # MEDIDO: religar --include-quotes no shot_plan (pra corrigir o
+        # MiniMax inventando fala) e sozinho NAO bastava -- os clipes velhos
+        # batiam com a chave antiga (frames+still+engine, tudo igual) e eram
+        # reaproveitados com a fala inventada de antes. Um hash curto do
+        # proprio texto fecha essa lacuna pros dois motores.
+        import hashlib
+        chave += f"|prompt={hashlib.sha1(shot['video_prompt'].encode('utf-8')).hexdigest()[:12]}"
+        if engine == "minimax":
+            # Mesmo bug de cache silencioso: sem isto, ligar/desligar
+            # --minimax-no-still ou --minimax-chain-max-seconds reaproveitaria
+            # o clipe velho (frames/still/prompt/engine iguais) em vez de
+            # regenerar do jeito novo.
+            chave += f"|nostill={int(minimax_no_still)}|chain={minimax_chain_max_seconds or 0}"
+            # BUGFIX auditoria 2026-09-16 (A04): aspect_ratio, megapixels, turbo,
+            # ref_audio e a VARIANTE de checkpoint (fp8int8/w4a8/gguf-q4km, ver
+            # CLAUDE.md) mudam o clipe do MiniMax H3 e nao entravam na chave.
+            chave += (f"|ar={minimax_aspect_ratio or ''}|mp={minimax_megapixels or 0}"
+                      f"|turbo={int(minimax_turbo)}|refaudio={int(minimax_ref_audio)}"
+                      f"|variant={os.environ.get('MINIMAX_H3_VARIANT', '')}")
+        if engine == "ltx":
+            chave += f"|nostill={int(ltx_no_still)}|chain={ltx_chain_max_seconds or 0}"
+            # BUGFIX auditoria 2026-09-16 (A04): a VARIANTE do transformer 2.5
+            # (distilled/dev/gguf-q6k/w4a8-v10, CLAUDE.md) e o modo two-stage
+            # mudam o clipe e nao entravam na chave -- trocar LTX25_VARIANT no
+            # mesmo run-dir reaproveitaria o clipe da variante anterior.
+            chave += (f"|variant={os.environ.get('LTX25_VARIANT', '')}"
+                      f"|twostage={os.environ.get('LTX25_TWO_STAGE', '')}")
         if engine == "longcat" and wav_cond:
             # Mesmo plano, outro motor: sem isto um clipe LTX existente seria reaproveitado.
             chave += f"|longcat={os.environ.get('LONGCAT_VARIANT', '1.5')}"
+        elif engine == "longcat":
+            # BUGFIX auditoria 2026-09-16 (A04): plano de ACAO com engine=longcat
+            # cai no ramo LTX mais abaixo (so falas vao pro LongCat de verdade) --
+            # sem isto a variante do LTX 2.5 nao entrava na chave destes clipes.
+            chave += (f"|variant={os.environ.get('LTX25_VARIANT', '')}"
+                      f"|twostage={os.environ.get('LTX25_TWO_STAGE', '')}")
         # LoRAs de video e IC-LoRA (2026-09-12) mudam o CLIPE do mesmo jeito que trocar o
         # audio -- entram na chave, senao ligar um LoRA reaproveitaria o clipe velho em
         # silencio. So quando ligados: corrida sem eles mantem a chave antiga e o cache.
@@ -548,15 +698,191 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             # fala, dois clipes com a mesma contagem podem ter sido gerados de
             # audios diferentes -- e o comentario acima ja registra que clipe
             # obsoleto passa em silencio, que e o pior modo de falhar.
-            antiga = marca.read_text(encoding="utf-8").strip() if marca.exists() else None
-            if atual == shot["frames"] and antiga == chave:
+            #
+            # BUGFIX auditoria 2026-09-16 (A04): comparar `atual` contra
+            # `shot["frames"]` so faz sentido pro LTX -- e a grade 8k+1 que o
+            # shot_plan usou pra calcular esse numero. MiniMax H3 (5+17k a
+            # 24fps) e LongCat (4k+1 a 25fps, normalizado na montagem) NUNCA
+            # batem exatamente com `shot["frames"]`, entao esta checagem
+            # regenerava o clipe TODA corrida pra esses dois motores -- ou,
+            # pior, um clipe do motor errado com contagem parecida por
+            # coincidencia passaria pela MESMA checagem fraca. Guarda o par
+            # (chave, frames REALMENTE produzidos) no marcador e compara com
+            # o proprio arquivo, nao com o alvo de outro motor.
+            marcador = {}
+            if marca.exists():
+                try:
+                    marcador = json.loads(marca.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    marcador = {}
+            antiga, frames_gravados = marcador.get("key"), marcador.get("frames")
+            if antiga == chave and atual is not None and atual == frames_gravados:
                 log(f"  clipe ja existe e bate com o plano, reaproveitando: {clip_path.name}")
                 feitos.append({"shot": i, "still": str(still), "clip": str(clip_path)})
                 continue
-            if atual != shot["frames"]:
-                log(f"  clipe existente tem {atual}f mas o plano pede {shot['frames']}f; refazendo")
+            if antiga == chave and atual != frames_gravados:
+                log(f"  clipe existente tem {atual}f mas o registro esperava {frames_gravados}f "
+                    "(arquivo truncado/incompleto?); refazendo")
             else:
-                log(f"  clipe existente foi gerado com outro audio; refazendo")
+                log(f"  clipe existente foi gerado com outro plano/audio/config; refazendo")
+        def _minimax_chain_generate(refs_minimax, sheet_ref, audio_refs_minimax, out_path, log):
+            """Plano longo dividido em sub-planos curtos e ENCADEADOS: cada
+            sub-plano usa a sheet (identidade) e o ULTIMO FRAME do sub-plano
+            anterior (continuidade de movimento/cenario) -- mesmo principio do
+            `continuous_chain.py` pro LTX. Nasceu como teste isolado
+            (`_test_minimax_duration_cap.py`, 2026-09-03, MEMORIAL 3.47/3.49):
+            MEDIDO la que dividir evita o teto de ~16s onde o plano inteiro
+            fica instavel (30min+ sem terminar). Pedido do usuario 2026-09-16:
+            expor isso como opcao de producao, nao so teste manual.
+
+            NAO tenta dividir a FALA -- cada sub-plano recebe o MESMO
+            video_prompt inteiro (a fala completa do plano). Pra dialogo, isso
+            e aceitavel so quando o prompt ja carrega a fala inteira (a boca
+            sincroniza no sub-plano que ela cair, o resto fica em silencio ou
+            repetindo a articulacao -- REVISAR visualmente antes de confiar
+            pra producao continua)."""
+            import math
+            from script_pipeline.assemble_final import concat_videos
+
+            duracao_total = shot["frames"] / fps
+            n_partes = max(1, math.ceil(duracao_total / minimax_chain_max_seconds))
+            seg_seconds = round(duracao_total / n_partes, 2)
+            log(f"    [minimax_h3-chain] {duracao_total:.1f}s dividido em {n_partes} "
+                f"sub-plano(s) de ~{seg_seconds}s cada")
+
+            work_dir = clip_path.parent / f"{clip_path.stem}_chain"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            partes, frame_anterior = [], None
+            for j in range(n_partes):
+                # BUGFIX auditoria 2026-09-16 (A05): `(refs_j + [frame_anterior])[:2]`
+                # mantinha os dois primeiros elementos de `refs_minimax` (still do
+                # plano + sheet) e DESCARTAVA o frame_anterior, que e justamente o
+                # elo de continuidade que este encadeamento existe para dar --
+                # MEDIDO: a segunda chamada em diante nunca recebia o ultimo frame.
+                # A partir do segundo sub-plano a prioridade e explicita: sheet
+                # (identidade, se existir) + frame_anterior (continuidade) --
+                # o still do PLANO INTEIRO nao faz mais sentido a partir daqui,
+                # o frame anterior ja e o quadro 0 mais atual.
+                if frame_anterior:
+                    refs_j = [r for r in [sheet_ref, frame_anterior] if r] or [frame_anterior]
+                else:
+                    refs_j = list(refs_minimax)
+                sub_path = work_dir / f"sub{j:02d}.mp4"
+                minimax_h3_backend.generate(
+                    shot["video_prompt"], str(sub_path),
+                    ref_images=refs_j[:2] or None, ref_audios=audio_refs_minimax,
+                    aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
+                    megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
+                    duration_seconds=seg_seconds, seed=seed + i + j * 101, turbo=minimax_turbo,
+                    log_cb=lambda m, j=j: log(f"    [minimax_h3-chain sub{j}] {m}"), timeout=1800)
+                partes.append(str(sub_path))
+                frame_path = work_dir / f"sub{j:02d}_last.png"
+                if _extrair_ultimo_frame(str(sub_path), frame_path):
+                    frame_anterior = str(frame_path)
+                else:
+                    log(f"    [minimax_h3-chain] sub{j:02d}: nao consegui extrair "
+                        f"ultimo frame -- proximo sub-plano perde a continuidade "
+                        f"de movimento (mantem so a sheet).")
+            # BUGFIX auditoria 2026-09-16 (A07): concat_videos devolve False em
+            # falha e o retorno era ignorado -- o caller registrava `out_path`
+            # como clipe pronto mesmo quando ele nao foi (re)escrito (arquivo
+            # ausente ou, pior, sobra de uma corrida anterior). Levanta, para
+            # cair no mesmo `except` que ja marca o plano como FALHOU.
+            if not concat_videos(partes, out_path, work_dir=work_dir / "intermediate", log=log):
+                raise RuntimeError(f"concat dos {len(partes)} sub-planos do encadeamento MiniMax falhou")
+
+        def _split_audio(wav: str, seg_seconds: list, out_dir: Path) -> list:
+            """Corta `wav` em pedacos consecutivos, um por segmento do
+            encadeamento -- ver `_ltx_chain_generate`/BUGFIX A06. Segmento que
+            cai inteiramente depois do fim do audio recebe None (sem
+            condicionamento): melhor um sub-plano sem trilha de referencia do
+            que repetir o WAV inteiro fora de hora (o LTX inventaria voz por
+            cima da fala real nos sub-planos seguintes)."""
+            total = None
+            try:
+                r = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration",
+                                    "-of", "csv=p=0", wav], capture_output=True, text=True)
+                total = float(r.stdout.strip())
+            except (ValueError, OSError):
+                pass
+            out, t = [], 0.0
+            for j, dur in enumerate(seg_seconds):
+                inicio = t
+                t += dur
+                if total is not None and inicio >= total:
+                    out.append(None)
+                    continue
+                dest = out_dir / f"audio_seg{j:02d}.wav"
+                r = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", wav,
+                                    "-ss", f"{inicio:.3f}", "-t", f"{dur:.3f}", str(dest)],
+                                   capture_output=True, text=True)
+                out.append(str(dest) if r.returncode == 0 and dest.exists() else None)
+            return out
+
+        def _ltx_chain_generate(image_inicial, out_path, log):
+            """Mesmo principio do `_minimax_chain_generate`, pro LTX 2.5:
+            divide o plano em sub-clipes curtos, cada um usando o ULTIMO frame
+            do anterior como `image_path` (I2V) -- e exatamente o mecanismo
+            de `continuous_chain.py` (ja validado, 2.3/2.5), só que aplicado
+            DENTRO de um plano da decupagem em vez de fora, orquestrado por
+            script standalone. Pedido do usuario 2026-09-16."""
+            import math
+            from script_pipeline.assemble_final import concat_videos
+
+            duracao_total = shot["frames"] / fps
+            n_partes = max(1, math.ceil(duracao_total / ltx_chain_max_seconds))
+            # BUGFIX auditoria 2026-09-16 (A06): a versao anterior usava o MESMO
+            # `shot["frames"] // n_partes` (arredondado pro grid 8k+1) em TODOS
+            # os segmentos, descartando o resto INTEIRO uma vez por segmento --
+            # MEDIDO: um plano de 401f em 3 partes perdia 14f (~0,58s a 24fps).
+            # Agora so o ultimo segmento absorve o resto (perda de no maximo 8f,
+            # a granularidade do proprio grid), e a diferenca final e logada em
+            # vez de ficar silenciosa.
+            base = shot["frames"] // n_partes
+            seg_frames, restante = [], shot["frames"]
+            for j in range(n_partes):
+                alvo = restante if j == n_partes - 1 else base
+                seg_frames.append(max(9, ((alvo - 1) // 8) * 8 + 1))
+                restante -= alvo
+            total_real = sum(seg_frames)
+            if total_real != shot["frames"]:
+                log(f"    [ltx25-chain] grade 8k+1 por segmento: {shot['frames']}f pedidos, "
+                    f"{total_real}f reais ({total_real - shot['frames']:+d}f)")
+            log(f"    [ltx25-chain] {duracao_total:.1f}s dividido em {n_partes} "
+                f"sub-plano(s): {[f'{f}f' for f in seg_frames]}")
+
+            work_dir = clip_path.parent / f"{clip_path.stem}_chain"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            # BUGFIX auditoria 2026-09-16 (A06): so o PRIMEIRO sub-plano recebia
+            # `wav_cond` inteiro como audio_conditioning; os seguintes iam sem
+            # nada e o LTX 2.5 inventava voz propria por cima da fala real
+            # (mesmo defeito que audio_conditioning existe pra evitar, ver
+            # comentario mais abaixo). Corta o WAV pelo tempo de cada segmento.
+            wavs_seg = _split_audio(wav_cond, [f / fps for f in seg_frames], work_dir) \
+                if wav_cond else [None] * n_partes
+
+            partes, imagem_atual = [], image_inicial
+            for j in range(n_partes):
+                sub_path = work_dir / f"sub{j:02d}.mp4"
+                ltx25_backend.generate(
+                    prompt_video, str(sub_path),
+                    width=width, height=height, num_frames=seg_frames[j],
+                    frame_rate=fps, seed=seed + i + j * 101,
+                    image_path=imagem_atual, image_strength=1.0,
+                    loras=video_loras or None, ic_lora=ic_spec,
+                    audio_conditioning=wavs_seg[j],
+                    log_cb=lambda m, j=j: log(f"    [ltx25-chain sub{j}] {m}"), timeout=2400)
+                partes.append(str(sub_path))
+                frame_path = work_dir / f"sub{j:02d}_last.png"
+                if _extrair_ultimo_frame(str(sub_path), frame_path):
+                    imagem_atual = str(frame_path)
+                else:
+                    log(f"    [ltx25-chain] sub{j:02d}: nao consegui extrair ultimo "
+                        f"frame -- proximo sub-plano perde a continuidade.")
+            # BUGFIX auditoria 2026-09-16 (A07): ver comentario no encadeamento MiniMax acima.
+            if not concat_videos(partes, out_path, work_dir=work_dir / "intermediate", log=log):
+                raise RuntimeError(f"concat dos {len(partes)} sub-planos do encadeamento LTX falhou")
+
         try:
             if engine == "minimax":
                 # MiniMax H3 fala e sincroniza labios NATIVAMENTE a partir do
@@ -581,7 +907,15 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 # já ancorou o still na etapa de FLUX, reforçada aqui de novo
                 # no motor de vídeo). Sem sheet, cai no still sozinho, igual
                 # sempre foi.
-                refs_minimax = [str(still)] if still else []
+                # --minimax-no-still (pedido do usuario 2026-09-16): "e se
+                # usarmos so os descritivos?" -- deixa de passar o still deste
+                # plano como referencia, so o TEXTO (video_prompt, que ja
+                # carrega o descritor do personagem) guia a identidade. NAO
+                # remove a sheet quando ela existe (a sheet e a ancora entre
+                # PLANOS diferentes do mesmo personagem -- tirar ela tambem
+                # devolveria exatamente o drift que o still existe pra evitar;
+                # ver discussao no chat). Sem sheet nem still, e T2V puro.
+                refs_minimax = [] if minimax_no_still else ([str(still)] if still else [])
                 sheet_do_sujeito = (character_sheets or {}).get(sujeito)
                 if sheet_do_sujeito and sheet_do_sujeito not in refs_minimax:
                     refs_minimax.append(sheet_do_sujeito)
@@ -591,15 +925,20 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 # usaria como audio_conditioning) e o timbre/cadencia REAIS
                 # do TTS pra ESTE plano -- reusa em vez de recalcular.
                 audio_refs_minimax = [wav_cond] if (minimax_ref_audio and wav_cond) else None
-                minimax_h3_backend.generate(
-                    shot["video_prompt"], str(clip_path),
-                    ref_images=refs_minimax[:2] or None,
-                    ref_audios=audio_refs_minimax,
-                    aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
-                    megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
-                    duration_seconds=shot["frames"] / fps,
-                    seed=seed + i, turbo=minimax_turbo,
-                    log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
+                duracao_plano = shot["frames"] / fps
+                if minimax_chain_max_seconds and duracao_plano > minimax_chain_max_seconds:
+                    _minimax_chain_generate(refs_minimax, sheet_do_sujeito, audio_refs_minimax,
+                                            clip_path, lambda m: log(m))
+                else:
+                    minimax_h3_backend.generate(
+                        shot["video_prompt"], str(clip_path),
+                        ref_images=refs_minimax[:2] or None,
+                        ref_audios=audio_refs_minimax,
+                        aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
+                        megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
+                        duration_seconds=duracao_plano,
+                        seed=seed + i, turbo=minimax_turbo,
+                        log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
             elif engine == "longcat" and wav_cond:
                 # Plano de FALA no LongCat-Avatar 1.5 (MEMORIAL 3.83): boca gerada junto com
                 # o video a partir do wav do TTS -- o lip-sync depois e opcional. Os planos
@@ -620,32 +959,42 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     longcat_video_backend.stop_server(log_cb=log)
                     os.environ["LTX_COMFY_CACHE_NONE"] = "1"
                     sb.ensure_comfyui_running("http://127.0.0.1:8188", log=log)
-                ltx25_backend.generate(
-                    prompt_video, str(clip_path),
-                    width=width, height=height, num_frames=shot["frames"],
-                    frame_rate=fps, seed=seed + i,
-                    image_path=str(still), image_strength=1.0,
-                    loras=video_loras or None, ic_lora=ic_spec,
-                    # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
-                    # propria, que depois briga com o TTS por baixo da mixagem.
-                    # Com isto ele constroi o som em volta da fala real, que e o
-                    # que o caminho por FALA ja fazia (render_scenes.py:550).
-                    audio_conditioning=wav_cond,
-                    # O log do backend ia para o LIXO. Foi assim que o estagio de
-                    # video ficou sem diagnostico: qual variante carregou, se o
-                    # encoder foi para a CPU, quanto tempo em cada fase -- nada
-                    # disso saia. Mesma licao da secao 3.28: silenciar o caminho de
-                    # sucesso e razoavel, o de falha nao, e aqui os dois estavam
-                    # silenciados. Prefixado para nao se confundir com o log do
-                    # proprio render_shots.
-                    log_cb=lambda m: log(f"    [ltx25] {m}"), timeout=2400)
+                # --ltx-no-still (pedido do usuario 2026-09-16, mesmo espirito
+                # do --minimax-no-still): ltx25_backend.generate ja aceita
+                # image_path=None (T2V puro) -- so nunca era exposto aqui, o
+                # caminho da decupagem sempre ancorava no still (I2V).
+                imagem_ltx = None if ltx_no_still else str(still)
+                duracao_ltx = shot["frames"] / fps
+                if ltx_chain_max_seconds and duracao_ltx > ltx_chain_max_seconds:
+                    _ltx_chain_generate(imagem_ltx, clip_path, lambda m: log(m))
+                else:
+                    ltx25_backend.generate(
+                        prompt_video, str(clip_path),
+                        width=width, height=height, num_frames=shot["frames"],
+                        frame_rate=fps, seed=seed + i,
+                        image_path=imagem_ltx, image_strength=1.0,
+                        loras=video_loras or None, ic_lora=ic_spec,
+                        # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
+                        # propria, que depois briga com o TTS por baixo da mixagem.
+                        # Com isto ele constroi o som em volta da fala real, que e o
+                        # que o caminho por FALA ja fazia (render_scenes.py:550).
+                        audio_conditioning=wav_cond,
+                        # O log do backend ia para o LIXO. Foi assim que o estagio de
+                        # video ficou sem diagnostico: qual variante carregou, se o
+                        # encoder foi para a CPU, quanto tempo em cada fase -- nada
+                        # disso saia. Mesma licao da secao 3.28: silenciar o caminho de
+                        # sucesso e razoavel, o de falha nao, e aqui os dois estavam
+                        # silenciados. Prefixado para nao se confundir com o log do
+                        # proprio render_shots.
+                        log_cb=lambda m: log(f"    [ltx25] {m}"), timeout=2400)
             log(f"  clipe OK em {time.time()-t0:.0f}s -> {clip_path.name}"
                 f"{' (boca gerada pelo LongCat 1.5)' if (engine == 'longcat' and wav_cond) else ''}"
                 f"{' (som condicionado pela fala)' if (engine == 'ltx' and wav_cond) else ''}"
                 f"{' (fala nativa do MiniMax H3)' if engine == 'minimax' else ''}")
             if "freeze" in (shot.get("post_effects") or []):
                 _apply_freeze(clip_path, log=log)
-            marca.write_text(chave, encoding="utf-8")
+            marca.write_text(json.dumps({"key": chave, "frames": _clip_frames(clip_path)}),
+                             encoding="utf-8")
             feitos.append({"shot": i, "still": str(still), "clip": str(clip_path)})
         except Exception as e:
             log(f"  clipe FALHOU: {type(e).__name__}: {str(e).splitlines()[0][:160]}")
