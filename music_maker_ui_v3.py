@@ -747,7 +747,11 @@ def extract_last_frame(video_path, output_image_path):
     return extract_frame(video_path, output_image_path, -1)
 
 def slice_audio(audio_path, prompt, fps, num_frames, lyrics_enabled=True):
+    # BUGFIX auditoria 2026-09-16 (A01): ver music_maker_ui_v2.py -- CURRENT_LOG
+    # faltava na declaracao global e o `+=` no except do Demucs lancava
+    # UnboundLocalError, abortando a fatia sem chamar o ASR alternativo.
     global SCENES_DATA, CURRENT_PHASE, CURRENT_PROGRESS, CURRENT_TOTAL_SCENES, LYRICS_ENABLED, MUSIC_AUDIO_PATH
+    global CURRENT_LOG
     if not audio_path:
         return "Please upload an audio file.", []
     

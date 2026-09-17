@@ -12,7 +12,10 @@ $root = "E:\Users\home\Documents\LTX-2-OPTIMIZED"
 $py = "$root\.venv\Scripts\python.exe"
 $env:CUDA_VISIBLE_DEVICES = '1'   # RTX 3090
 $env:HF_HUB_OFFLINE = '1'
-$lowres = "$root\_gen_lowres.mp4"
+# BUGFIX auditoria 2026-09-16 (A13): nome fixo (`_gen_lowres.mp4`) -- duas
+# corridas simultaneas se pisam (a segunda sobrescreve/apaga o low-res que a
+# primeira ainda esta upscalando). Sufixo de PID isola cada execucao.
+$lowres = "$root\_gen_lowres_$PID.mp4"
 
 $genArgs = @(
   "-u","-m","ltx_pipelines.distilled",
@@ -37,6 +40,14 @@ Write-Host ("[GERACAO OK] {0:N0}s" -f $genSec)
 Write-Host "=== [UPSCALE] x$UpscaleScale ($UpscaleModel) ==="
 $t1 = Get-Date
 & powershell -ExecutionPolicy Bypass -File "$root\upscale_video.ps1" -InFile $lowres -Model $UpscaleModel -Scale $UpscaleScale -Output $Output
+# BUGFIX auditoria 2026-09-16 (A12): o exit code do upscale (processo FILHO)
+# nao era conferido -- se ele falhasse, o script seguia em frente, apagava o
+# low-res (unica copia do resultado da geracao) e imprimia "PRONTO" mesmo sem
+# $Output existir.
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Output)) {
+    Write-Host "FALHOU: upscale nao produziu $Output (exit $LASTEXITCODE). Low-res preservado em $lowres."
+    exit 1
+}
 $upSec = ((Get-Date)-$t1).TotalSeconds
 Remove-Item $lowres -Force -ErrorAction SilentlyContinue
 Write-Host ("=== PRONTO: {0} | geracao {1:N0}s + upscale {2:N0}s = {3:N0}s total ===" -f $Output, $genSec, $upSec, ($genSec+$upSec))

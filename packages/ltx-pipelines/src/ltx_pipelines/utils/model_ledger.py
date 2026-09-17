@@ -315,13 +315,10 @@ class ModelLedger:
         decoder = self.audio_decoder_builder.build(device=torch.device("cpu"), dtype=self.dtype)
         return decoder.to(self.device).eval()
 
-    def audio_encoder(self) -> AudioEncoder:
-        if not hasattr(self, "audio_encoder_builder"):
-            raise ValueError(
-                "Audio encoder not initialized. Please provide a checkpoint path to the ModelLedger constructor."
-            )
-
-        return self.audio_encoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+    # BUGFIX auditoria 2026-09-16 (A16): `audio_encoder` estava definido DUAS
+    # vezes nesta classe com o mesmo corpo (a segunda, aqui removida,
+    # sobrescrevia a primeira em silêncio -- F811). Sem diferença funcional
+    # hoje, mas uma correção aplicada só numa das cópias não teria efeito.
 
     def vocoder(self) -> Vocoder:
         if not hasattr(self, "vocoder_builder"):

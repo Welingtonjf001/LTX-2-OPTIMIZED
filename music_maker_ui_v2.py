@@ -570,7 +570,15 @@ def extract_last_frame(video_path, output_image_path):
     return extract_frame(video_path, output_image_path, -1)
 
 def slice_audio(audio_path, prompt, fps, num_frames, lyrics_enabled=True):
+    # BUGFIX auditoria 2026-09-16 (A01): CURRENT_LOG faltava nesta declaracao
+    # global -- o `CURRENT_LOG += ...` do except abaixo e uma ATRIBUICAO, entao
+    # sem `global` o Python trata CURRENT_LOG como variavel LOCAL da funcao
+    # inteira, e o `+=` (que precisa LER o valor atual antes de somar) lanca
+    # UnboundLocalError antes mesmo de rodar. Isso interrompia a fatia inteira
+    # numa falha RECUPERAVEL do Demucs, sem nunca chegar a chamar o ASR
+    # alternativo (que e o proprio motivo do bloco try/except existir).
     global SCENES_DATA, CURRENT_PHASE, CURRENT_PROGRESS, CURRENT_TOTAL_SCENES, LYRICS_ENABLED, MUSIC_AUDIO_PATH
+    global CURRENT_LOG
     if not audio_path:
         return "Please upload an audio file.", []
     
