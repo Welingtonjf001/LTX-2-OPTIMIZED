@@ -45,6 +45,21 @@ Cada estágio marca sua conclusão em `generation_manifest.json`, então `--resu
 retoma sem refazer o que já ficou pronto — o que permite editar `cast.json`, um prompt de
 plano ou um WAV de fala à mão no meio do caminho.
 
+### Contrato de entrega (modo final)
+
+`run_decupagem --ate final` é fail-closed: não aceita `--no-visual-audit` nem
+`--visual-unresolved continue`. Esses modos continuam disponíveis para
+diagnóstico/previews, mas não para declarar um filme pronto. Os gates de still e
+vídeo precisam aprovar todos os planos; depois de lipsync/mix,
+`clip_identity_audit --strict` roda antes da montagem; por fim
+`verify_output --strict` bloqueia o sucesso se houver erro técnico. Um MP4
+existir não significa aprovação.
+
+O modo espacial não é inferido automaticamente do texto livre. Ele exige um
+blocking/spec de locação, entidades, câmeras e eventos; quando usado, deve ser
+gerado e auditado antes dos stills/vídeos conforme `SPATIAL_PIPELINE.md`. A
+ausência de spec não pode ser descrita como “mapa 3D executado”.
+
 ---
 
 ## 2. Os estágios em detalhe
@@ -285,6 +300,7 @@ outputs/screenplay/<timestamp>_<slug>/
 | Upscaler espacial | `ltx-2.3-spatial-upscaler-x2-1.0.safetensors` | `models/` |
 | Encoder de texto do LTX | Gemma 3 12B | `models/gemma3` |
 | Storyboard | `flux-2-klein-9b-fp8.safetensors` + Qwen3-8B + `flux2-vae` | ComfyUI |
+| Storyboard alternativo | Qwen-Image-2.1 (texto e até 10 referências) | `E:\Users\home\Documents\Qwen-Image-2.1` |
 | Enriquecimento de roteiro | Gemma 4 E2B | `models/gemma4-e2b` (venv `gemma4_env`) |
 | Vídeo alternativo | Wan 2.2 TI2V 5B | `models/` |
 | TTS | XTTS-v2.0.2 / Qwen3-TTS | venvs externos |

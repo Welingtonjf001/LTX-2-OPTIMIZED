@@ -55,7 +55,8 @@ def _rostos_do_clipe(video: str, fracoes=(0.15, 0.5, 0.85)) -> list:
 
 def _still_do_plano(run: Path, clip_id: str) -> Path | None:
     num = clip_id.rsplit("shot", 1)[-1]
-    achados = sorted((run / "shots" / "stills").glob(f"shot{num}_*.png"))
+    from script_pipeline.render_shots import still_candidates
+    achados = still_candidates(run / "shots" / "stills", int(num))
     return achados[0] if achados else None
 
 
@@ -109,14 +110,18 @@ def audit_run(run: Path, *, log=print) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--strict", action="store_true",
+                    help="retorna erro se qualquer clipe tiver alerta de identidade")
     args = ap.parse_args(argv)
     run = Path(args.run_dir)
     relatorio = audit_run(run)
-    (run / "shots" / "clip_identity_audit.json").write_text(
+    report_path = run / "shots" / "clip_identity_audit.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
         json.dumps(relatorio, ensure_ascii=False, indent=2), encoding="utf-8")
     n = sum(1 for m in relatorio.values() if m.get("alerta"))
     print(f"clip_identity_audit: {n}/{len(relatorio)} clipe(s) com identidade abaixo de {LIMIAR}")
-    return 0
+    return 1 if args.strict and n else 0
 
 
 if __name__ == "__main__":

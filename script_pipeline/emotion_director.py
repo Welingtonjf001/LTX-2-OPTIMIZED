@@ -129,7 +129,12 @@ def direct_emotions(scenes: list, *, engine: str = DEFAULT_ENGINE, log=print) ->
         for i, l in enumerate(sc.get("dialogue") or []):
             falas.append({"scene": sc["index"], "line": i,
                           "character": l.get("character", ""),
-                          "rubrica": l.get("parenthetical") or l.get("emotion") or "",
+                          # Em uma retomada, ``parenthetical`` já contém o slug
+                          # aplicado pela passada anterior. Reavaliar esse slug
+                          # tornava a primeira decisão irreversível e escondia a
+                          # rubrica real. Sempre volte à fonte preservada.
+                          "rubrica": l.get("parenthetical_original") or
+                                     l.get("parenthetical") or l.get("emotion") or "",
                           "texto": (l.get("text") or "")[:160]})
     if not falas:
         return {}

@@ -81,6 +81,59 @@ def passo(nome: str, cmd: list, *, obrigatorio: bool = True) -> bool:
     return True
 
 
+def _gate_step(nome: str, cmd: list, obrigatorio: bool = True) -> bool:
+    """passo() que libera o ComfyUI antes do gate: o Qwen3-VL ocupa ~22 GB e nao
+    cabe ao lado do FLUX/LTX residente (o Ollama cairia em CPU parcial, muito lento)."""
+    if any("visual_continuity_audit" in str(c) for c in cmd):
+        from script_pipeline.generate_storyboards import stop_comfyui
+        stop_comfyui(log=lambda m: print(f"[gate] {m}", flush=True))
+        # Motores de imagem externos ficam residentes na 3090; libere-os antes
+        # do Qwen3-VL, que também usa a GPU para o gate visual.
+        try:
+            import zimage_backend
+            from script_pipeline import gpu_watchdog
+            gpu_watchdog.free_port(zimage_backend.ZIMAGE_PORT, log=lambda m: print(f"[gate] {m}", flush=True))
+            import qwen_image21_engine
+            for port in qwen_image21_engine.all_ports():
+                gpu_watchdog.free_port(port, log=lambda m: print(f"[gate] {m}", flush=True))
+            # Fish Speech (TTS) tambem fica residente (~20 GB) e disputa com o Qwen3-VL do
+            # gate -- mesmo achado do estagio de video (ver render_shots.py, 2026-09-22).
+            from script_pipeline.dialogue_tts import FISH_API_URL
+            fish_port = int(FISH_API_URL.rsplit(":", 1)[-1].split("/")[0])
+            gpu_watchdog.free_port(fish_port, log=lambda m: print(f"[gate] {m}", flush=True))
+        except Exception as exc:
+            print(f"[gate] aviso: nao consegui liberar um servidor externo de imagem ({exc})", flush=True)
+    return passo(nome, cmd, obrigatorio=obrigatorio)
+
+
+def _visual_gate(run, args, *, stage: str, regen_base: list, nome: str) -> bool:
+    """Gate visual com regeneracao dos reprovados (ver gate_retry.py)."""
+    from script_pipeline.gate_retry import gate_with_retries
+    from script_pipeline.visual_continuity_audit import blocked_shots
+    audit_cmd = ["-m", "script_pipeline.visual_continuity_audit",
+                 "--run-dir", str(run), "--stage", stage,
+                 "--model", args.visual_audit_model,
+                 "--perception-model", args.visual_perception_model]
+    ok = gate_with_retries(
+        run, stage=stage, audit_cmd=audit_cmd,
+        regen_cmd=lambda spec, seed: regen_base + ["--only-shots", spec],  # semente via seed_overrides.json
+        run_step=lambda n, cmd, obrigatorio=True: _gate_step(f"{nome} {n}", cmd, obrigatorio),
+        blocked_fn=lambda: blocked_shots(run, stage),
+        base_seed=1234, max_retries=max(0, args.visual_max_retries),
+        notes_fn=((lambda shots: __import__("script_pipeline.gate_retry", fromlist=["x"])
+                   .write_repair_notes(run, stage, shots)) if stage == "stills" else None),
+        total_shots=len(json.loads((Path(run) / 'parse' / 'shot_plan.json').read_text(encoding='utf-8')).get('shots', [])),
+        expand_fn=((lambda shots: __import__("script_pipeline.location_master", fromlist=["x"])
+                    .expand_blocked(run, shots)) if stage == "stills" else None),
+        log=lambda m: print(m, flush=True))
+    if not ok and args.visual_unresolved == "continue":
+        print(f"[run_decupagem] AVISO: gate {stage} com planos reprovados; seguindo "
+              "(--visual-unresolved continue). Ver shots/visual_gate_*_retries.json.",
+              file=sys.stderr)
+        return True
+    return ok
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Pipeline com decupagem, ponta a ponta")
     ap.add_argument("--run-dir", required=True)
@@ -91,6 +144,12 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=544)
     ap.add_argument("--fps", type=float, default=24.0)
+    ap.add_argument("--spatial-spec", default=None,
+                    help="JSON de blocking 3D por ID de plano; exige projeto persistente e FLUX Klein")
+    ap.add_argument("--spatial-denoise", type=float, default=.65,
+                    help="força da transformação RGB do blocking espacial")
+    ap.add_argument("--reuse-plan", action="store_true",
+                    help="preserva o shot_plan existente; obrigatório quando um spec espacial já foi criado para seus IDs")
     ap.add_argument("--engine", default="qwen3.6-35b-a3b:latest")
     ap.add_argument("--language", default="pt")
     ap.add_argument("--ate", default="final", choices=PARADAS,
@@ -105,13 +164,15 @@ def main() -> int:
                          "flux-kontext = FLUX.1, ver MEMORIAL 3.48.")
     ap.add_argument("--recast", action="store_true",
                     help="deixa o emotion_director reescolher a VOZ de cada personagem")
-    ap.add_argument("--video-engine", default="ltx", choices=["ltx", "minimax", "longcat"],
+    ap.add_argument("--video-engine", default="ltx", choices=["ltx", "minimax", "longcat", "wan"],
                     help="motor de VIDEO (nao confundir com --engine, que e o LLM de "
                          "estrutura). ltx = LTX 2.5, condicionado pela fala sintetizada "
                          "(TTS + lipsync + mix rodam normalmente). minimax = MiniMax H3 -- "
                          "fala e lip-sync NATIVOS a partir do texto do video_prompt; os "
                          "estagios 6/7 (lipsync/mix) viram passthrough pra esses planos, "
-                         "ja que o audio ja vem pronto no clipe.")
+                         "ja que o audio ja vem pronto no clipe. wan = Wan 2.2 TI2V 5B, MESMO "
+                         "ComfyUI do LTX (8188) -- video SEMPRE MUDO, TTS+lipsync+mix rodam "
+                         "normalmente (como no ltx). Validado com GPU real 2026-09-18.")
     ap.add_argument("--ltx-variant", default="w4a8-v10",
                     choices=["w4a8-v10", "distilled", "dev", "gguf-q6k"],
                     help="variante do checkpoint LTX 2.5 (so importa com "
@@ -163,6 +224,40 @@ def main() -> int:
     ap.add_argument("--no-consistency-check", action="store_true",
                     help="desliga o gate de consistencia facial dos stills (volta ao "
                          "comportamento antigo: gera uma vez, nao compara com a referencia).")
+    ap.add_argument("--visual-audit-model", default="qwen3-vl:30b",
+                    help="LLM que julga a percepcao visual contra o contrato e bloqueia "
+                         "still/video fora dele. Padrao: qwen3-vl:30b. Diferente da auditoria textual e do "
+                         "InsightFace: verifica locacao, objetos, falante, texto inventado "
+                         "e regras opt-in como a aeronave do Voo 702.")
+    ap.add_argument("--visual-perception-model", default="qwen3-vl:30b",
+                    help="VLM usado somente para descrever pixels sem ver o contrato. "
+                         "O mesmo Qwen3-VL faz uma segunda chamada textual para decidir. "
+                         "Separar as chamadas evita confirmacao do prompt.")
+    ap.add_argument("--visual-max-retries", type=int, default=2,
+                    help="quando o gate visual reprova planos, refaz SO eles com outra seed e "
+                         "reaudita, ate N rodadas (0 = comportamento antigo: so bloqueia). "
+                         "Ver gate_retry.py.")
+    ap.add_argument("--visual-unresolved", default="block", choices=["block", "continue"],
+                    help="o que fazer com planos que seguem reprovados depois das rodadas: "
+                         "block (padrao) para a corrida; continue segue e deixa o registro "
+                         "em shots/visual_gate_*_retries.json.")
+    ap.add_argument("--max-speech-seconds", type=float, default=6.0,
+                    help="fala mais longa que isto vira varios planos de fala (mesmo falante "
+                         "em close, audio recortado em silencio). 0 desliga. Ver speech_split.py.")
+    ap.add_argument("--no-master-audio", action="store_true",
+                    help="nao normaliza o audio final (-16 LUFS / -1,5 dBTP) na montagem.")
+    ap.add_argument("--room-tone-db", type=float, default=None,
+                    help="ambiencia continua sob o filme inteiro, em dB (ex.: -46). "
+                         "Esconde as emendas de audio entre planos. Desligado por padrao.")
+    ap.add_argument("--visual-diagnostic", action="store_true",
+                    help="modo diagnostico: RODA o gate visual e grava o relatorio, mas nunca "
+                         "bloqueia nem regenera, e a corrida para em no maximo `animatic` "
+                         "(video, lipsync e montagem sao recusados). Para inspecionar um "
+                         "resultado reprovado sem aprova-lo. Diferente de --no-visual-audit, "
+                         "que nem roda o gate.")
+    ap.add_argument("--no-visual-audit", action="store_true",
+                    help="desliga explicitamente os gates visuais multimodais antes do "
+                         "video e antes do lipsync/mix. Nao recomendado para producao.")
     ap.add_argument("--tts-engine", default=None, choices=["auto", "xtts", "qwen", "fish"],
                     help="motor de VOZ (nao confundir com --engine, LLM, nem --video-engine). "
                          "Sem isto, usa o default do synthesize_dialogue.py (\"auto\", XTTS/Qwen "
@@ -257,6 +352,24 @@ def main() -> int:
                     help="nivel da musica antes do ducking (0-1, padrao 0.18)")
     args = ap.parse_args()
 
+    if args.visual_diagnostic:
+        if args.no_visual_audit:
+            ap.error("--visual-diagnostic roda o gate; nao combine com --no-visual-audit")
+        if PARADAS.index(args.ate) > PARADAS.index("animatic"):
+            ap.error("--visual-diagnostic nao libera video nem montagem: use --ate animatic "
+                     "(ou antes). Um resultado reprovado so pode ser inspecionado, nunca entregue.")
+        args.visual_unresolved = "continue"
+        args.visual_max_retries = 0
+
+    # Entrega final e fail-closed: os dois switches abaixo existem para
+    # diagnósticos/previews, nunca para declarar um filme de produção pronto.
+    # Em 2026-09-22 os gates deixaram planos sem aprovação, mas a corrida foi
+    # concluída ao usar continue. Faça a exceção explícita parando antes do final.
+    if args.ate == "final" and args.no_visual_audit:
+        ap.error("--no-visual-audit não pode ser usado com --ate final; pare em --ate animatic para diagnóstico")
+    if args.ate == "final" and args.visual_unresolved == "continue":
+        ap.error("--visual-unresolved continue não pode ser usado com --ate final; use --ate animatic para diagnóstico")
+
     run = Path(args.run_dir).resolve()
     limite = PARADAS.index(args.ate)
 
@@ -275,6 +388,9 @@ def main() -> int:
         else:
             print("[1 parse] ja feito, reaproveitando")
 
+    from script_pipeline.production_project import restore_source, conform_plan, sync_media
+    restore_source(run, engine=args.engine)
+
     if ate("cast") and not (run / "characters" / "cast.json").exists():
         # --engine: o descritor visual sai do mesmo motor que o resto da cadeia.
         # Sem ele o descritor e um recorte do texto de acao, que em roteiro de
@@ -283,6 +399,14 @@ def main() -> int:
         if not passo("2 cast", ["-m", "script_pipeline.cast_characters",
                                 "--run-dir", str(run), "--engine", args.engine]):
             return 1
+
+    # Perfis de producao sao opt-in por projeto. O Voo 702 recebe aqui suas
+    # fotos nominais, locacoes e contrato de aeronave; nenhum outro roteiro
+    # herda a regra de permanecer em voo.
+    from script_pipeline.voo702_setup import configure_if_matching
+    if configure_if_matching(run):
+        print("[perfil] Voo 702 aplicado: referencias nominais e continuidade especifica.",
+              flush=True)
 
     if ate("emocao"):
         cmd = ["-m", "script_pipeline.emotion_director", "--run-dir", str(run),
@@ -296,6 +420,8 @@ def main() -> int:
     # fazia a emocao dirigida pelo [E] nunca chegar a voz ("Rode synthesize_dialogue de
     # novo" ficava so no log).
     if ate("tts"):
+        from script_pipeline.production_project import apply_voice_overrides
+        apply_voice_overrides(run)
         cmd_tts = ["-m", "script_pipeline.synthesize_dialogue",
                   "--run-dir", str(run), "--language", args.language]
         # Sem --tts-engine (None), cai no default do proprio synthesize_dialogue.py
@@ -316,19 +442,22 @@ def main() -> int:
               obrigatorio=False)
 
     if ate("plano"):
-        cenas = run / "parse" / "scenes_enriched.json"
-        if not cenas.exists():
-            cenas = run / "parse" / "scenes.json"
-        cmd = ["-m", "script_pipeline.shot_plan", "--scenes", str(cenas),
+        if args.reuse_plan and (run / "parse" / "shot_plan.json").exists():
+            print("[P decupagem] shot_plan existente preservado (--reuse-plan)")
+        else:
+            cenas = run / "parse" / "scenes_enriched.json"
+            if not cenas.exists():
+                cenas = run / "parse" / "scenes.json"
+            cmd = ["-m", "script_pipeline.shot_plan", "--scenes", str(cenas),
                "--structure", str(run / "parse" / "story_structure.json"),
                "--dialogue", str(run / "dialogue" / "lines.json"),
                "--cast", str(run / "characters" / "cast.json"),
                "--style", args.style, "--fps", str(args.fps),
                "--height", str(args.height), "--dialogue-framing", args.dialogue_framing,
                "--out", str(run / "parse" / "shot_plan.json")]
-        if args.style_changes:
-            cmd += ["--style-changes", args.style_changes]
-        if args.video_engine == "minimax":
+            if args.style_changes:
+                cmd += ["--style-changes", args.style_changes]
+            if args.video_engine == "minimax":
             # BUGFIX (achado critico do proprio usuario, corrigido manualmente
             # antes desta sessao de fixes -- ver MEMORIAL): sem isto o MiniMax
             # H3 gera fala NATIVA a partir so do video_prompt, sem a fala real
@@ -336,27 +465,73 @@ def main() -> int:
             # inventa palavras. --include-quotes bota a fala literal no
             # video_prompt. LTX nao precisa (usa audio_conditioning, que ja
             # carrega o WAV real do TTS) -- so liga aqui pra minimax.
-            cmd += ["--include-quotes"]
-        if args.camera_llm:
-            cmd += ["--camera-llm", "--engine", args.engine]
-        if not passo("P decupagem", cmd):
-            return 1
+                cmd += ["--include-quotes"]
+            if args.camera_llm:
+                cmd += ["--camera-llm", "--engine", args.engine]
+            cmd += ["--max-speech-seconds", str(args.max_speech_seconds)]
+            if not passo("P decupagem", cmd):
+                return 1
+            conform_plan(run)
+        # Relatorio de ritmo (nunca bloqueia): planos de acao longos/curtos demais para o
+        # enquadramento. So mede -- ver script_pipeline/pacing_audit.py.
+        passo("P-pacing ritmo", ["-m", "script_pipeline.pacing_audit", "--run-dir", str(run)],
+              obrigatorio=False)
+
+    if args.spatial_spec and ate("stills"):
+        if args.image_engine != "flux":
+            raise ValueError("--spatial-spec requires --image-engine flux")
+        from script_pipeline.spatial_pipeline import attach_to_run
+        attach_to_run(run, args.spatial_spec, denoise=args.spatial_denoise)
 
     # MotionBricks e um gerador de movimento esqueletico, nao um endpoint de
     # video. Esta etapa produz ao mesmo tempo o condicionamento textual que os
     # dois motores aceitam hoje e o score espacial que um adaptador 3D pode
     # executar depois. Roda depois da decupagem porque depende de sujeito,
     # co-sujeito, lado de tela e beat ja resolvidos.
-    if ate("motion") and args.motion_conditioning:
+    # Toda geração de vídeo recebe o contrato semântico de movimento. O flag
+    # continua útil para produzir/inspecionar o score antes da etapa de vídeo,
+    # mas não deixa mais a rota de entrega renderizar uma perseguição como idle.
+    motion_required_for_video = PARADAS.index(args.ate) >= PARADAS.index("render")
+    if ate("motion") and (args.motion_conditioning or motion_required_for_video):
         plan_path = run / "parse" / "shot_plan.json"
         if not plan_path.exists():
             print("[M movimento] shot_plan.json ausente; nao ha decupagem para condicionar", file=sys.stderr)
             return 1
-        # Opcional, como --camera-llm e a character-sheet: enriquecimento que
-        # falha nao derruba a corrida -- sem ele o plano segue com o
-        # video_prompt da decupagem de sempre.
-        passo("M movimento", ["-m", "script_pipeline.motion_conditioner",
-                              "--plan", str(plan_path), "--apply"], obrigatorio=False)
+        print("[M movimento] contrato semântico obrigatório para vídeo; "
+              "compile uma vez no shot_plan e preserve sua cobertura.", flush=True)
+        if not passo("M movimento", ["-m", "script_pipeline.motion_conditioner",
+                                     "--plan", str(plan_path), "--apply"],
+                     obrigatorio=motion_required_for_video):
+            print("[run_decupagem] render bloqueado: não foi possível compilar os movimentos.",
+                  file=sys.stderr)
+            return 1
+        # Pre-visualizacao BARATA (sem GPU de difusao) do blocking/posicionamento resolvido --
+        # pedido do usuario depois do CERCO EM SEUL sair ruim com still/video reais: pegar erro de
+        # POSICIONAMENTO (personagens sobrepostos, perseguicao no mesmo lado de tela, primitiva sem
+        # parceiro) ANTES de gastar still ou video. So relata; nunca bloqueia.
+        if (run / "parse" / "motion_plan.json").exists():
+            from script_pipeline.blocking_preview import build_contact_sheet
+            try:
+                _, avisos = build_contact_sheet(run)
+                if avisos:
+                    print(f"[blocking-preview] {len(avisos)} aviso(s) de posicionamento -- "
+                          f"veja shots/blocking_preview.png e shots/blocking_preview_avisos.json:",
+                          flush=True)
+                    for aviso in avisos:
+                        print(f"  - {aviso}", flush=True)
+                else:
+                    print("[blocking-preview] sem avisos geometricos.", flush=True)
+            except Exception as exc:
+                print(f"[blocking-preview] aviso: nao consegui gerar o contact sheet ({exc})",
+                      flush=True)
+
+    # Parse, direção emocional, estrutura e câmera já terminaram de usar o
+    # Ollama. Liberar o LLM antes de subir FLUX/SD evita que dois modelos
+    # disputem a mesma VRAM durante folhas e stills. A auditoria visual carrega
+    # seu VLM novamente depois que as imagens estiverem prontas.
+    if ate("sheet"):
+        from script_pipeline.ollama_runtime import unload_all
+        unload_all(log=print)
 
     quer_sheet = args.character_sheet or args.no_character_sheet
     if ate("sheet") and not args.no_character_sheet and not quer_sheet:
@@ -403,6 +578,8 @@ def main() -> int:
             cmd_stills += ["--lora", args.lora, "--lora-strength", str(args.lora_strength)]
         if not passo("5-D stills", cmd_stills):
             return 1
+        from script_pipeline.production_project import sync_assets
+        sync_assets(run)
 
         # PORTAO DE REVISAO (2026-09-10, pedido do usuario depois de dois
         # defeitos reais -- rosto duplicado num still de 2 personagens e
@@ -416,6 +593,12 @@ def main() -> int:
         if relatorio_stills:
             (run / "shots" / "storyboard_audit.json").write_text(
                 json.dumps(relatorio_stills, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not args.no_visual_audit:
+            if not _visual_gate(run, args, stage="stills", regen_base=cmd_stills,
+                                nome="5-E Qwen3-VL stills"):
+                print("[run_decupagem] video bloqueado: o Qwen3-VL nao aprovou os pixels dos stills.",
+                      file=sys.stderr)
+                return 1
 
     # O animatic vem DEPOIS dos stills e ANTES do vídeo: é o único ponto em que
     # dá para ver a cena inteira montada sem ter gastado GPU com difusão.
@@ -432,6 +615,10 @@ def main() -> int:
                                   "--dialogue", str(run / "dialogue" / "lines.json"),
                                   "--animatic", "--width", str(args.width)],
                    obrigatorio=not alvo)
+        if ok and (run / "shots" / "animatic.mp4").exists():
+            ok = passo("R-A auditoria do animatic",
+                       ["-m", "script_pipeline.animatic_audit", "--run-dir", str(run)],
+                       obrigatorio=not alvo)
         if alvo:
             if not ok or not (run / "shots" / "animatic.mp4").exists():
                 print(file=sys.stderr)
@@ -508,6 +695,13 @@ def main() -> int:
                     cmd_video += ["--ic-lora", args.ic_lora]
         if not passo("5-D video", cmd_video):
             return 1
+        sync_media(run)
+        if not args.no_visual_audit:
+            if not _visual_gate(run, args, stage="video", regen_base=cmd_video,
+                                nome="5-F Qwen3-VL clipes"):
+                print("[run_decupagem] lipsync e montagem bloqueados: o Qwen3-VL nao aprovou "
+                      "inicio, meio e fim dos clipes.", file=sys.stderr)
+                return 1
         # So avisa, nunca interrompe: corte seco dentro de um clipe unico e a guia do
         # IC-LoRA agindo como keyframe (VISTO 2026-09-13 com MSR no w4a8). Ver
         # guide_leak_audit.py.
@@ -538,6 +732,14 @@ def main() -> int:
                     cmd_post += ["--strip-subtitles-keep", str(args.post_strip_subtitles_keep)]
             passo("7b pos-producao", cmd_post, obrigatorio=False)
     if ate("final"):
+        # Identidade é auditada depois do lipsync/mix (último estágio que pode
+        # substituir clipes) e antes da montagem. Alertas não podem chegar à
+        # entrega; ausência de rosto em plano aberto permanece não conclusiva.
+        if not passo("8a identidade (gate)", ["-m", "script_pipeline.clip_identity_audit",
+                                               "--run-dir", str(run), "--strict"]):
+            print("[run_decupagem] montagem bloqueada: identidade visual reprovada.",
+                  file=sys.stderr)
+            return 1
         cmd_montagem = ["-m", "script_pipeline.assemble_final", "--run-dir", str(run)]
         if args.music_path:
             cmd_montagem += ["--music-path", args.music_path]
@@ -545,27 +747,45 @@ def main() -> int:
             cmd_montagem += ["--music-dir", args.music_dir]
         if args.music_volume is not None:
             cmd_montagem += ["--music-volume", str(args.music_volume)]
+        if args.no_master_audio:
+            cmd_montagem += ["--no-master"]
+        if args.room_tone_db is not None:
+            cmd_montagem += ["--room-tone-db", str(args.room_tone_db)]
         if not passo("8 montagem", cmd_montagem):
             return 1
+        from script_pipeline.production_project import project_for
+        if project_for(run):
+            from script_pipeline.production_post import conform_movie
+            print('[projeto] conformando prévia editorial e exportando stems', flush=True)
+            conform_movie(run)
         # Relatorios de continuidade (2026-09-13, auditoria de scripts). So MEDEM: nada e
         # reescrito. Identidade do personagem entre clipes (ArcFace) e defeito temporal no
         # filme montado (video_doctor, com deteccao de corte ligada -- as fronteiras entre
         # planos nao viram falso positivo, MEMORIAL 3.36.1). O reparo continua manual,
         # revisando as tiras antes (MEMORIAL 3.19).
-        passo("8b identidade", ["-m", "script_pipeline.clip_identity_audit",
-                                "--run-dir", str(run)], obrigatorio=False)
         filme = run / "final" / "movie.mp4"
         if filme.exists():
             passo("8c doctor", [str(ROOT / "video_doctor.py"), "analyze", str(filme),
                                 "--plan", str(run / "final" / "doctor_plan.json"),
                                 "--previews", str(run / "final" / "doctor_previews")],
                   obrigatorio=False)
-        passo("9 verificacao", ["-m", "script_pipeline.verify_output",
-                                "--run-dir", str(run)], obrigatorio=False)
+        if not passo("9 verificacao (gate de entrega)", ["-m", "script_pipeline.verify_output",
+                                                          "--run-dir", str(run), "--strict"]):
+            print("[run_decupagem] arquivo montado, mas reprovado na verificação técnica; "
+                  "não é uma entrega aprovada.", file=sys.stderr)
+            return 1
 
     print(f"\n[run_decupagem] concluido em {run}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = 1
+    try:
+        exit_code = main()
+    finally:
+        # Vale para sucesso, gate bloqueado, erro e Ctrl+C. O servidor Ollama
+        # permanece ligado; apenas os modelos residentes deixam RAM/VRAM.
+        from script_pipeline.ollama_runtime import unload_all
+        unload_all(log=print)
+    raise SystemExit(exit_code)

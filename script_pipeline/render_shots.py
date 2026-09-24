@@ -115,6 +115,8 @@ def _still_key(shot: dict, reference: str | None, width: int, height: int,
         weight_dtype or "",
         f"consist={consistency_threshold}" if consistency_threshold is not None else "",
     ])
+    if shot.get("spatial"):
+        material += "|spatial=" + json.dumps(shot["spatial"], sort_keys=True)
     return hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
 
 
@@ -161,6 +163,52 @@ def _extrair_ultimo_frame(video_path: str, out_path: Path) -> bool:
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
     return bool(cv2.imwrite(str(out_path), frame))
+
+
+def prune_stale_stills(stills_dir: Path, n_shots: int, log=print) -> int:
+    """Move para `stills/_stale/` os stills que o plano atual nao usa (nunca apaga).
+
+    ACHADO 2026-09-20: replanejar/recortar deixa `shotNNN_<outro enquadramento>.png` e entradas
+    de `stills.json` de planos que nao existem mais (26 entradas para 4 planos). Isso alimentou o
+    bug do animatic e polui qualquer glob. Regra: um arquivo e obsoleto se o indice >= n_shots ou
+    se o manifesto aponta OUTRO arquivo para aquele indice; sem entrada de manifesto para um indice
+    valido, o arquivo e preservado."""
+    import re as _re
+    import shutil as _shutil
+    man = _load_manifest(stills_dir)
+    stale_dir = stills_dir / "_stale"
+    moved = 0
+    for f in sorted(stills_dir.glob("shot*_*.png")):
+        m = _re.match(r"shot(\d+)_", f.name)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        want = (man.get(str(idx)) or {}).get("file")
+        if idx >= n_shots or (want and want != f.name):
+            stale_dir.mkdir(exist_ok=True)
+            _shutil.move(str(f), str(stale_dir / f.name))
+            moved += 1
+    limpo = {k: v for k, v in man.items() if not (str(k).isdigit() and int(k) >= n_shots)}
+    if limpo != man:
+        (stills_dir / "stills.json").write_text(json.dumps(limpo, ensure_ascii=False, indent=2), encoding="utf-8")
+    if moved or limpo != man:
+        log(f"[stills] {moved} arquivo(s) e {len(man) - len(limpo)} entrada(s) de planos antigos "
+            f"movidos para {stale_dir.name}/ (nada foi apagado)")
+    return moved
+
+
+def still_candidates(stills_dir: Path, index: int, manifest: dict | None = None) -> list:
+    """Stills do plano `index`: o do MANIFESTO primeiro (e o que o gate audita), o glob so
+    como reserva.
+
+    ACHADO 2026-09-20 (auditoria): o animatic pegava `sorted(glob)[0]` -- arquivos de OUTRO
+    enquadramento de planos anteriores ficam no disco (shot002_close.png ao lado de
+    shot002_ots.png) e vinham antes por ordem alfabetica. No Voo 702 isso trocou o still
+    de 23 dos 68 planos e o animatic "aprovado" mostrava imagens que o gate nunca viu."""
+    reg = (manifest if manifest is not None else _load_manifest(stills_dir)).get(str(index)) or {}
+    if reg.get("file") and (stills_dir / reg["file"]).exists():
+        return [stills_dir / reg["file"]]
+    return sorted(stills_dir.glob(f"shot{index:03d}_*.png"))
 
 
 def _load_manifest(stills_dir: Path) -> dict:
@@ -236,6 +284,55 @@ def _duplicate_face_check(still_path: Path, *, log=print, idx: int) -> dict:
     return {"duplicate_flag": resultado["flagged"], "duplicate_faces_detected": resultado["faces_detected"]}
 
 
+QWEN_FRAMINGS_WITH_FACE = {"close", "medium", "ots"}
+QWEN_TURNAROUND_FRAMINGS = {"wide", "full", "medium", "ots"}
+
+
+def _qwen_emotion_instruction(shot: dict) -> str | None:
+    """Instrucao da 2a passada de EMOCAO (Qwen-Image-2.1, so com QWEN_EMOTION_PASS=1).
+
+    O Qwen copia a expressao da foto de referencia (sorriso posado para a camera, ArcFace ate 0,96);
+    MEDIDO 2026-09-21: editar a expressao mantendo identidade (0,54/0,53), cabine e uniformes leva
+    39 s. Em plano de FALA usa a versao que nao ocupa a boca (o lip-sync precisa dela)."""
+    if os.environ.get("QWEN_EMOTION_PASS") != "1":
+        return None
+    if str(shot.get("framing", "")).casefold() not in QWEN_FRAMINGS_WITH_FACE or not shot.get("subject"):
+        return None
+    from script_pipeline.shot_plan import emocao_visivel, emocao_visivel_fala
+    falando = shot.get("line_index") is not None
+    visual = (emocao_visivel_fala if falando else emocao_visivel)(shot.get("emotion"))
+    if not visual:
+        return None
+    return ("Keep every person's face, hairstyle, uniform, position, the camera framing and the whole location "
+            f"exactly identical. Change only {shot['subject']}'s facial expression and posture: {visual}.")
+
+
+def _load_repair_notes(out_dir: Path) -> dict:
+    """shots/gate_repair_notes.json: {indice: texto} escrito pelo laco de regeneracao do gate."""
+    try:
+        return json.loads((out_dir.parent / "gate_repair_notes.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _qwen_repair_instruction(note: str) -> str:
+    return (f"Fix ONLY these problems in this image: {note} Keep everything else -- the people, their faces, the "
+            "composition, camera angle, lighting and location -- exactly the same. No captions, subtitles or lettering overlays.")
+
+
+def _turnaround_for(shot: dict, out_dir: Path) -> str | None:
+    """Folha de 3 vistas do sujeito (characters/turnaround/NOME.png), se existir."""
+    nome = shot.get("subject")
+    if not nome:
+        return None
+    try:
+        cast = json.loads((out_dir.parent.parent / "characters" / "cast.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    path = (cast.get(nome) or {}).get("turnaround_image")
+    return path if path and Path(path).exists() else None
+
+
 def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: int,
                     checkpoint: str, clip: str, vae: str, seed: int,
                     reference: str | None, reference_2: str | None = None, log=print,
@@ -245,6 +342,24 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
                     consistency_max_retries: int = 2,
                     lora_name: str = "", lora_strength: float = 0.8) -> Path | None:
     import script_pipeline.generate_storyboards as sb
+
+    spatial = shot.get("spatial")
+    facial_framing = str(shot.get("framing", "")).casefold() in {"close", "medium"}
+    bundle = None
+    if spatial:
+        import json
+        from script_pipeline.spatial_conditioning import validate_bundle
+        bundle = json.loads(Path(spatial["control_bundle"]).read_text(encoding="utf-8"))
+        validate_bundle(bundle)
+        if bundle["fingerprint"] != spatial["fingerprint"]:
+            raise ValueError("Spatial shot binding is stale; rebuild blocking")
+
+    is_qwen = sb.detect_architecture(checkpoint) == "qwenimage21"
+    if is_qwen and not reference_2 and not shot.get("co_subject") \
+            and str(shot.get("framing", "")).casefold() in QWEN_TURNAROUND_FRAMINGS:
+        # Planos que mostram o corpo: a folha de 3 vistas fixa uniforme e perfil/costas (a foto de
+        # rosto sozinha vaza a roupa da foto -- camisa bordo, blazer verde).
+        reference_2 = _turnaround_for(shot, out_dir) or reference_2
 
     out = out_dir / f"shot{idx:03d}_{shot['framing']}.png"
     # A chave de cache tem de incluir a 2a referencia -- sem isso, um plano
@@ -256,15 +371,45 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
     if reference_2:
         # Conteúdo, não nome -- mesmo raciocínio do BUGFIX A03 acima.
         chave = f"{chave}|ref2={_audio_key(reference_2)}"
+    emotion_instruction = _qwen_emotion_instruction(shot) if is_qwen else None
+    if emotion_instruction:
+        chave = f"{chave}|qwen_emotion={hashlib.sha1(emotion_instruction.encode('utf-8')).hexdigest()[:10]}"
+    repair_note = _load_repair_notes(out_dir).get(str(idx)) if is_qwen else None
+    if repair_note:
+        chave = f"{chave}|repair={hashlib.sha1(repair_note.encode('utf-8')).hexdigest()[:10]}"
     man = _load_manifest(out_dir)
     guardado = man.get(str(idx)) or {}
     if out.exists() and guardado.get("key") == chave:
-        log(f"  still ja existe e bate com o prompt, reaproveitando: {out.name}")
-        return out
+        required_score = consistency_threshold
+        if spatial and reference and facial_framing and required_score is None:
+            required_score = .35
+        saved_score = guardado.get("consistency_score")
+        if required_score is not None and reference and facial_framing and \
+                (saved_score is None or float(saved_score) < required_score):
+            log(f"  cache facial invalido ({saved_score}); regenerando: {out.name}")
+        else:
+            log(f"  still ja existe e bate com o prompt, reaproveitando: {out.name}")
+            return out
+    if out.exists() and repair_note:
+        # Reprovado pelo gate: edita o still existente (mantem o que esta certo) em vez de
+        # resemear a imagem inteira.
+        import qwen_image21_engine as qwen_image21_backend
+        tmp = out.with_suffix(".reparo.png")
+        extra = [reference] if reference else []
+        log(f"  reparo por edicao (Qwen-Image-2.1): {repair_note[:120]}")
+        if qwen_image21_backend.edit(out, _qwen_repair_instruction(repair_note), tmp, seed=seed + idx + 7919,
+                                     extra_references=extra, log=log) and tmp.exists():
+            tmp.replace(out)
+            dup = _duplicate_face_check(out, log=log, idx=idx)
+            man[str(idx)] = {"file": out.name, "key": chave, "prompt": shot["storyboard_prompt"][:300],
+                             "reference": reference, "reference_2": reference_2, "repair": repair_note[:300], **dup}
+            _save_manifest(out_dir, man)
+            return out
+        log("  reparo por edicao falhou; regenerando do zero")
     if out.exists():
         log(f"  still existente foi feito com outro prompt/enquadramento; refazendo")
 
-    def _gerar_uma_vez(dest: Path, seed_usado: int) -> bool:
+    def _gerar_base(dest: Path, seed_usado: int) -> bool:
         # `scene` é só o que generate_scene_storyboard usa para nomear a saída --
         # o prompt vem inteiro de prompt_override, que é o ponto.
         return sb.generate_scene_storyboard(
@@ -275,7 +420,21 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
             prompt_override=shot["storyboard_prompt"], reference_image=reference,
             reference_image_2=reference_2,
             art_directed=bool(shot.get("art_direction")), log=log,
+            **({"control_bundle": bundle,
+                "spatial_denoise": spatial.get("denoise", .65),
+                "spatial_mode": spatial.get("mode", "img2img")} if bundle else {}),
             lora_name=lora_name, lora_strength=lora_strength)
+
+    def _gerar_uma_vez(dest: Path, seed_usado: int) -> bool:
+        ok_base = _gerar_base(dest, seed_usado)
+        if ok_base and emotion_instruction and dest.exists():
+            import qwen_image21_engine as qwen_image21_backend
+            tmp = dest.with_suffix(".emocao.png")
+            if qwen_image21_backend.edit(dest, emotion_instruction, tmp, seed=seed_usado, log=log) and tmp.exists():
+                tmp.replace(dest)
+            else:
+                log("  passada de emocao falhou; mantendo o still base")
+        return ok_base
 
     # AUDITORIA DE CONSISTENCIA (2026-09-03, pedido do usuario -- ver MEMORIAL
     # 3.53): so faz sentido com referencia (nada pra comparar sem ela) e com
@@ -283,7 +442,15 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
     # quem nao pediu). Gera ate `consistency_max_retries` tentativas, fica com
     # a de MAIOR similaridade ao rosto de referencia -- nao so a primeira que
     # passar, porque a diferenca entre "0,36 e 0,52" ainda importa.
-    if reference and consistency_threshold is not None:
+    # ArcFace is meaningful only when a face occupies enough of the frame.
+    # Wide/full/OTS/insert shots are audited structurally instead; comparing a
+    # tiny face or a background passenger against the reference creates false
+    # failures and wastes retries.
+    # Spatial mode promises an identity-aware world. Silently skipping the
+    # existing ArcFace gate would turn that promise into prompt-only metadata.
+    if spatial and reference and consistency_threshold is None and facial_framing:
+        consistency_threshold = .35
+    if reference and consistency_threshold is not None and facial_framing:
         from script_pipeline.consistency_audit import check_consistency
 
         melhor_path, melhor_score, melhor_seed = None, None, None
@@ -293,6 +460,8 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
             if not _gerar_uma_vez(candidato, seed_tentativa):
                 continue
             ok_cons, score = check_consistency(str(candidato), reference, threshold=consistency_threshold)
+            if spatial and score is None:
+                ok_cons = False
             log(f"  consistencia (tentativa {tentativa}, seed {seed_tentativa}): "
                 f"{'sem rosto detectavel' if score is None else f'{score:.3f}'} "
                 f"{'(dentro do limiar)' if ok_cons else '(ABAIXO do limiar)'}")
@@ -372,6 +541,11 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # seguem no LTX. `engine="longcat"` = fala no LongCat, acao no LTX.
     if engine == "longcat":
         import longcat_video_backend
+    # Wan 2.2 (2026-09-18): compartilha o MESMO ComfyUI do LTX 2.5 (8188) -- os
+    # checkpoints do Wan ja vivem em ComfyUI/models/, entao nao ha troca de
+    # servidor nem restricao de "duas passadas obrigatorias" como o MiniMax H3.
+    if engine == "wan":
+        import wan22_backend
 
     # BUGFIX auditoria 2026-09-16 (A17): o modo combinado (nem stills_only nem
     # videos_only) gera os stills no MESMO laço em que troca de servidor para o
@@ -416,7 +590,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # servidor HTTP proprio de zimage_backend.py, que generate_scene_storyboard
     # sobe sozinho quando precisa. So sobe o ComfyUI do FLUX aqui para as
     # outras arquiteturas de still.
-    if ((stills_only or not videos_only) and sb.detect_architecture(checkpoint) != "zimage"
+    if ((stills_only or not videos_only) and sb.detect_architecture(checkpoint) not in {"zimage", "qwenimage21"}
             and not sb.comfy_is_up("http://127.0.0.1:8188")):
         sb.ensure_comfyui_running("http://127.0.0.1:8188", log=log)
 
@@ -427,6 +601,52 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # 8188 (generate_storyboards.py), entao aqui, na troca pro estagio de
     # video, e o unico lugar que sabe qual das duas o plano pediu.
     if not stills_only:
+        # ACHADO 2026-09-17 (auditoria externa, risco adicional): a troca
+        # still->video ja derruba/sobe o ComfyUI certo (abaixo), mas nunca
+        # derrubava o servidor HTTP do Z-Image quando os stills usaram
+        # `--image-engine zimage` -- ele ficava residente (~modelo bf16
+        # inteiro na 3090) disputando VRAM com o motor de video pelo resto
+        # da corrida. Mesma regra documentada em CLAUDE.md pro ComfyUI
+        # (nunca dois processos pesados de GPU ao mesmo tempo).
+        #
+        # `zimage_backend.shutdown_server()` NAO serve aqui: `run_decupagem.py`
+        # roda o estagio de stills e o de video como DOIS SUBPROCESSOS
+        # separados (`-m script_pipeline.render_shots_stage`, duas vezes) --
+        # o processo do estagio de VIDEO nunca teve `_server_proc` setado (foi
+        # o processo do estagio de STILLS que subiu o servidor), entao
+        # shutdown_server() acharia o global vazio e nao faria nada. Precisa
+        # matar por PORTA (quem quer que tenha subido), igual `stop_comfyui`
+        # faz pro ComfyUI -- `gpu_watchdog.free_port` ja e essa implementacao
+        # compartilhada.
+        if sb.detect_architecture(checkpoint) == "zimage":
+            try:
+                import zimage_backend
+                from script_pipeline import gpu_watchdog
+                if gpu_watchdog.free_port(zimage_backend.ZIMAGE_PORT, log=log):
+                    log("[render] servidor Z-Image encerrado antes do estagio de video (libera VRAM).")
+            except Exception as exc:
+                log(f"[render] aviso: nao consegui encerrar o servidor Z-Image ({exc}) -- siga com cuidado com a VRAM.")
+        elif sb.detect_architecture(checkpoint) == "qwenimage21":
+            try:
+                import qwen_image21_engine
+                from script_pipeline import gpu_watchdog
+                if any([gpu_watchdog.free_port(p, log=log) for p in qwen_image21_engine.all_ports()]):
+                    log("[render] servidor Qwen-Image-2.1 encerrado antes do estagio de video (libera VRAM).")
+            except Exception as exc:
+                log(f"[render] aviso: nao consegui encerrar o Qwen-Image-2.1 ({exc}) -- siga com cuidado com a VRAM.")
+        # O Fish Speech (TTS, estagio 4) fica de pe como servidor HTTP persistente e ninguem o
+        # derrubava antes do video -- ACHADO 2026-09-22 rodando o CERCO EM SEUL de verdade: com
+        # ele residente (~20 GB), o mesmo plano LTX foi de 81,5s para 715,6s (8,8x mais lento,
+        # isolado por A/B com/sem o servidor -- nao era o motion_conditioning nem a 2a referencia,
+        # as duas hipoteses testadas antes desta). `dialogue_tts.py` documenta que "subir/derrubar
+        # fica por conta de quem for usar"; agora quem usa e o proprio estagio de video.
+        from script_pipeline import gpu_watchdog as _gpu_watchdog
+        from script_pipeline.dialogue_tts import FISH_API_URL
+        _fish_port = int(FISH_API_URL.rsplit(":", 1)[-1].split("/")[0])
+        if _gpu_watchdog.free_port(_fish_port, log=log):
+            log(f"[render] servidor Fish Speech ({_fish_port}) encerrado antes do estagio de "
+                "video (libera VRAM) -- suba de novo (START_API.ps1) antes da proxima corrida "
+                "que precise dele para TTS.")
         if engine == "minimax":
             if sb.comfy_is_up("http://127.0.0.1:8188"):
                 log("[render] motor=minimax: derrubando o ComfyUI do LTX 2.5 (8188) antes de subir o do MiniMax H3 (8189).")
@@ -497,13 +717,28 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # primeiro plano WIDE/FULL da cena (o enquadramento que mais mostra
     # cenário, simétrico ao critério de personagem que usa close/medium)
     # vira a referência dos planos seguintes sem sujeito.
-    location_refs: dict[int, str] = {}
+    location_refs: dict = {}
+    location_ref_path = out_dir / 'location_refs.json'
+    if location_ref_path.exists():
+        location_refs = {k: v for k, v in json.loads(location_ref_path.read_text(encoding='utf-8')).items()
+                         if Path(v).is_file()}
     feitos = []
 
+    # Semente por plano (gate visual): o laco de regeneracao grava a semente nova de cada plano
+    # refeito em shots/seed_overrides.json; sem lembrar dela, a proxima corrida (semente padrao)
+    # invalidaria o cache e refaria em silencio o que o gate ja tinha corrigido.
+    try:
+        seed_overrides = json.loads((out_dir / 'seed_overrides.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        seed_overrides = {}
+
     for i, shot in shots:
+        seed_shot = int(seed_overrides.get(str(i), seed))
         t0 = time.time()
         sujeito = shot.get("subject") or ""
-        cena_id = shot.get("scene")
+        cena_id = str(shot.get("location_id") or shot.get("scene"))
+        if shot.get('location_reference') and Path(shot['location_reference']).is_file():
+            location_refs[cena_id] = shot['location_reference']
         ref = refs.get(sujeito) if (use_reference and sujeito) else None
         # BUGFIX (auditoria externa 2026-09-16, achado #9): este fallback
         # disparava mesmo com um SUJEITO nomeado que so ainda nao tinha
@@ -516,7 +751,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # sujeito e sem still proprio ainda, o certo e ficar SEM referencia
         # (texto puro) -- errado e melhor que uma referencia errada that
         # parece certa.
-        if ref is None and use_reference and not sujeito:
+        if ref is None and use_reference and not sujeito and not shot.get("spatial"):
             ref = location_refs.get(cena_id)
         # SEGUNDA referencia (opcao B, 2026-09-10): o plano tem um segundo
         # personagem NOMEADO no proprio texto (`co_subject`, de shot_plan.py)
@@ -525,6 +760,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # e usado mesmo com co_ref presente -- ReferenceLatent encadeia a
         # partir do primeiro.
         co_sujeito = shot.get("co_subject") or ""
+        if shot.get("spatial") and str(shot.get("framing", "")).casefold() in {"close", "extreme_close"}:
+            co_sujeito = ""
         co_ref = refs.get(co_sujeito) if (use_reference and ref and co_sujeito) else None
         log(f"\n[plano {i} · {len(shots)} na fila] cena {shot['scene']} · {shot['style']} · "
             f"{shot['framing']}/{shot['angle']}/{shot['movement']} · "
@@ -567,7 +804,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             gate_consistencia = consistency_threshold if sujeito else None
             still = _still_for_shot(shot, i, out_dir=stills_dir, width=width,
                                     height=height, checkpoint=checkpoint, clip=clip,
-                                    vae=vae, seed=seed, reference=ref, reference_2=co_ref, log=log,
+                                    vae=vae, seed=seed_shot, reference=ref, reference_2=co_ref, log=log,
                                     steps=passos, cfg=escala_cfg, guidance=escala_guidance,
                                     weight_dtype=escala_weight_dtype,
                                     consistency_threshold=gate_consistencia,
@@ -589,6 +826,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         if use_reference and cena_id is not None and cena_id not in location_refs and \
                 shot["framing"] in ("wide", "full"):
             location_refs[cena_id] = str(still)
+            location_ref_path.write_text(json.dumps(location_refs, ensure_ascii=False, indent=2), encoding='utf-8')
 
         if stills_only:
             feitos.append({"shot": i, "still": str(still), "clip": None})
@@ -598,7 +836,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # referencia -- ver o docstring de audio_conditioning em ltx25_backend.
         wav_cond = None
         if audio_conditioning and dialogue:
-            entrada = dialogue.get((shot.get("scene"), shot.get("line_index")))
+            from script_pipeline.speech_split import dialogue_entry
+            entrada = dialogue_entry(shot, dialogue)
             if entrada and entrada[0] and Path(entrada[0]).exists():
                 wav_cond = entrada[0]
 
@@ -609,7 +848,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # chave -- mudar qualquer um dos tres muda o CLIPE (composicao,
         # movimento amostrado) mas nao o numero de frames nem o audio, entao o
         # cache antigo nunca via a diferenca.
-        chave += f"|seed={seed}|fps={fps}|{width}x{height}"
+        chave += f"|seed={seed_shot}|fps={fps}|{width}x{height}"
         # O STILL e o quadro 0 do I2V: still refeito com clipe velho e o mesmo modo de falha
         # silenciosa. VISTO 2026-09-13 (teste_close_v2): os closes novos foram gerados e os
         # 3 clipes de fala antigos, de plano medio, foram reaproveitados. Invalida uma vez
@@ -725,6 +964,9 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     "(arquivo truncado/incompleto?); refazendo")
             else:
                 log(f"  clipe existente foi gerado com outro plano/audio/config; refazendo")
+        if shot.get('id'):
+            from script_pipeline.production_project import reserve_generation
+            reserve_generation(out_dir.parent, shot)
         def _minimax_chain_generate(refs_minimax, sheet_ref, audio_refs_minimax, out_path, log):
             """Plano longo dividido em sub-planos curtos e ENCADEADOS: cada
             sub-plano usa a sheet (identidade) e o ULTIMO FRAME do sub-plano
@@ -773,7 +1015,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     ref_images=refs_j[:2] or None, ref_audios=audio_refs_minimax,
                     aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
                     megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
-                    duration_seconds=seg_seconds, seed=seed + i + j * 101, turbo=minimax_turbo,
+                    duration_seconds=seg_seconds, seed=seed_shot + i + j * 101, turbo=minimax_turbo,
                     log_cb=lambda m, j=j: log(f"    [minimax_h3-chain sub{j}] {m}"), timeout=1800)
                 partes.append(str(sub_path))
                 frame_path = work_dir / f"sub{j:02d}_last.png"
@@ -867,7 +1109,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 ltx25_backend.generate(
                     prompt_video, str(sub_path),
                     width=width, height=height, num_frames=seg_frames[j],
-                    frame_rate=fps, seed=seed + i + j * 101,
+                    frame_rate=fps, seed=seed_shot + i + j * 101,
                     image_path=imagem_atual, image_strength=1.0,
                     loras=video_loras or None, ic_lora=ic_spec,
                     audio_conditioning=wavs_seg[j],
@@ -937,7 +1179,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                         aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
                         megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
                         duration_seconds=duracao_plano,
-                        seed=seed + i, turbo=minimax_turbo,
+                        seed=seed_shot + i, turbo=minimax_turbo,
                         log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
             elif engine == "longcat" and wav_cond:
                 # Plano de FALA no LongCat-Avatar 1.5 (MEMORIAL 3.83): boca gerada junto com
@@ -952,8 +1194,23 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                 nf = ((nf - 1 + 3) // 4) * 4 + 1
                 longcat_video_backend.generate(
                     shot["video_prompt"], str(clip_path), image_path=str(still),
-                    audio_path=wav_cond, num_frames=nf, seed=seed + i, fps=25.0,
+                    audio_path=wav_cond, num_frames=nf, seed=seed_shot + i, fps=25.0,
                     log_cb=lambda m: log(f"    {m}"))
+            elif engine == "wan":
+                # Wan 2.2 (TI2V 5B): so imagem inicial, video SEMPRE MUDO --
+                # nao ha audio_conditioning (ao contrario do LTX) nem fala
+                # nativa (ao contrario do MiniMax H3). Planos de FALA
+                # dependem do TTS+lip-sync normal (como o LTX) pra ganhar
+                # voz; planos de ACAO ficam mudos ate a mixagem (mix_audio.py
+                # ja trata clipe sem faixa de audio sem quebrar -- so perde a
+                # cama/reverb que so existiria se o motor tivesse gerado som).
+                # Validado com GPU real (2026-09-18): funcionou de primeira,
+                # 199s pra 65 quadros a 768x512, mais rapido que LTX/MiniMax.
+                wan22_backend.generate(
+                    prompt_video, str(clip_path), image_path=str(still),
+                    width=width, height=height, num_frames=shot["frames"],
+                    frame_rate=fps, seed=seed_shot + i,
+                    log_cb=lambda m: log(f"    [wan22] {m}"), timeout=1800)
             else:
                 if engine == "longcat" and not sb.comfy_is_up("http://127.0.0.1:8188"):
                     longcat_video_backend.stop_server(log_cb=log)
@@ -971,7 +1228,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     ltx25_backend.generate(
                         prompt_video, str(clip_path),
                         width=width, height=height, num_frames=shot["frames"],
-                        frame_rate=fps, seed=seed + i,
+                        frame_rate=fps, seed=seed_shot + i,
                         image_path=imagem_ltx, image_strength=1.0,
                         loras=video_loras or None, ic_lora=ic_spec,
                         # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
@@ -990,7 +1247,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             log(f"  clipe OK em {time.time()-t0:.0f}s -> {clip_path.name}"
                 f"{' (boca gerada pelo LongCat 1.5)' if (engine == 'longcat' and wav_cond) else ''}"
                 f"{' (som condicionado pela fala)' if (engine == 'ltx' and wav_cond) else ''}"
-                f"{' (fala nativa do MiniMax H3)' if engine == 'minimax' else ''}")
+                f"{' (fala nativa do MiniMax H3)' if engine == 'minimax' else ''}"
+                f"{' (mudo -- Wan 2.2 nao condiciona audio, fala vem do lip-sync depois)' if engine == 'wan' else ''}")
             if "freeze" in (shot.get("post_effects") or []):
                 _apply_freeze(clip_path, log=log)
             marca.write_text(json.dumps({"key": chave, "frames": _clip_frames(clip_path)}),
@@ -1010,6 +1268,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             if engine == "minimax":
                 log("  reiniciando o servidor do MiniMax H3 antes do proximo plano (falha pode ter deixado geracao orfa presa na porta).")
                 sb.stop_comfyui(8189, log=log)
+    if not videos_only and not only_shots:
+        prune_stale_stills(stills_dir, len(plan["shots"]), log=log)
     return feitos
 
 
@@ -1047,24 +1307,34 @@ def animatic(plan: dict, stills_dir: Path, out_path: Path, *, dialogue: dict | N
     descobrir o erro de montagem quando ele ainda é barato.
     """
     dialogue = dialogue or {}
+    manifest = _load_manifest(stills_dir)
     entradas, filtros, audios = [], [], []
     t = 0.0
     for i, shot in enumerate(plan["shots"]):
-        achados = sorted(stills_dir.glob(f"shot{i:03d}_*.png"))
+        achados = still_candidates(stills_dir, i, manifest)
         if not achados:
             log(f"[animatic] sem still para o plano {i}; pulando")
             continue
-        entradas += ["-loop", "1", "-t", f"{shot['seconds']:.3f}", "-i", str(achados[0])]
-        chave = (shot.get("scene"), shot.get("line_index"))
-        if chave in dialogue:
-            wav, _ = dialogue[chave]
-            audios.append((len(entradas) // 2, wav, t))   # índice provisório
+        # -framerate no fps do plano: sem isso o still em loop nasce a 25 fps e cada plano
+        # arredonda ao quadro de 0,04 s -- 68 planos somavam +0,17 s (auditoria do animatic).
+        entradas += ["-loop", "1", "-framerate", str(plan.get("fps", 24)),
+                     "-t", f"{shot['seconds']:.6f}", "-i", str(achados[0])]
+        from script_pipeline.speech_split import dialogue_entry
+        entrada_fala = dialogue_entry(shot, dialogue)
+        if entrada_fala:
+            wav, audio_seconds = entrada_fala
+            # A decupagem reserva FALA_FOLGA_S ao redor da voz. O clipe final
+            # divide essa folga antes/depois em mux_audio(); o animatic precisa
+            # usar o mesmo ponto de entrada ou aprova uma sincronização que
+            # muda ao renderizar o vídeo.
+            lead = max(0.0, (float(shot["seconds"]) - float(audio_seconds)) / 2.0)
+            audios.append((len(entradas) // 2, wav, t + lead))  # índice provisório
         t += shot["seconds"]
     if not entradas:
         log("[animatic] nenhum still encontrado.")
         return None
 
-    n_video = len(entradas) // 6
+    n_video = len(entradas) // 8
     for wav, _, _ in [(a[1], 0, 0) for a in audios]:
         entradas += ["-i", wav]
 
@@ -1087,7 +1357,10 @@ def animatic(plan: dict, stills_dir: Path, out_path: Path, *, dialogue: dict | N
     else:
         cmd += ["-filter_complex", ";".join(filtros), "-map", "[vout]"]
     cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(plan.get("fps", 24)),
-            "-crf", "20", str(out_path)]
+            # amix defaults to the longest delayed input. If a voice file is
+            # longer than its editorial slot it must not silently extend the
+            # movie; the dialogue-fit audit will report the offending cue.
+            "-t", f"{t:.6f}", "-crf", "20", str(out_path)]
 
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -1195,10 +1468,9 @@ def apply_voice(feitos: list, plan: dict, dialogue: dict, out_dir: Path, *,
             continue
         i = f["shot"]
         shot = plan["shots"][i]
-        wav = None
-        chave = (shot.get("scene"), shot.get("line_index"))
-        if chave in dialogue:
-            wav = dialogue[chave][0]
+        from script_pipeline.speech_split import dialogue_entry
+        entrada_fala = dialogue_entry(shot, dialogue)
+        wav = entrada_fala[0] if entrada_fala else None
 
         base = Path(clip)
         if wav and disponivel:

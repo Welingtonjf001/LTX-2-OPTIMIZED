@@ -226,6 +226,92 @@ def mix_music_bed(
     return str(out_path)
 
 
+def _ffmpeg_bin() -> str:
+    return os.environ.get("LTX_FFMPEG", "C:/ffmpeg/bin/ffmpeg.exe")
+
+
+def measure_loudness(path, *, target_lufs: float = -16.0, true_peak: float = -1.5,
+                     lra: float = 7.0) -> dict | None:
+    """Primeira passada do loudnorm: LUFS integrado, true peak, LRA e limiar.
+
+    Devolve o dict do ffmpeg (chaves `input_i`, `input_tp`, `input_lra`,
+    `input_thresh`, `target_offset`) ou None se nao conseguiu medir."""
+    import json as _json
+    import re as _re
+    r = subprocess.run(
+        [_ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(path), "-vn",
+         "-af", f"loudnorm=I={target_lufs}:TP={true_peak}:LRA={lra}:print_format=json",
+         "-f", "null", "-"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    match = _re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr, flags=_re.S)
+    if not match:
+        return None
+    try:
+        return _json.loads(match.group(0))
+    except ValueError:
+        return None
+
+
+def master_audio(movie_path: Path, out_path: Path, *, target_lufs: float = -16.0,
+                 true_peak: float = -1.5, lra: float = 7.0, log) -> dict | None:
+    """Masteriza a faixa do FILME montado: loudnorm em DUAS passadas (linear,
+    sem bombeamento) + limiter de segurança, video copiado.
+
+    Avaliacao do Voo 702 (2026-09-18): master a -12,8 LUFS com pico de
+    +3,9 dBFS -- distorce no transcode. Alvo web: -16 LUFS / -1,5 dBTP.
+    Devolve {"antes": ..., "depois": ...} (medidas) ou None em falha."""
+    antes = measure_loudness(movie_path, target_lufs=target_lufs, true_peak=true_peak, lra=lra)
+    if not antes:
+        log("assemble_final: nao consegui medir a sonoridade; master de audio ignorado.")
+        return None
+    # Margem sobre o alvo de TP: o limiter de amostra nao ve o pico entre amostras.
+    limite = 10 ** ((true_peak - 0.6) / 20.0)
+    filtro = (
+        f"loudnorm=I={target_lufs}:TP={true_peak}:LRA={lra}:"
+        f"measured_I={antes['input_i']}:measured_TP={antes['input_tp']}:"
+        f"measured_LRA={antes['input_lra']}:measured_thresh={antes['input_thresh']}:"
+        f"offset={antes['target_offset']}:linear=true,"
+        f"alimiter=limit={limite:.4f}:attack=5:release=60:level=disabled"
+    )
+    r = subprocess.run(
+        [_ffmpeg_bin(), "-y", "-v", "error", "-i", str(movie_path), "-map", "0:v:0", "-map", "0:a:0",
+         "-c:v", "copy", "-af", filtro, "-ar", "48000", "-c:a", "aac", "-b:a", "256k", str(out_path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not out_path.exists():
+        log(f"assemble_final: falha no master de audio ({(r.stderr or '')[-400:]}); mantendo o audio original.")
+        return None
+    depois = measure_loudness(out_path, target_lufs=target_lufs, true_peak=true_peak, lra=lra) or {}
+    log(f"assemble_final: master de audio {antes['input_i']} LUFS / {antes['input_tp']} dBTP "
+        f"-> {depois.get('input_i', '?')} LUFS / {depois.get('input_tp', '?')} dBTP "
+        f"(alvo {target_lufs} / {true_peak})")
+    try:
+        if float(depois.get("input_tp", -99)) > true_peak + 0.5:
+            log("assemble_final: AVISO -- true peak final ainda acima do alvo.")
+    except (TypeError, ValueError):
+        pass
+    return {"antes": antes, "depois": depois}
+
+
+def add_room_tone(movie_path: Path, out_path: Path, *, level_db: float, log) -> str | None:
+    """Ambiencia continua (ruido marrom filtrado) sob o filme inteiro, para as
+    emendas de audio entre planos nao aparecerem como degraus de silencio.
+
+    Nao e J/L cut: um J/L de verdade precisa de audio ALEM das bordas do plano
+    (margem/handle), que o pipeline ainda nao gera -- ver MEMORIAL 3.94."""
+    filtro = (f"[1:a]lowpass=f=500,volume={level_db}dB[rt];"
+              "[0:a][rt]amix=inputs=2:duration=first:normalize=0[aout]")
+    r = subprocess.run(
+        [_ffmpeg_bin(), "-y", "-v", "error", "-i", str(movie_path), "-f", "lavfi", "-i",
+         "anoisesrc=color=brown:sample_rate=48000:amplitude=0.5",
+         "-filter_complex", filtro, "-map", "0:v:0", "-map", "[aout]",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", str(out_path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not out_path.exists():
+        log(f"assemble_final: falha ao adicionar room tone ({(r.stderr or '')[-300:]}); seguindo sem.")
+        return None
+    return str(out_path)
+
+
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -242,6 +328,12 @@ def main(argv=None) -> int:
                         help="nivel da musica antes do ducking (0-1)")
     parser.add_argument("--music-duck-ratio", type=float, default=8.0)
     parser.add_argument("--music-duck-threshold", type=float, default=0.02)
+    parser.add_argument("--no-master", action="store_true",
+                        help="nao normaliza o audio final (padrao: -16 LUFS / -1,5 dBTP)")
+    parser.add_argument("--target-lufs", type=float, default=-16.0)
+    parser.add_argument("--true-peak", type=float, default=-1.5)
+    parser.add_argument("--room-tone-db", type=float, default=None,
+                        help="ambiencia continua sob o filme inteiro (ex.: -46 dB); desligado por padrao")
     args = parser.parse_args(argv)
 
     from script_pipeline import run_folder
@@ -277,6 +369,20 @@ def main(argv=None) -> int:
         if resultado:
             com_musica.replace(output_path)
             log(f"assemble_final: musica ({Path(musica).name}) misturada sob o filme inteiro.")
+
+    if args.room_tone_db is not None:
+        com_tone = final_dir / f"_com_roomtone_{output_path.name}"
+        if add_room_tone(output_path, com_tone, level_db=args.room_tone_db, log=log):
+            com_tone.replace(output_path)
+            log(f"assemble_final: room tone continuo a {args.room_tone_db} dB sob o filme inteiro.")
+    if not args.no_master:
+        mastered = final_dir / f"_master_{output_path.name}"
+        medidas = master_audio(output_path, mastered, target_lufs=args.target_lufs,
+                               true_peak=args.true_peak, log=log)
+        if medidas:
+            mastered.replace(output_path)
+            (final_dir / "master_audio.json").write_text(
+                json.dumps(medidas, ensure_ascii=False, indent=2), encoding="utf-8")
 
     log(f"assemble_final: filme final pronto -> {output_path}")
     run_folder.mark_stage_complete(run_dir, "assemble")

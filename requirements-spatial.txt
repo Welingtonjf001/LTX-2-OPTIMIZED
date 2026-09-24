@@ -1,0 +1,2 @@
+# Additional dependency for the optional Blender spatial pipeline.
+OpenEXR==3.4.15

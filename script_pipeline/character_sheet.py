@@ -92,9 +92,30 @@ def generate_character_candidates(
 
     engine = sb.IMAGE_ENGINES[image_engine]
     server = "http://127.0.0.1:8188"
-    # Z-Image-Turbo nao usa ComfyUI (servidor HTTP proprio, ver zimage_backend.py)
-    # -- generate_scene_storyboard sobe/fala com ele sozinho quando precisa.
-    if image_engine != "zimage":
+
+    # ACHADO 2026-09-17 (auditoria externa, risco adicional): o ComfyUI subia
+    # incondicionalmente aqui, ANTES do laco que checa `reference_image` por
+    # personagem -- com um elenco inteiro ja tendo foto real (import_reference.py)
+    # e sem --force, nao havia NADA pra gerar, mas o ComfyUI subia (custo de
+    # minutos) mesmo assim. Filtra quem precisa de geracao ANTES de tocar no
+    # ComfyUI/servidor; se ninguem precisa, nem sobe.
+    pendentes = {name: info for name, info in cast.items()
+                if force or not info.get("reference_image")}
+    for name, info in cast.items():
+        ref = info.get("reference_image")
+        if ref and not Path(ref).exists():
+            log(f"[character_sheet] {name}: AVISO -- reference_image aponta pra "
+                f"{ref!r}, que nao existe mais no disco. "
+                + ("Sera regenerada (--force)." if name in pendentes else
+                   "Rode com --force pra regenerar, ou os stills seguintes vao falhar."))
+    if not pendentes:
+        log("[character_sheet] todo o elenco ja tem reference_image -- nada a gerar "
+            "(use --force pra regenerar mesmo assim). ComfyUI nao foi iniciado.")
+        return {}
+
+    # Z-Image-Turbo e Qwen-Image-2.1 usam servidores HTTP proprios;
+    # generate_scene_storyboard sobe/fala com o backend selecionado sozinho.
+    if image_engine not in {"zimage", "qwen-image-2.1"}:
         sb.ensure_comfyui_running(server, wait_seconds=180, watch_stalls=False)
 
     out_dir = Path(run_dir) / "characters" / "sheet_candidates"
@@ -212,6 +233,37 @@ def apply_to_cast(cast: dict, resultado: dict) -> dict:
     return cast
 
 
+def generate_turnaround_sheets(cast: dict, run_dir: Path, *, force: bool = False, seed_base: int = 4021,
+                               log=print) -> dict:
+    """Folha de 3 vistas (frente, tres-quartos, costas) de cada personagem COM foto de referencia.
+
+    MEDIDO 2026-09-21 (Qwen-Image-2.1, 1536x864, 74 s): uniforme e penteado consistentes nas tres vistas
+    a partir de UMA foto de rosto. Serve de segunda referencia dos planos que mostram o corpo (wide/full/
+    medium/OTS): a foto de rosto sozinha vaza a roupa da foto (camisa bordo, blazer verde) -- a folha
+    fixa o uniforme do roteiro. Grava `characters/turnaround/NOME.png` e `cast[nome]["turnaround_image"]`."""
+    import qwen_image21_engine as q
+    out_dir = Path(run_dir) / "characters" / "turnaround"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    feitos = {}
+    for idx, (name, info) in enumerate(cast.items()):
+        ref = info.get("reference_image")
+        if not ref or not Path(ref).exists():
+            log(f"[turnaround] {name}: sem foto de referencia; pulando")
+            continue
+        dest = out_dir / f"{name}.png"
+        if dest.exists() and info.get("turnaround_image") == str(dest) and not force:
+            feitos[name] = str(dest)
+            continue
+        outfit = (info.get("descriptor") or "the outfit described for the character").strip()
+        prompt = q.TURNAROUND_PROMPT.format(outfit=outfit)
+        if q.generate(prompt, dest, width=1536, height=864, seed=seed_base + idx, reference_images=[ref], log=log):
+            info["turnaround_image"] = str(dest)
+            feitos[name] = str(dest)
+        else:
+            log(f"[turnaround] {name}: falhou")
+    return feitos
+
+
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -221,7 +273,7 @@ def main(argv=None) -> int:
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--n-candidates", type=int, default=4)
     ap.add_argument("--image-engine", default="flux",
-                    choices=["flux", "sd35", "sdxl", "zimage"])
+                    choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext", "zimage", "qwen-image-2.1", "hidream", "qwen-image"])
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=544)
     ap.add_argument("--apply", action="store_true",
@@ -236,11 +288,19 @@ def main(argv=None) -> int:
                          "(foto externa importada, ou sheet anterior) e substitui. Sem isto, "
                          "quem ja tem foto e pulado -- ela e a ancora de identidade mais forte "
                          "que existe, gerar uma sintetica por cima seria regressao.")
+    ap.add_argument("--turnaround", action="store_true",
+                    help="em vez de candidatos, gera a folha de 3 vistas de cada personagem com foto "
+                         "(Qwen-Image-2.1) e grava turnaround_image no cast.json")
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir).resolve()
     cast_path = run_dir / "characters" / "cast.json"
     cast = json.loads(cast_path.read_text(encoding="utf-8"))
+    if args.turnaround:
+        feitos = generate_turnaround_sheets(cast, run_dir, force=args.force)
+        cast_path.write_text(json.dumps(cast, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[turnaround] {len(feitos)} folha(s): {sorted(feitos)}")
+        return 0 if feitos or not cast else 1
 
     resultado = generate_character_candidates(
         cast, run_dir, n_candidates=args.n_candidates, image_engine=args.image_engine,

@@ -192,7 +192,12 @@ def main() -> int:
     tts = TTSWrapper(
         output_folder=str(XTTS_ROOT / "output"),
         speaker_folder=str(XTTS_ROOT / "speakers"),
-        lowvram=False,
+        # Só gera latentes das referências realmente usadas pelos jobs. A opção
+        # anterior pré-calculava TODO o catálogo do XTTS ao iniciar; além de
+        # desperdiçar VRAM, uma referência defeituosa bloqueava a corrida antes
+        # de sintetizar a primeira fala. `process_tts_to_file` mantém o cache
+        # individual durante todo o lote, então não há recarga por fala.
+        lowvram=True,
         model_source="local",
         model_version="v2.0.2",
         device="cuda",

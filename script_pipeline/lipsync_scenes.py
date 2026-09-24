@@ -67,6 +67,18 @@ def _dubit_clip(clip: dict, output_path: Path, *, run_dir: Path, args, log) -> s
         return None
 
 
+def _faces_in_clip(video_path: str):
+    """Quadros amostrados (15/50/85%) com rosto detectavel, ou None se o
+    insightface nao esta disponivel. O LatentSync morre com "Face not
+    detected" quando o falante saiu do quadro (Voo 702, 2026-09-18) e o
+    resultado era um filme inteiro com lipsync_applied=false sem aviso."""
+    try:
+        from script_pipeline.clip_identity_audit import _rostos_do_clipe
+        return len(_rostos_do_clipe(video_path))
+    except Exception:
+        return None
+
+
 def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -164,6 +176,14 @@ def main(argv=None) -> int:
             synced_manifest.append({**clip, "final_video_path": clip["video_path"], "lipsync_applied": False})
             continue
 
+        faces = _faces_in_clip(clip["video_path"])
+        if faces == 0:
+            log(f"{clip['id']}: nenhum rosto detectavel no clipe (falante fora do quadro); "
+                "lip-sync PULADO -- regenere o plano (cobertura) em vez de sincronizar o vazio.")
+            synced_manifest.append({**clip, "final_video_path": clip["video_path"],
+                                    "lipsync_applied": False, "lipsync_skipped": "no_face"})
+            continue
+
         output_path = lipsync_dir / f"{clip['id']}_synced.mp4"
         if args.engine == "dubit":
             result = _dubit_clip(clip, output_path, run_dir=run_dir, args=args, log=log)
@@ -182,7 +202,8 @@ def main(argv=None) -> int:
             log(f"{clip['id']}: lip-sync ok -> {result}")
         else:
             log(f"{clip['id']}: lip-sync falhou; mantendo clipe original sem sincronia labial.")
-            synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": False})
+            synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": False,
+                                    "lipsync_skipped": "engine_failed"})
 
         # AUDITORIA DE QUALIDADE (2026-09-09, pedido do usuario): o bloco
         # acima so confere se o processo TECNICO rodou sem excecao -- isto
@@ -253,6 +274,19 @@ def main(argv=None) -> int:
         log(f"lipsync_scenes: auditoria de sync (proxy, sem SyncNet) -- {len(medidos)}/{len(audit_report)} "
             f"clipe(s) medido(s), {suspeitos} suspeito(s) (correlacao < 0.3). "
             f"Relatorio: {lipsync_dir / 'lipsync_audit.json'}")
+    # Falha ALTA, nao silenciosa: fala sem lip-sync entra no resumo com o motivo.
+    sem_sync = [c for c in synced_manifest
+                if c.get("audio_path") and c.get("final_video_path") and not c.get("lipsync_applied")
+                and c.get("lipsync_skipped")]
+    if sem_sync:
+        motivos: dict = {}
+        for c in sem_sync:
+            motivos.setdefault(c["lipsync_skipped"], []).append(c["id"])
+        (lipsync_dir / "lipsync_skipped.json").write_text(
+            json.dumps(motivos, ensure_ascii=False, indent=2), encoding="utf-8")
+        log(f"lipsync_scenes: ATENCAO -- {len(sem_sync)} clipe(s) de FALA ficaram SEM lip-sync: "
+            + "; ".join(f"{k}={len(v)}" for k, v in motivos.items())
+            + f". Detalhe: {lipsync_dir / 'lipsync_skipped.json'}")
     ok_count = sum(1 for c in synced_manifest if c.get("final_video_path"))
     log(f"lipsync_scenes: {ok_count}/{len(clips)} clipe(s) com video final disponivel "
         f"({sum(1 for c in synced_manifest if c.get('lipsync_applied'))} com lip-sync aplicado).")

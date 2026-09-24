@@ -126,7 +126,8 @@ def main(argv=None) -> int:
         if not videos:
             continue
         _folha(videos, base_dir / f"folha_shot{i:03d}.png")
-        still = next(iter(sorted((run / "shots" / "stills").glob(f"shot{i:03d}_*.png"))), None)
+        from script_pipeline.render_shots import still_candidates
+        still = next(iter(still_candidates(run / "shots" / "stills", i)), None)
         e_still = face_embedding(str(still)) if still else None
         wav = falas.get((plano[i].get("scene"), plano[i].get("line_index")))
         relatorio[f"shot{i:03d}"] = {}

@@ -50,9 +50,12 @@ def _detect_face_bbox(image_path: str):
     consistency_audit.py para que 'detectável aqui' implique 'detectável
     depois' -- os dois passam pelo buffalo_l com os mesmos parâmetros."""
     import cv2
+    import numpy as np
     from script_pipeline.consistency_audit import _get_app
 
-    img = cv2.imread(str(image_path))
+    # cv2.imread fails on Windows when the run path contains accents; decode
+    # the bytes so external references remain importable in e.g. CÉU_TURBULENTO.
+    img = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"não abriu como imagem: {image_path}")
     app = _get_app()

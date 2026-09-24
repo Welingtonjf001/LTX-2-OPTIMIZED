@@ -48,6 +48,25 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+def merge_manifest(existing: list, novos: list) -> list:
+    """Mescla o manifesto de uma passada PARCIAL (`--only-shots`) no existente.
+
+    ACHADO 2026-09-19: uma passada parcial regravava `clips.json` so com os
+    planos refeitos e apagava os demais -- o proximo estagio (lipsync/mix/
+    montagem) via um filme de 1 clipe. Aqui os planos refeitos SUBSTITUEM os
+    de mesmo id e os outros ficam; a ordem final e a do roteiro (indice do
+    plano no id)."""
+    import re as _re
+    por_id = {c["id"]: c for c in existing}
+    for c in novos:
+        por_id[c["id"]] = c
+
+    def chave(c):
+        m = _re.search(r"shot(\d+)$", c["id"])
+        return int(m.group(1)) if m else 0
+    return sorted(por_id.values(), key=chave)
+
+
 def build_clips_manifest(feitos: list, plan: dict, dialogue: dict, engine: str = "ltx") -> list:
     """Converte a saída de render_shots para o formato de `scenes/clips.json`.
 
@@ -65,8 +84,9 @@ def build_clips_manifest(feitos: list, plan: dict, dialogue: dict, engine: str =
     for f in feitos:
         i = f["shot"]
         shot = plan["shots"][i]
-        chave = (shot.get("scene"), shot.get("line_index"))
-        wav = None if engine == "minimax" else dialogue.get(chave, (None, None))[0]
+        from script_pipeline.speech_split import dialogue_entry
+        entrada_fala = None if engine == "minimax" else dialogue_entry(shot, dialogue)
+        wav = entrada_fala[0] if entrada_fala else None
         out.append({
             "id": f"scene{shot['scene']:02d}_shot{i:03d}",
             "scene_index": shot["scene"],
@@ -126,11 +146,14 @@ def main() -> int:
     ap.add_argument("--no-reference", action="store_true")
     # Ver render_shots.py: sem condicionamento o LTX inventa voz propria.
     ap.add_argument("--no-audio-conditioning", action="store_true")
-    ap.add_argument("--engine", default="ltx", choices=["ltx", "minimax", "longcat"],
+    ap.add_argument("--engine", default="ltx", choices=["ltx", "minimax", "longcat", "wan"],
                     help="motor de video. ltx = LTX 2.5 via ComfyUI (8188), condicionado "
                          "pela fala sintetizada (TTS). minimax = MiniMax H3 (ComfyUI "
                          "separado, 8189) -- fala e lip-sync NATIVOS a partir do texto "
-                         "do prompt, sem passar pelo TTS/lipsync/mix do pipeline.")
+                         "do prompt, sem passar pelo TTS/lipsync/mix do pipeline. "
+                         "wan = Wan 2.2 TI2V 5B, MESMO ComfyUI do LTX (8188) -- video SEMPRE "
+                         "MUDO (sem audio_conditioning), fala normal depende do TTS/lip-sync "
+                         "como no LTX. Validado com GPU real 2026-09-18, ver wan22_backend.py.")
     ap.add_argument("--minimax-aspect-ratio", default=None)
     ap.add_argument("--minimax-megapixels", type=float, default=None)
     ap.add_argument("--minimax-no-turbo", dest="minimax_turbo", action="store_false", default=True,
@@ -308,6 +331,18 @@ def main() -> int:
                        minimax_chain_max_seconds=args.minimax_chain_max_seconds,
                        ltx_no_still=args.ltx_no_still,
                        ltx_chain_max_seconds=args.ltx_chain_max_seconds, log=log)
+    # Contract gate before any video generation: the visual plan must carry
+    # one stable location, the same aircraft in flight, the complete scene
+    # roster and the persistent object inventory. This catches the exact drift
+    # that a face-only audit cannot see (aircraft redesign, vanished carts/bin,
+    # or secondary crew silently removed from the scene).
+    from script_pipeline.continuity_audit import build_report, format_summary
+    continuity_report = build_report(run_dir, block_on_missing=True)
+    print(format_summary(continuity_report), flush=True)
+    if continuity_report.get("status") == "blocked":
+        print("[5-D] continuidade estrutural bloqueou a passada de video; "
+              "corrija shots/continuity_audit.json e rode novamente.", file=sys.stderr)
+        return 2
     if args.stills_only:
         print(f"[5-D] {sum(1 for f in feitos if f.get('still'))} still(s); "
               "rode de novo com --videos-only para os clipes.")
@@ -316,6 +351,12 @@ def main() -> int:
     # O handoff: mesmo caminho e mesmo formato que render_scenes produz.
     scenes_dir = run_folder.subdir(run_dir, "scenes")
     manifesto = build_clips_manifest(feitos, plan, dialogo, engine=args.engine)
+    destino = scenes_dir / "clips.json"
+    if args.only_shots and destino.exists():
+        try:
+            manifesto = merge_manifest(json.loads(destino.read_text(encoding="utf-8")), manifesto)
+        except (OSError, json.JSONDecodeError):
+            pass
     (scenes_dir / "clips.json").write_text(
         json.dumps(manifesto, ensure_ascii=False, indent=2), encoding="utf-8")
 

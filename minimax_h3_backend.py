@@ -71,6 +71,15 @@ N_CLIP = "128"             # CLIPLoader -- Qwen3-VL 32B, 15,7 GB so ele
 N_UNET = "127"             # UNETLoader -- diffusion_models/*.safetensors ou *.gguf
 N_VIDEO_VAE = "119"        # VAELoader (video) -- tambem usado por N_R2V pra encode() das refs
 N_SAVE = "92"              # SaveVideo
+N_GUIDER = "126"           # BasicGuider -- consome o MODEL final (turbo/LoRA/SageAttn/ControlNet, o que estiver ligado)
+
+# ControlNet de pose (MiniMax H3 Fun ControlNet Union, integrado ao ComfyUI em
+# 31/08/2026) -- IDs novos, criados por job em build_workflow() quando
+# control_video e passado (nao existiam no workflow oficial). Ver MEMORIAL 3.87.
+N_LOAD_VIDEO = "9040"        # LoadVideo -- o video de controle (mapa de pose)
+N_GET_VIDEO = "9041"         # GetVideoComponents -- extrai .images do LoadVideo
+N_MODEL_PATCH = "9042"       # ModelPatchLoader -- peso do Fun ControlNet Union
+N_CONTROLNET_APPLY = "9043"  # MiniMaxH3FunControlNetApply
 
 # TensorRT pra VAE de video (2026-09-06): compilado via ComfyUI-H3VAE_TRT
 # (github.com/lihaoyun6/ComfyUI-H3VAE_TRT) a partir dos ONNX oficiais
@@ -152,6 +161,19 @@ REALISM_LORA_STRENGTH = float(os.environ.get("MINIMAX_H3_REALISM_STRENGTH", "0.7
 # fallback. So UM teste isolado ate agora -- opt-in, default DESLIGADO (o
 # proprio node se marca "EXPERIMENTAL"). MINIMAX_H3_SAGEATTN=1 liga.
 SAGEATTN_ENABLED = os.environ.get("MINIMAX_H3_SAGEATTN", "0").strip() in ("1", "true", "True")
+
+# ControlNet de pose (MiniMax H3 Fun ControlNet Union, Comfy-Org/MiniMax-H3).
+# Padrao INT8 (2,3GB) -- MINIMAX_H3_CONTROLNET_WEIGHT troca pro bf16 (4,22GB,
+# `minimax_h3_fun_controlnet_union_pruned_bf16.safetensors`) se precisar de
+# mais fidelidade. Opt-in por job (passe `control_video=...` em generate()/
+# build_workflow(), ou `--control-video` na CLI) -- sem isso o grafo fica
+# IDENTICO ao de antes desta integracao. O video de controle e produzido por
+# `script_pipeline/motion_to_h3_controlnet.py` (esqueleto InterGen/Inter-X ->
+# OpenPose COCO18 sobre fundo preto, grade 17n+5 quadros / dims multiplas de
+# 32 que o H3 exige). Ver MEMORIAL 3.87.
+CONTROLNET_WEIGHT_FILE = os.environ.get(
+    "MINIMAX_H3_CONTROLNET_WEIGHT",
+    "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors")
 
 _server_proc = None
 _server_log_handle = None
@@ -472,7 +494,11 @@ def build_workflow(prompt: str, *, ref_images: list[str] | None = None,
                    megapixels: float = DEFAULT_MEGAPIXELS,
                    duration_seconds: float = 5.0, seed: int = 42,
                    turbo: bool = True, clip_on_cpu: bool = True,
-                   filename_prefix: str = "minimax_h3") -> dict:
+                   filename_prefix: str = "minimax_h3",
+                   control_video: str | None = None,
+                   control_strength: float = 1.0,
+                   control_start_percent: float = 0.0,
+                   control_end_percent: float = 1.0) -> dict:
     """`clip_on_cpu`: manda o encoder de texto (Qwen3-VL 32B, 15,7 GB) rodar
     na CPU em vez de disputar VRAM com o UNET.
 
@@ -526,6 +552,32 @@ def build_workflow(prompt: str, *, ref_images: list[str] | None = None,
         api[node_id] = {"class_type": "LoadAudio",
                         "inputs": {"audio": os.path.basename(path)}}
         api[N_R2V]["inputs"][f"ref_audios.ref_audio_{i}"] = [node_id, 0]
+
+    if control_video:
+        # LoadVideo->GetVideoComponents.images vira o control_video do node de
+        # ControlNet; ModelPatchLoader carrega o peso; a cadeia entra por
+        # ULTIMO, bem antes do guider -- mesmo padrao ja usado acima pra LoRA
+        # de realismo/SageAttn (cada wrapper le e reescreve o "model" que o
+        # guider consome).
+        api[N_LOAD_VIDEO] = {"class_type": "LoadVideo",
+                             "inputs": {"file": os.path.basename(control_video)}}
+        api[N_GET_VIDEO] = {"class_type": "GetVideoComponents",
+                            "inputs": {"video": [N_LOAD_VIDEO, 0]}}
+        api[N_MODEL_PATCH] = {"class_type": "ModelPatchLoader",
+                              "inputs": {"name": CONTROLNET_WEIGHT_FILE}}
+        api[N_CONTROLNET_APPLY] = {
+            "class_type": "MiniMaxH3FunControlNetApply",
+            "inputs": {
+                "model": api[N_GUIDER]["inputs"]["model"],
+                "model_patch": [N_MODEL_PATCH, 0],
+                "vae": [N_VIDEO_VAE, 0],
+                "strength": control_strength,
+                "start_percent": control_start_percent,
+                "end_percent": control_end_percent,
+                "control_video": [N_GET_VIDEO, 0],
+            },
+        }
+        api[N_GUIDER]["inputs"]["model"] = [N_CONTROLNET_APPLY, 0]
     return api
 
 
@@ -583,7 +635,9 @@ def generate(prompt: str, output_path: str, *, ref_images: list[str] | None = No
             duration_seconds: float = 5.0, seed: int = 42, turbo: bool = True,
             clip_on_cpu: bool = True, auto_cite_refs: bool = True,
             tag_style: str = "picture", log_cb=None,
-            timeout: int = 3600) -> str:
+            timeout: int = 3600, control_video: str | None = None,
+            control_strength: float = 1.0, control_start_percent: float = 0.0,
+            control_end_percent: float = 1.0) -> str:
     """Gera um clipe MiniMax H3 e copia para *output_path*.
 
     `ref_images`: 0 a 2 caminhos de imagem (identidade/estilo de referencia).
@@ -603,6 +657,7 @@ def generate(prompt: str, output_path: str, *, ref_images: list[str] | None = No
     audio_refs = ref_audios or []
     staged = [_stage_input(p) for p in refs]
     staged_audio = [_stage_input(p) for p in audio_refs]
+    staged_control = _stage_input(control_video) if control_video else None
     prompt_final = (build_prompt_with_refs(prompt, len(staged), n_audio_refs=len(staged_audio),
                                            tag_style=tag_style)
                     if auto_cite_refs else prompt)
@@ -611,10 +666,13 @@ def generate(prompt: str, output_path: str, *, ref_images: list[str] | None = No
         megapixels=megapixels, duration_seconds=duration_seconds, seed=seed,
         turbo=turbo, clip_on_cpu=clip_on_cpu,
         filename_prefix=os.path.splitext(os.path.basename(output_path))[0]
-        or "minimax_h3")
+        or "minimax_h3",
+        control_video=staged_control, control_strength=control_strength,
+        control_start_percent=control_start_percent, control_end_percent=control_end_percent)
     _log(f"[minimax_h3] {'turbo (4 passos)' if turbo else '20 passos'}, "
         f"{duration_seconds}s pedidos, {len(staged)} referencia(s) de imagem, "
-        f"{len(staged_audio)} de audio, clip {'na CPU' if clip_on_cpu else 'na GPU'}", log_cb)
+        f"{len(staged_audio)} de audio, clip {'na CPU' if clip_on_cpu else 'na GPU'}"
+        + (f", ControlNet de pose (strength={control_strength})" if staged_control else ""), log_cb)
     try:
         files = submit_and_wait(api, log_cb=log_cb, timeout=timeout)
         if not files:
@@ -624,7 +682,7 @@ def generate(prompt: str, output_path: str, *, ref_images: list[str] | None = No
         shutil.copy2(src, output_path)
         return output_path
     finally:
-        for p in staged + staged_audio:
+        for p in staged + staged_audio + ([staged_control] if staged_control else []):
             try:
                 os.remove(p)
             except OSError:
@@ -656,6 +714,13 @@ if __name__ == "__main__":
     ap.add_argument("--clip-on-gpu", dest="clip_on_cpu", action="store_false",
                     help="mantem o encoder de 32B na GPU -- so testado sem isto, "
                          "que travou por 30 min. Ver MEMORIAL 3.41.")
+    ap.add_argument("--control-video", default=None,
+                    help="mapa de pose (OpenPose sobre fundo preto) pra condicionar via "
+                         "MiniMax H3 Fun ControlNet Union -- gere com "
+                         "script_pipeline/motion_to_h3_controlnet.py")
+    ap.add_argument("--control-strength", type=float, default=1.0)
+    ap.add_argument("--control-start", type=float, default=0.0, dest="control_start_percent")
+    ap.add_argument("--control-end", type=float, default=1.0, dest="control_end_percent")
     ap.add_argument("--timeout", type=int, default=3600)
     args = ap.parse_args()
 
@@ -664,5 +729,8 @@ if __name__ == "__main__":
         ref_audios=args.ref_audios, tag_style=args.tag_style,
         aspect_ratio=args.aspect_ratio, megapixels=args.megapixels,
         duration_seconds=args.duration_seconds, seed=args.seed, turbo=args.turbo,
-        clip_on_cpu=args.clip_on_cpu, timeout=args.timeout)
+        clip_on_cpu=args.clip_on_cpu, timeout=args.timeout,
+        control_video=args.control_video, control_strength=args.control_strength,
+        control_start_percent=args.control_start_percent,
+        control_end_percent=args.control_end_percent)
     print(f"OK -> {out}")

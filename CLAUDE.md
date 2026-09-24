@@ -10,11 +10,28 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-16 (segunda auditoria de scripts, 348 arquivos catalogados, 20
-achados -- cache de still/clipe/TTS por conteúdo em vez de tamanho/nome, encadeamento
-LTX/MiniMax, concat/manifesto não declarando falha, `repair_comfyui.bat` e scripts de
-upscale sem verificação de exit code; 18/20 corrigidos, 2 parciais). Estado atual e decisões
-abertas: `MEMORIAL.md` §7 P0 e §3.86.
+Última verificação: 2026-09-24 (checkpoints turbo do MiniMax H3 [LightX2V]
+baixados para teste de velocidade — ver seção MiniMax H3 abaixo — NÃO
+validados com GPU real ainda; detalhes em `MEMORIAL.md` §3.116).
+Verificação anterior: 2026-09-24 (workflow "long take" multitrack do MiniMax H3
+via `comfyui-easy-media` avaliado e preparado para teste isolado, NÃO validado
+com GPU real ainda; detalhes em `MEMORIAL.md` §3.115).
+Verificação anterior: 2026-09-20 (estado espacial 3D integrado à WebUI de
+decupagem e animatic de cabine de 20 s do Voo 702; detalhes em `MEMORIAL.md` §3.97 e
+`script_pipeline/SPATIAL_PIPELINE.md`).
+Verificação de 2026-09-19: gate visual de produção com Qwen3-VL 30B entre
+stills/vídeo e vídeo/montagem; detalhes e causa raiz em `MEMORIAL.md` §3.93.
+Verificação de 2026-09-18: diretor de ação/movimento: InterGen/Inter-X -> vídeo de pose ->
+LTX IC-LoRA Union-Control ou MiniMax H3 ControlNet, `script_pipeline/motion_director.py`; 3/3
+planos reais renderizados em produção pelo caminho LTX; caminho MiniMax validado com GPU real
+até o penúltimo nó do grafo -- ControlNet do H3 segue bloqueado por VRAM insuficiente para
+UNET+ControlNet+VAE simultâneos. Estado atual e decisões abertas: `MEMORIAL.md` §7 P0 e
+§3.87-3.91 (auditoria de scripts anterior, 2026-09-16, em §3.86, ainda não commitada).
+Endurecimento do gate visual + camada de correção (regeneração só dos planos reprovados, fala longa
+dividida em planos ≤ 6 s, master de áudio -16 LUFS / -1,5 dBTP, referência de locação reprovada descartada):
+`MEMORIAL.md` §3.95 — flags `--visual-max-retries`, `--max-speech-seconds`, `--no-master-audio`.
+Para a decupagem do Voo 702, o contrato de locação/objetos/voo/personagens e o
+diagnóstico das folhas de referência estão em `script_pipeline/CONTINUIDADE_VOO702.md`.
 
 ---
 
@@ -113,6 +130,23 @@ diz quais modelos a instância realmente serve.
 **O Ollama é o motor padrão da extração de roteiro** desde 2026-08-23
 (`script_pipeline/`, `storyplay25`), medido contra o gemma4-e2b local: 6s
 contra 91s, 4/4 falas preservadas verbatim contra 2/4, 9 planos contra 5.
+
+**Auditoria visual de produção (2026-09-19):** `qwen3-vl:30b` está instalado
+no Ollama (19 GB no catálogo; ~22 GB carregado, 100% GPU na RTX 3090) e é o
+padrão de `script_pipeline/visual_continuity_audit.py`. O gate roda depois dos
+stills e depois dos clipes. Usa uma chamada de percepção neutra e outra de
+decisão contra o contrato; não use `gemma4:latest` como substituto nesta máquina,
+pois a entrada visual produziu descrições incorretas e falsos bloqueios. Ver
+`MEMORIAL.md` §3.93 e `script_pipeline/CONTINUIDADE_VOO702.md`.
+
+**Liberação de RAM/VRAM (2026-09-19):** todo encerramento de
+`script_pipeline.run_decupagem` consulta `/api/ps` e descarrega os modelos
+residentes com `keep_alive: 0`. A auditoria visual descarrega o VLM logo após
+cada gate, antes de devolver a GPU ao FLUX/LTX. `decupagem_ui.py` repete a
+limpeza ao terminar uma corrida, no botão Parar e via `atexit` quando a WebUI
+fecha. O servidor Ollama continua ativo. Implementação compartilhada em
+`script_pipeline/ollama_runtime.py`; falha de limpeza nunca substitui o código
+de saída real da produção.
 
 Duas armadilhas ao trocar de modelo:
 - **Modelo de raciocínio falha em silêncio.** O qwen3.6 gastava todo o
@@ -442,6 +476,7 @@ de confiar.
 | `web_ui_v4_25.py` / `film_maker_ui_v4_25.py` | 7960 / 7961 |
 | `video_doctor_ui.py` (pós-produção, serve 2.3 e 2.5) | 7912 |
 | `decupagem_ui.py` (roteiro → filme, com log e retomada) | 7913 |
+| `Qwen-Image-2.1\\start_webui.bat` (imagem por texto/referências, instalação externa) | 7862 / 8192 |
 | `web_ui_v4.py` / `film_maker_ui_v4.py` (2.3) | **7860** (Gradio padrão) |
 
 Portas **medidas em 2026-08-27** subindo cada UI, não lidas do código: as três
@@ -567,9 +602,42 @@ LTX (`script_pipeline/generate_storyboards.py`, mesmo bug, mesmo fix). Se o
 MiniMax H3 "morrer sem traceback" de novo num ponto específico e
 reproduzível, suspeitar do watchdog ANTES de suspeitar de crash nativo.
 
+### Workflow "long take" multitrack (`comfyui-easy-media`) — preparado, NÃO testado
+
+Existe um segundo mecanismo de continuidade para o H3, diferente do que o `minimax_h3_backend.py`
+usa hoje: o custom node `comfyui-easy-media` (`easy multiTrackEditor` + `easy multitrackProject`)
+gera segmentos em single-pass onde um segmento `context` herda o **latente** do anterior, em vez de
+reencadear por imagem (I2V do último frame, que é o que `render_scenes`/`render_shots` fazem hoje
+para todos os motores, incluindo o H3). Clonado em
+`E:\Users\home\Documents\MiniMax-H3\ComfyUI\custom_nodes\ComfyUI-Easy-Media`, checkpoint de terceiro
+(`Minimax-h3_Singularity_ref2va_v1.3_Pruned_w4a8.safetensors`, 11,8 GB) baixado, workflow de teste
+de 2 segmentos salvo em `ComfyUI\user\default\workflows\test_h3_multitrack_longtake.json`. **Nunca
+rodado com GPU real** — a 3090 estava ocupada em toda checagem feita até agora. Não usar em produção
+até validar a emenda entre segmentos visualmente. Ver `MEMORIAL.md` §3.115.
+
+### Checkpoints turbo (LightX2V) — baixados para teste de velocidade, NÃO testados
+
+Baixados de `huggingface.co/lightx2v/Minimax-h3-Turbo` para
+`E:\Users\home\Documents\MiniMax-H3\ComfyUI\models\diffusion_models\`:
+
+```
+minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors   1,96 GB
+minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors        1,96 GB
+```
+
+Família `ref2v` (mais próxima do `ref2va` já instalado) e formato `comfyui_bf16`
+(carrega direto no ComfyUI, sem `diffusers`). ⚠️ **~2 GB é pequeno demais para
+ser o transformer inteiro do H3** (os checkpoints já em produção têm dezenas de
+GB) — quase certo que são LoRAs/adapters de destilação de passos, não checkpoint
+completo, apesar do nome de arquivo não indicar isso. **Não verificado**: se
+entram via `UnetLoader` (substituindo o checkpoint) ou `LoraLoader` (por cima do
+atual) no grafo do `minimax_h3_backend.py`, nem tempo/qualidade — a 3090 estava
+ocupada com outro trabalho no momento do download. Antes de medir, inspecionar
+as chaves do safetensors. Ver `MEMORIAL.md` §3.116.
+
 ## LongCat-Video-Avatar 1.5 — motor dos planos de fala (`--video-engine longcat`)
 
-ComfyUI SEPARADO em `E:\Users\home\Documents\LongCat-Video\ComfyUI` (venv próprio,
+ComfyUI SEPARADO em `I:\LongCat-Video\ComfyUI` (venv próprio,
 porta **8190**, WanVideoWrapper do Kijai). `longcat_video_backend.py` dirige por HTTP e
 disputa a MESMA 3090 — desligue o 8188 antes (`gpu_watchdog.free_port(8188)`).
 
@@ -612,11 +680,59 @@ compartilham parse, cast, TTS, lip-sync, mistura e montagem; divergem só na
 | unidade | uma FALA | um PLANO |
 | still | um por CENA | um por PLANO, fixando o enquadramento |
 | ações sem fala | não viram clipe | viram |
-| estado | **validado** | **até o animatic**, exercitado em 2026-08-27; do vídeo em diante, não |
+| estado | **validado** | **até o animatic**; modo espacial validado em 2026-09-20, vídeo final ainda não |
 
     [1] parse   [2] cast   [E] emoção   [4] TTS   [S] estrutura   [P] decupagem
       -> [5] render_scenes  OU  [5-D] render_shots_stage
       -> [6] lipsync  [7] mix  [8] assemble  [9] verify
+
+### Continuidade espacial 3D na decupagem
+
+É um modo opt-in da `decupagem_ui.py`, no acordeão **Continuidade espacial 3D
+(opcional)**. Ele não liga sozinho para projetos antigos. Requisitos:
+
+- projeto mestre persistente vinculado à corrida;
+- `Motor das imagens = flux`;
+- spec JSON com exatamente um binding para cada ID único do
+  `parse/shot_plan.json`;
+- Blender acessível e dependências de `requirements-spatial.txt` instaladas.
+
+Campos da WebUI: **Ativar estado espacial persistente**, caminho do spec,
+**Força de transformação do blocking** (`0.65` padrão; `0.78` usado no teste
+fotográfico de cabine) e **Animatic diagnóstico**. O diagnóstico encaminha
+`--no-visual-audit`; serve para inspecionar um bloqueio e nunca deve ser lido
+como aprovação para vídeo final.
+
+CLI equivalente:
+
+```powershell
+.venv\Scripts\python.exe -m script_pipeline.run_decupagem ^
+  --run-dir <RUN> --ate animatic --image-engine flux --video-engine ltx ^
+  --spatial-spec <RUN>\world\spatial_spec.json --spatial-denoise 0.78
+```
+
+Para o Voo 702, gere o spec depois de o plano estar conformado e estável:
+
+```powershell
+.venv\Scripts\python.exe -m script_pipeline.voo702_spatial ^
+  --run <RUN> --output <RUN>\world\voo702_spatial_spec.json
+```
+
+Teste validado em 2026-09-20: quatro planos contíguos da cabine, 384×256,
+24 fps, 480 frames editoriais, 20,000 s e três falas. As fotos externas de
+HA-EUN, MIN-JUN, JI-HO e SEO-YEON foram usadas; o gate aprovou 4/4 stills e
+`shots/animatic_audit.json` ficou `ok` (3/3 falas). A corrida
+`20260919_073649_VOO_702_-_CÉU_TURBULENTO` guarda o plano integral de 69 planos
+em `parse/shot_plan.full.json`, o recorte anterior do cockpit em
+`parse/shot_plan.cockpit20.json` e o recorte testado em `parse/shot_plan.json`.
+
+`attach_to_run()` rejeita IDs ausentes ou duplicados. `conform_plan()` acrescenta
+um contador determinístico quando mais de um plano cobre a mesma unidade-fonte.
+Bindings com evento temporal devem usar
+`script_pipeline.spatial_pipeline`, pois a decupagem comum aceita apenas estado
+estático. Em closes, a referência espacial entra antes da identidade; em planos
+abertos, o blocking continua como latente img2img. Detalhes e artefatos:
+`script_pipeline/SPATIAL_PIPELINE.md` e `MEMORIAL.md` §3.97.
 
 **O que liga os estágios é `scenes/clips.json`, não o nome do módulo.** O
 `render_shots_stage` escreve esse manifesto no mesmo formato que o

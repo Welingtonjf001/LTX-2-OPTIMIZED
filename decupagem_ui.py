@@ -30,13 +30,13 @@ conhecimento proprio dela e onde cada artefato cai, que e o contrato do
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -90,6 +90,18 @@ ENV_VIDEO = {
 }
 
 _PROC: dict = {"p": None}
+
+
+def _descarregar_ollama() -> list[str]:
+    """Libera RAM/VRAM dos modelos; nao encerra o servidor Ollama."""
+    from script_pipeline.ollama_runtime import unload_all
+    return unload_all(log=lambda message: print(f"[decupagem_ui] {message}", flush=True))
+
+
+# Ctrl+C e encerramento normal da janela/servidor passam por atexit. A corrida
+# tambem chama a mesma limpeza no proprio finally, pois a WebUI pode continuar
+# aberta depois que o filme termina.
+atexit.register(_descarregar_ollama)
 
 
 # --------------------------------------------------------------------------
@@ -347,6 +359,19 @@ def carregar_run_completo(nome: str, roteiro_path_atual: str = "") -> tuple:
     criada_agora = (time.time() - (RUNS_DIR / nome).stat().st_mtime) < 120
     roteiro_preparado = (bool(roteiro_path_atual) and Path(roteiro_path_atual).exists()
                          and criada_agora)
+    # Projeto mestre ja guarda a fonte versionada em production.json. Depois
+    # de reiniciar a WebUI, esse caminho precisa voltar para a tela mesmo que
+    # o parse ainda nao exista; depender apenas do estado efemero do textbox
+    # tornava uma corrida interrompida impossivel de retomar.
+    roteiro_projeto = None
+    try:
+        from script_pipeline.production_project import project_for
+        raiz_projeto = project_for(RUNS_DIR / nome)
+        candidato = raiz_projeto / "roteiro" / "roteiro.txt" if raiz_projeto else None
+        if candidato and candidato.exists():
+            roteiro_projeto = candidato
+    except (OSError, ValueError, TypeError):
+        roteiro_projeto = None
     if ja_tem_parse:
         roteiro_path_novo = ""
         aviso_roteiro_txt = (
@@ -358,6 +383,11 @@ def carregar_run_completo(nome: str, roteiro_path_atual: str = "") -> tuple:
         aviso_roteiro_txt = (
             f"✅ Roteiro já preparado ({Path(roteiro_path_atual).name}) continua em uso "
             "nesta corrida. Passo 3: clique Rodar (aba Stills).")
+    elif roteiro_projeto is not None:
+        roteiro_path_novo = str(roteiro_projeto)
+        aviso_roteiro_txt = (
+            f"✅ Roteiro restaurado do projeto mestre ({roteiro_projeto.name}). "
+            "Passo 3: clique Rodar (aba Stills).")
     else:
         roteiro_path_novo = ""
         aviso_roteiro_txt = ("Corrida nova, sem roteiro ainda. Passo 2: arraste um .txt OU cole "
@@ -1016,6 +1046,9 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
           character_sheet_n: int = 4, minimax_ref_audio: bool = False,
           minimax_no_still: bool = False, minimax_chain_max_seconds: float | None = None,
           ltx_no_still: bool = False, ltx_chain_max_seconds: float | None = None,
+          spatial_on: bool = False, spatial_spec: str = "", spatial_denoise: float = .65,
+          spatial_diagnostic: bool = False, motion_conditioning: bool = False,
+          visual_unresolved: str = "block",
           video_loras: list | None = None, ic_reference: str = "off",
           ic_strength: float = 1.0, extras: list | None = None) -> list:
     cmd = [PY, "-u", "-m", "script_pipeline.run_decupagem",
@@ -1043,6 +1076,10 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
     # 2026-09-04. Custa 1 chamada de Ollama por cena; opt-in.
     if camera_llm:
         cmd.append("--camera-llm")
+    if motion_conditioning:
+        cmd.append("--motion-conditioning")
+    if visual_unresolved == "continue":
+        cmd += ["--visual-unresolved", "continue"]
     # LoRA opcional nos STILLS (nunca no video) -- pedido do usuario
     # 2026-09-09: models/loras_images/, separado dos LoRAs de video do LTX em
     # models/loras/, que sao incompativeis com estes checkpoints de imagem.
@@ -1064,6 +1101,15 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
         cmd.append("--ltx-no-still")
     if ltx_chain_max_seconds and motor_video == "ltx":
         cmd += ["--ltx-chain-max-seconds", str(ltx_chain_max_seconds)]
+    if spatial_on:
+        if motor_img != "flux":
+            raise ValueError("Modo espacial exige Motor das imagens = flux")
+        if not spatial_spec or not Path(str(spatial_spec)).exists():
+            raise ValueError("Modo espacial exige um arquivo JSON de blocking existente")
+        cmd += ["--spatial-spec", str(spatial_spec), "--spatial-denoise", str(float(spatial_denoise)),
+                "--reuse-plan"]
+        if spatial_diagnostic:
+            cmd.append("--visual-diagnostic")  # roda o gate, nao bloqueia, para no animatic
     # LoRAs de VIDEO do LTX (pedido do usuario 2026-09-12) -- so com motor ltx. O
     # dropdown mostra "chave (forca)" do catalogo ltx_loras.py; aqui vira chave:forca.
     if motor_video == "ltx":
@@ -1085,6 +1131,8 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
           character_sheet_on=False, character_sheet_n=4, minimax_ref_audio=False,
           minimax_no_still=False, minimax_chain_max_seconds=None,
           ltx_no_still=False, ltx_chain_max_seconds=None,
+          spatial_on=False, spatial_spec="", spatial_denoise=.65,
+          spatial_diagnostic=False, motion_conditioning=False, visual_unresolved="block",
           video_loras=None, ic_reference="off", ic_strength=1.0, extras=None):
     """Executa a cadeia transmitindo o stdout. Gerador: a UI recebe cada linha.
 
@@ -1109,6 +1157,25 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
                [], None, "", _stage_html(None, -1))
         return
 
+    # Falhar antes de abrir o subprocesso. Antes desta verificacao, a UI
+    # mostrava a lista fallback quando o Ollama estava desligado e aceitava a
+    # corrida; o parser entao gastava 3 tentativas por cena e seguia sem o
+    # enriquecimento pedido. Para stills, o Qwen3-VL tambem e requisito do
+    # gate visual padrao.
+    disponiveis = set(listar_modelos_ollama())
+    exigidos = set()
+    if motor and not str(motor).startswith("nvidia/"):
+        exigidos.add(str(motor))
+    if PARADAS.index(ate) >= PARADAS.index("stills"):
+        exigidos.add("qwen3-vl:30b")
+    ausentes = sorted(exigidos - disponiveis)
+    if ausentes:
+        estado = ("Ollama indisponivel." if not disponiveis else
+                  "Modelos ausentes na instancia Ollama ativa: " + ", ".join(ausentes))
+        yield (estado + " Inicie a instancia correta e tente novamente.", [], None, "",
+               _stage_html(None, -1))
+        return
+
     run.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update(ENV_VIDEO)
@@ -1124,6 +1191,8 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
                 character_sheet_on, character_sheet_n, minimax_ref_audio,
                 minimax_no_still, minimax_chain_max_seconds,
                 ltx_no_still, ltx_chain_max_seconds,
+                spatial_on, spatial_spec, spatial_denoise,
+                spatial_diagnostic, motion_conditioning, visual_unresolved,
                 video_loras, ic_reference, ic_strength, extras)
     linhas = [f"$ {' '.join(cmd[3:])}", f"(corrida: {run})", ""]
     # Rastreio da "trilha de estagios" (a linha de status "estamos aqui" que o
@@ -1156,11 +1225,12 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
     finally:
         p.wait()
         _PROC["p"] = None
+        _descarregar_ollama()
     linhas.append("")
     linhas.append(f"[fim] codigo de saida {p.returncode}")
     sucesso = p.returncode == 0
     if sucesso and atual is not None:
-        feito_ate = len(ESTAGIOS) - 1
+        feito_ate = atual
         atual = None
     yield ("\n".join(linhas[-400:]), stills_com_legenda(run), video_de(run), resumo_do_plano(run),
            _stage_html(atual, feito_ate, falhou=not sucesso and atual is not None))
@@ -1169,12 +1239,26 @@ def rodar(nome_run, script, novo_nome, estilo, trocas, largura, altura, ate, mot
 def parar() -> str:
     p = _PROC.get("p")
     if p is None or p.poll() is not None:
-        return "Nada rodando."
-    p.terminate()
+        descarregados = _descarregar_ollama()
+        return ("Nada rodando. " +
+                (f"Ollama liberado: {', '.join(descarregados)}."
+                 if descarregados else "Nenhum modelo Ollama estava carregado."))
     try:
-        p.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        p.kill()
+        if sys.platform == "win32":
+            # O orquestrador abre um subprocesso por etapa. Terminar apenas o
+            # pai deixa parse/TTS/ComfyUI orfaos; /T encerra a arvore inteira.
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
+                           capture_output=True, text=True, timeout=15)
+        else:
+            p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait(timeout=5)
+    finally:
+        _PROC["p"] = None
+        _descarregar_ollama()
     return ("Corrida encerrada. Os artefatos prontos ficam -- selecione a mesma "
             "corrida e rode de novo para continuar de onde parou.")
 
@@ -1214,6 +1298,73 @@ def _corrida_status_pronta(nome: str) -> str:
 
 
 # --------------------------------------------------------------------------
+def criar_projeto_mestre(titulo, pasta, roteiro, duracao):
+    from script_pipeline.production_project import create_project
+    nome = time.strftime('%Y%m%d_%H%M%S') + '_' + _slug(titulo)
+    run = RUNS_DIR / nome
+    path = create_project(pasta, run, Path(roteiro).read_text(encoding='utf-8'), titulo, float(duracao))
+    return gr.update(choices=listar_runs(), value=nome), path, resumo_projeto_mestre(nome)
+
+
+def resumo_projeto_mestre(nome):
+    from script_pipeline.production_project import project_for, read, sync_media
+    root = project_for(RUNS_DIR / nome) if nome else None
+    if root is None:
+        return 'Corrida sem projeto mestre.'
+    sync_media(RUNS_DIR / nome)
+    run = RUNS_DIR / nome
+    continuity = read(run / 'shots/continuity_audit.json', {})
+    return json.dumps({'pasta': str(root), 'projeto': read(root / 'projeto.json'),
+                       'cobertura': read(root / 'editorial/cobertura.json'),
+                       'planos': len(read(root / 'editorial/timeline.json', {}).get('shots', [])),
+                       'auditoria_continuidade': continuity.get('status', 'pendente'),
+                       'bloqueios_continuidade': len(continuity.get('blocking', [])),
+                       'avisos_objetos': len(continuity.get('warnings', []))},
+                      ensure_ascii=False, indent=2)
+
+
+PROJECT_DOCUMENTS = ['biblia/continuidade.json', 'biblia/locacoes.json', 'biblia/personagens.json',
+                     'biblia/voz.json', 'audio/cues.json', 'editorial/timeline.json', 'vfx/jobs.json', 'projeto.json']
+
+
+def documento_projeto(nome, documento, conteudo=None):
+    from script_pipeline.production_project import project_for, read, write
+    if documento not in PROJECT_DOCUMENTS:
+        raise gr.Error('Documento não permitido.')
+    if _PROC['p'] is not None and _PROC['p'].poll() is None and conteudo is not None:
+        raise gr.Error('Aguarde a etapa atual terminar antes de editar o projeto.')
+    root = project_for(RUNS_DIR / nome)
+    if root is None:
+        raise gr.Error('Selecione uma corrida com projeto mestre.')
+    if conteudo is not None:
+        data = json.loads(conteudo)
+        if documento == 'editorial/timeline.json':
+            from script_pipeline.production_project import validate_timeline
+            validate_timeline(data)
+        previous = read(root / documento)
+        from script_pipeline.production_project import digest
+        write(root / 'roteiro/versoes' / (Path(documento).stem + '_' + digest(previous)[:16] + '.json'), previous)
+        write(root / documento, data)
+    return json.dumps(read(root / documento, {}), ensure_ascii=False, indent=2)
+
+
+def importar_tomada(nome, plano, caminho, aprovar, entrada):
+    from script_pipeline.production_project import project_for
+    from script_pipeline.production_post import set_take
+    root = project_for(RUNS_DIR / nome)
+    if not root:
+        raise gr.Error('Corrida sem projeto mestre.')
+    set_take(root, plano.strip(), caminho.strip(), bool(aprovar), int(entrada))
+    return resumo_projeto_mestre(nome)
+
+
+def exportar_projeto(nome, aprovado):
+    from script_pipeline.production_post import conform_movie
+    if _PROC['p'] is not None and _PROC['p'].poll() is None:
+        raise gr.Error('Aguarde a geração terminar antes de conformar.')
+    return conform_movie(RUNS_DIR / nome, approved_only=bool(aprovado))
+
+
 def build() -> None:
     # A tela abre JA mostrando a corrida mais recente. Alem de ser o que a
     # pessoa quase sempre quer ver, isso evita uma tela vazia que nao diz se a
@@ -1271,7 +1422,38 @@ def build() -> None:
             value=(_corrida_status_pronta(_inicial) if _inicial else
                    "Passo 1: carregue uma corrida existente, ou clique \"① Nova corrida\"."))
 
+        # Rodar/Parar ficavam so dentro da aba "Stills" -- clicavel so depois de navegar
+        # ate la, sem indicio nas outras abas de que e ali que se inicia a corrida (achado
+        # de operabilidade rodando de verdade, 2026-09-22). Visivel em QUALQUER aba agora.
+        with gr.Row():
+            btn = gr.Button("▶ Rodar", variant="primary", scale=2)
+            btn_parar = gr.Button("■ Parar", scale=1)
+
         with gr.Tabs():
+            with gr.Tab("Projeto mestre"):
+                gr.Markdown("Projeto persistente fora do motor: roteiro versionado, continuidade, cobertura e timeline. As tomadas geradas ficam pendentes de revisão visual.")
+                project_title = gr.Textbox(label="Título do filme", value="VOO 702 - CÉU TURBULENTO")
+                project_root = gr.Textbox(label="Pasta do projeto", value=str(ROOT.parent / "Filmes" / "Voo702"))
+                project_source = gr.Textbox(label="Arquivo do roteiro para importar")
+                project_duration = gr.Number(label="Duração alvo (segundos)", value=300)
+                project_create = gr.Button("Criar projeto e vincular corrida", variant="primary")
+                project_refresh = gr.Button("Atualizar projeto / exportar timeline")
+                project_status = gr.Textbox(label="Estado do projeto", lines=14, interactive=False)
+                with gr.Accordion('Continuidade, som e edição', open=False):
+                    project_doc = gr.Dropdown(PROJECT_DOCUMENTS, value=PROJECT_DOCUMENTS[0], label='Documento do projeto')
+                    project_load = gr.Button('Ler documento')
+                    project_json = gr.Textbox(label='Documento JSON editável', lines=18)
+                    project_save = gr.Button('Salvar nova versão')
+                    gr.Markdown('Timeline: selecione uma tomada existente pelo selected_take; ajuste trim_in em frames. Aprovação visual é explícita. Eventos sonoros: media, start, source_in, duration, gain, fade_in, fade_out (tempos em segundos).')
+                with gr.Accordion('Tomada de movimento / VFX / alternativa', open=False):
+                    take_shot = gr.Textbox(label='ID permanente do plano (SH_...)')
+                    take_path = gr.Textbox(label='Arquivo de vídeo da tomada')
+                    take_in = gr.Number(label='Entrada na tomada (frames)', value=0, precision=0)
+                    take_approval = gr.Checkbox(label='Aprovar esta tomada após revisão visual', value=False)
+                    take_import = gr.Button('Importar e selecionar tomada')
+                delivery_approved = gr.Checkbox(label='Exigir todas as tomadas aprovadas para entrega', value=True)
+                delivery_button = gr.Button('Conformar filme e exportar cinco stems')
+                delivery_path = gr.Textbox(label='Entrega editorial', interactive=False)
             # ---------------------------------------------------------------
             # ABA 1: DECUPAGEM -- roteiro, cast, e o resultado do parse/LLM
             # ---------------------------------------------------------------
@@ -1338,7 +1520,7 @@ def build() -> None:
                     with gr.Row():
                         sheet_personagem = gr.Textbox(label="Personagem (nome EXATO em cast.json)", scale=2)
                         sheet_motor = gr.Dropdown(
-                            choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext"],
+                            choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext", "zimage", "qwen-image-2.1", "hidream", "qwen-image"],
                             value="flux", label="Motor", scale=1)
                     sheet_descritor = gr.Textbox(
                         label="Descritor visual (cole o de cast.json, ou escreva)", lines=2)
@@ -1397,23 +1579,70 @@ def build() -> None:
                              "-- só dentro do vocabulário permitido para aquele Estilo (nunca "
                              "livre). Custa 1 chamada de Ollama por cena, na etapa de "
                              "decupagem. Sem isto, tudo determinístico como sempre.")
+                    motion_conditioning = gr.Checkbox(
+                        value=False, label="Condicionamento de movimento (MotionBricks)", scale=1,
+                        info="Estágio [M], antes só existia por CLI (--motion-conditioning). Produz "
+                             "o condicionamento textual de trajetória/pose que os motores de vídeo "
+                             "aceitam hoje, a partir de sujeito/co-sujeito/lado de tela já resolvidos "
+                             "pela decupagem. Não é o diretor de movimento por InterGen/pose real "
+                             "(motion_director.py) -- esse continua só por CLI, fora desta corrida.")
+                with gr.Row():
+                    visual_unresolved = gr.Radio(
+                        choices=["block", "continue"], value="block", scale=1,
+                        label="Se o gate visual não aprovar um plano após as tentativas",
+                        info="block (padrão): a corrida para e mostra shots/visual_gate_*_retries.json. "
+                             "continue: segue com o plano reprovado (fica registrado no relatório) -- "
+                             "use quando souber que é falso positivo (ex.: close legítimo sem ambiente "
+                             "visível) e não quiser gastar mais uma rodada de GPU.")
+                    modo_all = gr.Checkbox(
+                        value=False, label="🚀 Modo ALL (câmera+movimento+ritmo)", scale=1,
+                        info="Liga de uma vez: refino de câmera por LLM, condicionamento de movimento "
+                             "e segue mesmo com gate visual pendente (block vira continue) -- os "
+                             "avanços que só existiam por CLI. A auditoria de ritmo (planos longos/"
+                             "curtos demais) roda sempre, com ou sem o Modo ALL. NÃO liga o estado "
+                             "espacial 3D: aquele exige projeto mestre + Motor das imagens = flux "
+                             "+ um spec já pronto (aba Motores, acordeão próprio) -- ligar aqui sem "
+                             "isso pronto faria a corrida falhar, então fica de fora.")
                 with gr.Row():
                     motor_img = gr.Dropdown(
-                        choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext"], value="flux", scale=1,
+                        choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext", "zimage", "qwen-image-2.1", "hidream", "qwen-image"], value="flux", scale=1,
                         label="Motor das imagens",
                         info="flux: obedece melhor enquadramento e lado de tela, e o unico "
                              "com imagem de referencia por personagem. sd35: carrega em ~1 min "
                              "contra ~4 e cabe em ~12 GB contra ~24, mas erra o enquadramento. "
                              "flux-krea/flux-kontext: FLUX.1 (ver MEMORIAL 3.48), nao testados "
-                             "nesta cadeia ate agora. Trocar o motor REFAZ os stills (ele entra "
+                             "nesta cadeia ate agora. qwen-image-2.1: servidor local separado, "
+                             "texto/edicao e ate 10 referencias. Trocar o motor REFAZ os stills (ele entra "
                              "na chave de cache).")
+                with gr.Accordion("Continuidade espacial 3D (opcional)", open=False):
+                    spatial_on = gr.Checkbox(
+                        value=False, label="Ativar estado espacial persistente", scale=1,
+                        info="Executa blocking Blender, depth/máscaras e condicionamento RGB antes dos stills. "
+                             "Exige projeto mestre vinculado, Motor das imagens = flux e um spec JSON que cubra "
+                             "todos os IDs estáveis do shot_plan.")
+                    spatial_spec = gr.Textbox(
+                        value="", label="Spec JSON de locação/planos espaciais", scale=2,
+                        placeholder="C:/.../spatial_spec.json")
+                    spatial_denoise = gr.Slider(
+                        minimum=.1, maximum=1, value=.65, step=.05,
+                        label="Força de transformação do blocking",
+                        info="Menor preserva mais o render técnico; maior permite aparência mais cinematográfica.")
+                    spatial_diagnostic = gr.Checkbox(
+                        value=False, label="Animatic diagnóstico: continuar se o gate visual bloquear",
+                        info="Roda o gate e grava o relatório, mas não bloqueia nem regenera, e a "
+                             "corrida para no animatic (exige 'Ir até' = animatic ou antes; "
+                             "vídeo, lipsync e montagem são recusados). Não aprova stills.")
+                    gr.Markdown("Modo opt-in. A aprovação visual continua obrigatória antes do vídeo.")
                     motor_video = gr.Dropdown(
-                        choices=["ltx", "minimax", "longcat"], value="ltx", scale=1,
+                        choices=["ltx", "minimax", "longcat", "wan"], value="ltx", scale=1,
                         label="Motor de video",
                         info="ltx: LTX 2.5, fala vem do TTS (estagios lipsync/mix rodam normal). "
                              "minimax: MiniMax H3 -- fala e lip-sync NATIVOS a partir do texto "
                              "do plano (o video_prompt precisa ja carregar o dialogo, entre "
-                             "aspas, como nos exemplos de teste); lipsync/mix viram passthrough.")
+                             "aspas, como nos exemplos de teste); lipsync/mix viram passthrough. "
+                             "wan: Wan 2.2 TI2V 5B, mesmo ComfyUI do ltx -- video SEMPRE MUDO, "
+                             "fala vem do TTS/lipsync normal (como o ltx). Validado com GPU "
+                             "real 2026-09-18; sem LoRA/IC-LoRA/encadeamento ainda.")
                     motor_voz = gr.Dropdown(
                         choices=["auto", "xtts", "qwen", "fish"], value="auto", scale=1,
                         label="Motor de voz (TTS)",
@@ -1568,10 +1797,6 @@ def build() -> None:
             # ABA 3: STILLS -- rodar/parar, rascunho, previas, regenerar
             # ---------------------------------------------------------------
             with gr.Tab("Stills"):
-                with gr.Row():
-                    btn = gr.Button("Rodar", variant="primary", scale=2)
-                    btn_parar = gr.Button("Parar", scale=1)
-
                 log = gr.Textbox(label="Log", lines=22, interactive=False, autoscroll=True,
                                  max_lines=22)
                 video = gr.Video(value=_video0, label="Rascunho / filme", height=320)
@@ -1596,7 +1821,7 @@ def build() -> None:
                         regen_indice = gr.Number(label="Tomada # (clique numa imagem acima, ou digite)",
                                                  precision=0, scale=1)
                         regen_motor_img = gr.Dropdown(
-                            choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext"],
+                            choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext", "zimage", "qwen-image-2.1", "hidream", "qwen-image"],
                             value="flux", label="Motor da imagem", scale=1)
                     with gr.Row():
                         regen_estilo = gr.Dropdown(
@@ -1652,6 +1877,14 @@ def build() -> None:
         # ---- ligacoes ----
         # Atualizar SO rele a pasta em disco (nao carrega nada na tela) --
         # Carregar/selecionar a corrida E' o que traz os dados pra tela.
+        project_create.click(fn=criar_projeto_mestre,
+                             inputs=[project_title, project_root, project_source, project_duration],
+                             outputs=[runs, roteiro_path, project_status])
+        project_refresh.click(fn=resumo_projeto_mestre, inputs=runs, outputs=project_status)
+        project_load.click(fn=documento_projeto, inputs=[runs, project_doc], outputs=project_json)
+        project_save.click(fn=documento_projeto, inputs=[runs, project_doc, project_json], outputs=project_json)
+        take_import.click(fn=importar_tomada, inputs=[runs, take_shot, take_path, take_approval, take_in], outputs=project_status)
+        delivery_button.click(fn=exportar_projeto, inputs=[runs, delivery_approved], outputs=delivery_path)
         atualizar.click(fn=lambda: (gr.update(choices=listar_runs()),
                                     "Lista de corridas atualizada -- selecione uma e clique "
                                     "\"Carregar corrida selecionada\"."),
@@ -1678,7 +1911,9 @@ def build() -> None:
                           consistencia, camera_llm, ltx_variant, minimax_variant,
                           lora, lora_strength, character_sheet_on, character_sheet_n,
                           minimax_ref_audio, minimax_no_still, minimax_chain_max_seconds,
-                          ltx_no_still, ltx_chain_max_seconds]
+                          ltx_no_still, ltx_chain_max_seconds,
+                          spatial_on, spatial_spec, spatial_denoise, spatial_diagnostic,
+                          motion_conditioning, visual_unresolved, modo_all]
         _entradas_lora = [ic_reference, ic_strength, ic_guide_strength, lipsync_engine,
                           dubit_strength, dubit_guide, dubit_audio,
                           post_deblur, post_deblur_s, post_upscale, post_upscale_s]
@@ -1687,7 +1922,14 @@ def build() -> None:
             """Traduz os controles de LoRA/lip-sync/pos-producao em argumentos da cadeia.
             So o que foi LIGADO vira argumento: tudo desligado = corrida de sempre."""
             nb, nl = len(_entradas_base), len(_entradas_lora)
-            base = valores[:nb]
+            base = list(valores[:nb])
+            modo_all_ligado = base.pop()   # ultimo de _entradas_base; nao e argumento de rodar()
+            if modo_all_ligado:
+                # indices dentro de base, na MESMA ordem de _entradas_base (sem o modo_all
+                # que acabou de sair): camera_llm=14, motion_conditioning=-2, visual_unresolved=-1
+                base[14] = True
+                base[-2] = True
+                base[-1] = "continue"
             (ic_ref, ic_s, ic_g, lip, dub_s, dub_g, dub_a,
              deb, deb_s, up, up_s) = valores[nb:nb + nl]
             ligados = valores[nb + nl:nb + nl + len(lora_chaves)]
@@ -1708,9 +1950,10 @@ def build() -> None:
             yield from rodar(*base, video_loras=escolhidos, ic_reference=ic_ref,
                              ic_strength=ic_s, extras=extras)
 
-        btn.click(fn=_rodar_ui,
-                  inputs=_entradas_base + _entradas_lora + lora_liga + lora_forca,
-                  outputs=[log, galeria, video, plano, estagio_html])
+        evento_rodar = btn.click(
+            fn=_rodar_ui,
+            inputs=_entradas_base + _entradas_lora + lora_liga + lora_forca,
+            outputs=[log, galeria, video, plano, estagio_html])
         # Clicar numa imagem preenche o texto do prompt E o numero da tomada no
         # regenerador -- sem isso a pessoa teria que contar posicao na galeria
         # a mao pra saber que numero digitar.
@@ -1726,7 +1969,11 @@ def build() -> None:
                                outputs=aviso_refazer
                                ).then(fn=lambda n: stills_com_legenda(RUNS_DIR / n) if n else [],
                                       inputs=runs, outputs=galeria)
-        btn_parar.click(fn=parar, outputs=aviso)
+        # queue=False faz o clique chegar enquanto o gerador da corrida ocupa
+        # a fila; cancels interrompe o streaming da funcao e `parar` mata a
+        # arvore de subprocessos no Windows.
+        btn_parar.click(fn=parar, outputs=aviso, queue=False,
+                        cancels=[evento_rodar])
         salvar.click(fn=salvar_cast, inputs=[runs, cast], outputs=[aviso, cast_gaps_aviso])
         sheet_btn.click(fn=gerar_sheet_personagem,
                         inputs=[runs, sheet_personagem, sheet_descritor, sheet_motor,

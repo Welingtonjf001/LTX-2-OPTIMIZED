@@ -49,6 +49,20 @@ MIN_SEPARATION_M = 1.0
 # "touching" (que aqui descreve cascos de navio, nao um ator).
 _W = r"(?<![A-Za-z])(?:{})(?![A-Za-z])"
 RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("takedown", re.compile(_W.format(
+        r"tackles?|tackling|knocks? (?:him|her|them) down|takes? (?:him|her|them) down|"
+        r"derruba|imobiliza|joga ao ch[aã]o")),
+     "sprint into one controlled tackle, bring the partner safely to the ground, then pin and hold position"),
+    ("fire", re.compile(_W.format(
+        r"fires?|firing|shoots?|shooting|aims?|aiming|atir(?:a|ar|ando)|dispara|mirando")),
+     "raise the weapon, aim toward the stated target, fire controlled shots, then hold aim; never turn toward camera"),
+    ("protect", re.compile(_W.format(
+        r"shields?|shielding|protects?|protecting|covers? (?:him|her|them)|"
+        r"protege|protegendo|cobre o presidente")),
+     "move between the partner and the threat, shield the partner, and hold a protective position"),
+    ("pursue", re.compile(_W.format(
+        r"chases?|chasing|pursues?|pursuing|runs? after|running after|persegue|perseguindo")),
+     "sprint after the fleeing target along the same street axis, weaving past pedestrians without stopping"),
     ("contact", re.compile(_W.format(
         r"hugs?|hugging|embraces?|embracing|kiss(?:es|ing)?|handshakes?|shakes? (?:her|his|their) hand|"
         r"fights?|fighting|grabs?|grabbing|holds? hands|hold hands|"
@@ -56,14 +70,16 @@ RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
      "approach the partner, stop at a safe conversational distance, then perform one controlled contact action"),
     ("reach", re.compile(_W.format(
         r"picks? up|picks?|takes?|taking|hands? (?:over|him|her|them)|gives?|giving|opens?|opening|"
+        r"pulls?|pulling|drags?|dragging|puxa|puxando|arrasta|arrastando|"
         r"touch(?:es)?|places?|placing|holds?|holding|raises?|raising|lifts?|lifting|grips?|"
         r"pega|entrega|abre|toca|coloca|segura|ergue")),
      "make one deliberate reach toward the named prop or partner, then return to a stable pose"),
     ("locomote", re.compile(_W.format(
-        r"walks?|walking|runs?|running|hurr(?:y|ies|ying)|enters?|entering|crosses|crossing|"
+        r"walks?|walking|runs?|running|sprints?|sprinting|"
+        r"hurr(?:y|ies|ying)|enters?|entering|crosses|crossing|"
         r"approach(?:es|ing)?|steps?|stepping|dash(?:es)?|glides?|strides?|paces?|"
-        r"caminha|corre|entra|atravessa|aproxima|passos")),
-     "move with a short, purposeful path and settle without sliding"),
+        r"caminha|corre|dispara em corrida|entra|atravessa|aproxima|passos")),
+     "sprint along the established path, accelerate decisively, keep the partner in the same direction of travel, then continue moving"),
     ("turn", re.compile(_W.format(
         r"turns?|turning|looks?|looking|gaz(?:es|ing)|glances?|glancing|faces|facing|stares?|staring|"
         r"vira|olha|olhando|encara")),
@@ -106,6 +122,32 @@ def infer_primitive(beat: str, subject: str, partner: str, *,
                 return "gesture", "make a restrained expressive gesture and remain in place"
             return primitive, instruction
     return "idle", "maintain a natural idle with subtle breathing and weight shift"
+
+
+def _meeting_point(own_anchor: list[float], partner_anchor: list[float],
+                   min_separation_m: float) -> list[float]:
+    """Ponto de encontro pra um `approach_partner`: o MEIO do caminho entre as
+    duas ancoras, mas parado a `min_separation_m/2` do centro, do lado de
+    quem vai andar.
+
+    ACHADO (avaliacao com 2 agentes reais no MotionBricks, 2026-09-17): sem
+    isto, `target["destination"]` era a ancora ORIGINAL do parceiro -- e
+    quando os DOIS lados da cena tem `approach_partner` um pro outro ao mesmo
+    tempo (a conversa comum, dois personagens se aproximando), cada um anda
+    ate a marca de ONDE O OUTRO COMECOU. MEDIDO: os dois se cruzavam e
+    TROCAVAM de lado de tela inteiro, terminando mais LONGE um do outro
+    (2,75 m) do que a distancia inicial (2,4 m) -- o oposto de "se
+    encontram para conversar". Convergindo pro meio do caminho, cada um fica
+    do seu proprio lado (screen_side preservado) e a 1x min_separation_m de
+    distancia no final."""
+    mx = (own_anchor[0] + partner_anchor[0]) / 2.0
+    my = (own_anchor[1] + partner_anchor[1]) / 2.0
+    dx, dy = own_anchor[0] - partner_anchor[0], own_anchor[1] - partner_anchor[1]
+    dist = (dx ** 2 + dy ** 2) ** 0.5
+    if dist < 1e-6:
+        return [mx, my]
+    half = min_separation_m / 2.0
+    return [mx + dx / dist * half, my + dy / dist * half]
 
 
 def _formation(characters: set[str], sides: dict[str, str]) -> dict[str, dict[str, Any]]:
@@ -159,10 +201,22 @@ def build_motion_score(plan: dict[str, Any]) -> dict[str, Any]:
                 speaking=shot.get("line_index") is not None)
             seconds = max(0.1, float(shot.get("seconds") or 0.1))
             target: dict[str, Any] = {"mode": "hold_anchor", "min_separation_m": MIN_SEPARATION_M}
-            if primitive in {"locomote", "contact"}:
+            if primitive == "pursue":
+                # Co-subjects in a chase run in the same direction; converging
+                # toward one another reverses the screen geography and cancels
+                # the pursuit. The adapter continues the established heading.
+                target["mode"] = "short_path"
+                target["destination"] = None
+            elif primitive in {"locomote", "contact", "takedown", "protect"} or (
+                    primitive == "reach" and partner):
                 if partner:
                     target["mode"] = "approach_partner"
-                    target["destination"] = (formation.get(partner) or {}).get("anchor_m")
+                    own_anchor = (formation.get(subject) or {}).get("anchor_m")
+                    partner_anchor = (formation.get(partner) or {}).get("anchor_m")
+                    if own_anchor and partner_anchor:
+                        target["destination"] = _meeting_point(own_anchor, partner_anchor, MIN_SEPARATION_M)
+                    else:
+                        target["destination"] = partner_anchor
                 else:
                     # Sem parceiro nao ha destino conhecido: o adaptador escolhe um
                     # caminho curto a partir da ancora, em vez de "andar" ate a

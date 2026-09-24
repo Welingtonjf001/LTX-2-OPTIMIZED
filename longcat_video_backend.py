@@ -41,7 +41,7 @@ import uuid
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LONGCAT_ROOT = os.environ.get("LONGCAT_VIDEO_ROOT",
-                               r"E:\Users\home\Documents\LongCat-Video")
+                               r"I:\LongCat-Video")
 COMFY_ROOT = os.path.join(LONGCAT_ROOT, "ComfyUI")
 COMFY_PORT = int(os.environ.get("LONGCAT_VIDEO_PORT", "8190"))
 COMFY_SERVER = f"http://127.0.0.1:{COMFY_PORT}"

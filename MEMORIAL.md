@@ -6511,6 +6511,252 @@ assinatura porque é evidência congelada da auditoria, não parte do pipeline.
 - Nenhum código foi COMMITADO nesta sessão -- ver `reference_ltx_git_uncommitted` na memória
   do usuário: confirmar escopo com o usuário antes de commitar.
 
+## 3.87 Adaptador esqueleto -> vídeo de pose, compartilhado entre LTX e MiniMax H3 (2026-09-17)
+
+InterGen e Inter-X (repositórios próprios, fora deste checkout -- ver
+`InterGen/project_intergen_setup.md` e `Inter-X/project_interx_setup.md` na
+memória do usuário) geram esqueleto de duas pessoas a partir de texto, mas
+não pixel nenhum. Faltava o elo até o LTX/MiniMax H3 -- o mesmo problema que
+o `ChoreoEngine` já resolve para dança, agora para interação a dois vindo de
+um modelo de texto-para-movimento.
+
+`script_pipeline/pose_video.py` (novo): núcleo único, usado tanto pelo LTX
+quanto pelo H3.
+- `SMPL_TO_COCO18`: os 22 primeiros joints do SMPL e do SMPL-X têm a MESMA
+  ordem (SMPL-X = SMPL + mãos/rosto anexados no final) -- InterGen (SMPL) e
+  Inter-X (SMPL-X) mapeiam para o formato COCO-18 clássico do
+  OpenPose/controlnet_aux com a MESMA tabela. Olhos/orelhas colapsam na
+  cabeça (o SMPL puro do InterGen não tem esses joints) -- achado por
+  `IndexError` real, não por leitura da spec.
+- Projeção ortográfica com azimute/elevação configuráveis; enquadramento
+  FIXO (bbox calculado uma vez sobre a cena toda -- reenquadrar por quadro
+  quebraria a coerência temporal que o ControlNet espera).
+- Convenção `(T,A,J,3)` (tempo primeiro, depois ator) -- igual ao
+  `hhi_visualization.recover_hhi` que o próprio usuário escreveu para o
+  Inter-X. Decisão explícita: NÃO tentar adivinhar `(T,A,J,3)` vs `(A,T,J,3)`
+  por magnitude dos eixos -- ambíguo em clipes curtos.
+- `motion_to_h3_controlnet.py` (novo): wrapper fino sobre o mesmo motor, só
+  ajusta para a grade própria do H3 (quadros = `17n+5`, dimensões múltiplas
+  de 32 -- não 64 como o LTX).
+- Validado com dado real das duas fontes: Inter-X (116,2,55,3) -> 93 quadros
+  @768x512@24fps; InterGen (210,2,22,3) -> 252 quadros (fps de origem
+  assumida 20 -- `InterGen/utils/preprocess.py::FPS` no checkout real é 30;
+  discrepância registrada, não bloqueante, nunca resolvida).
+
+**LTX 2.3 e 2.5 aceitam os DOIS esqueletos** via IC-LoRA Union-Control
+(Canny+Depth+Pose) -- LoRA treinado no 2.3 carrega no 2.5 (já confirmado
+antes, ver §3.78); a única restrição é não combinar esse IC-LoRA (fator de
+referência > 1) com `audio_conditioning` no 2.5, raramente relevante para
+cena de ação/luta/dança.
+
+## 3.88 MiniMax H3 Fun ControlNet Union: integrado, mas bloqueado por VRAM (2026-09-17/18)
+
+Pesquisa do próprio usuário identificou que o H3 ganhou ControlNet nativo no
+ComfyUI upstream (incorporado em 31/08/2026), sem precisar de LoRA nova.
+`git pull --ff-only` no ComfyUI vendorizado do MiniMax H3
+(`E:\Users\home\Documents\MiniMax-H3\ComfyUI`, 76135e5 -> cf5cc2b, estado
+limpo confirmado antes, servidor parado). Confirmados `ModelPatchLoader`
+(API antiga, dict `NODE_CLASS_MAPPINGS`) e `MiniMaxH3FunControlNetApply`
+(API nova `io.ComfyNode`/`ComfyExtension` -- checagem ingênua por
+`NODE_CLASS_MAPPINGS` sozinho dá falso negativo). Baixado
+`minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors` (2,3 GB,
+confirmado contra o repo oficial `Comfy-Org/MiniMax-H3`, não adivinhado).
+
+`minimax_h3_backend.py` ganhou suporte, MESMO padrão já usado para
+LoRA/SageAttn (wrapper opt-in que lê/reescreve `api[N_GUIDER]["inputs"]
+["model"]`): `control_video`, `control_strength`, `control_start_percent`,
+`control_end_percent` em `build_workflow()`/`generate()`/CLI. Desligado por
+padrão -- grafo idêntico a antes se `control_video` não for passado.
+
+**Teste real #1 (2026-09-17), `MINIMAX_H3_VARIANT=fp8int8` padrão +
+ControlNet**: carrega e aplica sem erro, mas cada passo levou 482-585s
+(tendência de queda, mas ainda assim), projetando 2,5-3h para 20 passos --
+contra os ~400-700s TOTAIS documentados sem ControlNet. Log mostrava o UNET
+principal indo de "loaded completely" para "loaded partially... lowvram
+patches" assim que o ControlNet entra. Hipótese registrada mas NÃO testada
+na hora (usuário pediu para parar e investigar depois): o peso do
+ControlNet é `int8_convrot`, mas o UNET padrão é `fp8_scaled` -- famílias de
+quantização diferentes podem forçar caminho de conversão/offload extra.
+
+**Teste real #2 (2026-09-18), `MINIMAX_H3_VARIANT=int8convrot`** (a
+hipótese acima, finalmente testada, via `script_pipeline.motion_director.
+render_conditioned_shot_minimax()` -- ver §3.90/§3.91): os 4 passos de
+amostragem turbo TERMINARAM em ~1218s (~305s/passo) -- confirmando que
+casar a família de quantização ajuda (~40% mais rápido que o `fp8int8`
+padrão). MAS revelou um bug DIFERENTE: quebrou no último nó do grafo
+(`VAEDecode`) com `RuntimeError: Expected all tensors to be on the same
+device, but got weight is on cpu, different from other tensors on cuda:0
+(fused_rms_norm)`. Causa raiz, lida no log do servidor
+(`MiniMax-H3/logs/comfyui_minimax_h3.log`): o UNET+ControlNet
+(`int8convrot`) ocupam ~19 GB de VRAM ("loaded partially... lowvram
+patches"); quando a VideoVAE tenta carregar depois só sobram ~4,17 GB dos
+~4,97 GB que ela precisa -- fica PARCIALMENTE offloaded para CPU (867 MB).
+O kernel `fused_rms_norm` do VAE (customizado, não é um linear/attention
+comum que o weight-streaming do ComfyUI sabe fatiar) não aceita tensores
+mistos CPU/GPU, e quebra em vez de só ficar mais lento. NÃO é o mesmo bug
+do `--cpu-vae` já documentado e corrigido (aquele era mismatch de DTYPE,
+§3.42) -- este é mismatch de DEVICE por pressão de VRAM, só aparece com
+ControlNet aplicado (o caminho sem controle nunca chega perto do teto de
+VRAM desta placa de 24,5 GB). `--reserve-vram` do ComfyUI NÃO serve de fix
+(reserva VRAM para o SO, reduz ainda mais o que sobra para o modelo).
+
+**Veredito**: ControlNet do H3 continua NÃO pronto para produção -- trocou
+"lento" por "quebra", mesma causa raiz (VRAM insuficiente para
+UNET+ControlNet+VAE simultâneos). Resolver de verdade exige reduzir o
+footprint do UNET+ControlNet o bastante para sobrar VRAM para a VAE inteira
+(variante ainda mais leve, ou liberação mais agressiva do UNET antes do
+`VAEDecode`) -- mudança de orçamento de memória dentro do grafo
+vendorizado, não ajuste de flag. Não investigado mais fundo por
+desproporção de custo (o LTX já cobre os planos de ação/interação da
+decupagem hoje; H3 é só opção futura).
+
+## 3.89 Auditoria externa de movimento/pose/stills (2026-09-17/18): 8 achados, todos corrigidos
+
+Usuário trouxe `AUDITORIA_MOVIMENTO_STILLS_2026-09-17.md` (auditoria própria,
+sem alterar código nem commitar) sobre o trabalho desta sessão (§3.87/3.88 +
+`motionbricks_command_controller.py`/`motionbricks_scene_director.py`).
+Cada achado foi verificado lendo o código antes de corrigir -- todos os 8
+(4 P1 + 4 P2) se confirmaram reais.
+
+1. **Cenas se sobrepunham no relógio do controlador**
+   (`motion_conditioner.build_motion_score` reinicia `cursor=0` por cena;
+   `commands_for_actor` só ordenava tudo por `start_s` sem deslocar). Fix:
+   `scene_time_offsets()` (nova, em `motion_command_geometry.py`) soma as
+   durações das cenas anteriores; `commands_for_actor` desloca `start_s` por
+   essa soma.
+2. **Lacunas/entradas tardias executavam o comando ERRADO**
+   (`current_command` devolvia o ÚLTIMO comando sempre que a lacuna vinha
+   depois do primeiro). Fix: `current_command` agora devolve `None`
+   explícito em lacuna; `idle_command_for_gap`/`resolve_command` (novas)
+   decidem o fallback.
+3. **Cores RGB/BGR trocadas em `pose_video.py`** -- `COCO18_COLORS` é RGB
+   (convenção OpenPose) mas ia direto para `cv2.line`/`cv2.circle` (que
+   espera BGR) escrito como `bgr24` no ffmpeg -- vermelho saía azul. Fix:
+   `_rgb_to_bgr_tuple()` inverte na hora de desenhar; de quebra, as juntas
+   (antes brancas fixas) agora usam a cor por-junta da tabela de 18 cores.
+4. **Fórmula de contagem de quadros do H3 errada** -- arredondava pro
+   `17n+5` MAIS PRÓXIMO; o node 131 (`ComfyMathExpression`) do workflow
+   real arredonda para CIMA (`max(5,round(a*24)) + (5-(...%17))%17`) -- para
+   108 quadros pedidos o adaptador dava 107, o node real pede 124, e o
+   backend completa a diferença REPETINDO O ÚLTIMO QUADRO (~0,7s de pose
+   parada, silencioso). Fix: `h3_frame_count()` replica a fórmula exata
+   (extraída do JSON do workflow).
+5. **Escala aplicada duas vezes** -- `facing_for`/`walk_target` escalavam de
+   novo o retorno de `partner_anchor`, mesmo quando vinha de
+   `live_positions` (já em metros de MUNDO). Fix: `partner_anchor` agora
+   escala só os dois casos ESTÁTICOS (destino do JSON, âncora de formation).
+6. **Freio de colisão só via o parceiro designado** -- um terceiro ator
+   parado no caminho não freava nada. Fix: `walk_target` agora escaneia
+   TODOS os atores em `live_positions` (menos `own_actor`, novo parâmetro).
+7. **CLI do adaptador H3 quebrava rodando direto** (`ModuleNotFoundError`
+   sem `-m`). Fix: fallback de `sys.path` em `motion_to_h3_controlnet.py`.
+8. **`generate_storyboards.py` checava/subia ComfyUI mesmo com
+   `--image-engine zimage`** (`render_shots.py` já tinha a guarda certa).
+   Fix: mesma guarda `detect_architecture(checkpoint) != "zimage"`.
+
+Também aplicadas as "melhorias" listadas junto (menor risco): lock de
+concorrência no servidor Z-Image (`_inference_lock`, handler síncrono em
+threadpool concorrente disputando o mesmo pipeline global), Z-Image
+derrubado explicitamente antes do estágio de vídeo (`render_shots.py`, via
+`gpu_watchdog.free_port`, não `zimage_backend.shutdown_server()` -- este só
+mata processo que o PRÓPRIO processo Python subiu, e stills/vídeo rodam
+como subprocessos separados), NPZ do MotionBricks com `actor`/`anchor_m`/
+`qpos_world_xy` (antes só `qpos` local), `character_sheet.py` filtrando
+atores pendentes antes de subir o ComfyUI, validação de entrada em
+`render_pose_video` e captura de stderr do ffmpeg na mensagem de erro.
+
+27 testes em `tests/test_motion_command_geometry.py`, 22 em
+`tests/test_pose_video.py`, 15 em `tests/test_motion_to_h3_controlnet.py`,
+2 em `tests/test_generate_storyboards_zimage_guard.py` -- todos cobrindo os
+8 achados.
+
+## 3.90 Diretor de ação/movimento (`motion_director.py`): 4 bugs reais só achados rodando de verdade (2026-09-18)
+
+Pedido do usuário (sessão sem supervisão por horas): 1) itens de melhoria
+da auditoria (§3.89) 2) teste com vídeo real 3) diretor de ação/movimento
+4) rodar nos filmes dos piratas e do colégio.
+
+`script_pipeline/motion_director.py` (novo) liga `shot_plan.json` ao
+InterGen: `find_interaction_shots()` casa `beat`/`fallback`/`video_prompt`
+contra um dicionário de pistas PT/EN (só em planos com `subject` E
+`co_subject`) -> `run_intergen_batch()` (roda o InterGen UMA VEZ para todos
+os prompts únicos do run) -> `pose_video.render_pose_video()` (esqueleto no
+tamanho/duração reais do plano) -> `render_conditioned_shot()`
+(`ltx25_backend.generate()`, o MESMO caminho de produção que
+`render_shots.py` usa: still do plano como I2V + vídeo de pose como IC-LoRA
+Union-Control).
+
+**Limitação conhecida, não resolvida**: o InterGen gera "pessoa 1"/"pessoa
+2" genéricas -- a guia de pose não sabe qual personagem NOMEADO fica em
+qual lado. A identidade continua vindo do still (I2V) e do `video_prompt`;
+a pose é só um sinal de MOVIMENTO sobreposto.
+
+**4 bugs reais, NENHUM visível por leitura de código -- só apareceram
+rodando com dado real, em alguns casos depois de MINUTOS de GPU**:
+
+1. `ic_lora["lora"]` precisa do nome LOCAL do arquivo
+   (`ltx25_backend._require_lora`/`ltx_loras.installed_path` fazem lookup
+   literal de arquivo), não a chave do catálogo (`"union-control-2.3"`) --
+   `FileNotFoundError` na 1ª tentativa. Fix: `ltx_loras.resolve(...)`.
+2. Resolução precisa ser múltipla de 64 (`reference_downscale_factor=2` do
+   union-control + compressão espacial 32x da VAE) -- 864x480 quebra com
+   `einops.EinopsError` DEPOIS de ~700s de amostragem, só no ÚLTIMO nó do
+   grafo (`480//2=240`, `240/32=7.5`). Fix: validação cedo em
+   `render_conditioned_shot()`; CLI passou a usar 768x512 por padrão.
+3. A pista "push" (inglês) colidia com "the camera pushes in slowly" --
+   boilerplate de MOVIMENTO DE CÂMERA presente em quase todo
+   `video_prompt`. Fez o shot de confronto dos piratas casar "esbarrão" em
+   vez de "discussão". Fix: removido o "push" isolado em inglês (mantido só
+   "empurra" em português, que não colide com o boilerplate).
+4. `_locate_still` usava `shot["position"]` (0-indexado POR CENA) para
+   montar o nome do still extraído, mas os arquivos reais
+   (`intermediate/_verify_frames/sceneNN_shotMMM.png`) numeram MMM pelo
+   índice GLOBAL na lista `shots` inteira -- só coincide na PRIMEIRA cena do
+   roteiro. Cena 5 dos piratas: `position=1` mas índice global=11 ("nenhum
+   still encontrado -- pulando render"). Fix: `find_interaction_shots`
+   anexa `shot["_global_index"]` via `enumerate()`.
+
+**Resultado final, 4 gerações reais de LTX 2.5 completadas**: colégio
+(`decupagem_01_encontro_corredor`, "corredor da escola" -- não há run
+chamado literalmente "colégio") cena 1 pos 1 (esbarrão, 65 quadros, 519s) e
+pos 2 (fala logo depois, 89 quadros, 124s); piratas
+(`decupagem_04_direito_de_saque`) cena 5 pos 1 (confronto, 41 quadros,
+214s); mais o teste isolado do item 2 (65 quadros, 449s). Relatórios em
+`outputs/*/motion_director/director_report.json`. 17 testes em
+`tests/test_motion_director.py`, todos sem GPU.
+
+**Fora do escopo pedido**: não houve tentativa de religar os 3 clipes novos
+no `movie.mp4` final de cada filme -- ficam standalone em
+`outputs/*/motion_director/*_conditioned.mp4`. A licença CC BY-NC-SA 4.0 do
+InterGen (não-comercial) vale para todo movimento gerado por este diretor.
+
+## 3.91 Caminho MiniMax do `motion_director`, validado com GPU real (2026-09-18)
+
+Pergunta do usuário ("vale para o minimax?") levou a escrever
+`render_conditioned_shot_minimax()` em `motion_director.py` -- equivalente
+ao caminho LTX, mas usando `minimax_h3_backend.generate(control_video=...)`
+(§3.88) em vez de IC-LoRA. Diferenças do caminho LTX: guia de movimento via
+`motion_to_h3_controlnet.render_h3_control_video()` (grade própria do H3,
+não a do LTX); identidade via `ref_images=[still]` (H3 não tem I2V como o
+LTX); `duration_seconds` em vez de `num_frames` (o grafo arredonda sozinho
+pro `17n+5` mais próximo -- a contagem real de saída nunca bate exatamente
+com a do LTX no mesmo shot). `--engine {ltx,minimax}` no CLI escolhe.
+
+**Validado com GPU real a pedido do usuário** ("valide com gpu real"),
+achando e corrigindo 1 bug real ANTES do teste de performance render:
+`aspect_ratio="16:9"` explícito quebrava com HTTP 400 -- o node
+`ResolutionSelector` do H3 exige o RÓTULO COMPLETO do combo
+(`"16:9 (Widescreen)"`), não a sigla curta. Fix: remover o parâmetro (usa
+`minimax_h3_backend.DEFAULT_ASPECT`, que já tem o rótulo certo). Teste de
+regressão adicionado (`assert "aspect_ratio" not in called`).
+
+Com o fix, o teste real completou a amostragem (4 passos turbo,
+`int8convrot`) e serviu também para validar a hipótese pendente do §3.88 --
+resultado detalhado lá (mais rápido, mas quebra no `VAEDecode` por pressão
+de VRAM). Veredito: caminho de CÓDIGO correto e testado ponta-a-ponta até o
+penúltimo nó do grafo; H3 ControlNet continua bloqueado para produção pela
+mesma causa raiz de VRAM do §3.88. 18 testes em `tests/test_motion_director.py`.
+
 ## 7. Próximas etapas, por ordem de retorno
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
@@ -6519,20 +6765,43 @@ filme montado, do `prompt_polish` e do MiniMax H3. Itens fechados desde
 acima se precisar do histórico completo. Item 15 acrescentado em 2026-08-30.
 Item 17 acrescentado em 2026-09-06, depois do comparativo GGUF/checkpoint
 do §3.62. Item 18 acrescentado em 2026-09-07, ideia de API hospedada pro
-enriquecimento (§3.66/§3.67).)*
+enriquecimento (§3.66/§3.67). P0 reescrito em 2026-09-18 depois do diretor de
+movimento (§3.87-3.91).)*
 
-### P0 -- estado em 2026-09-16, para quem abrir uma sessão nova
+### P0 -- estado em 2026-09-18, para quem abrir uma sessão nova
 
-**Segunda auditoria de scripts concluída e corrigida (§3.86), AINDA NÃO COMMITADA.** 18 dos
-20 achados corrigidos nesta sessão (A10 e A15 parciais, ver §3.86); `pytest tests/` continua
-60 passed. Confirme o escopo com o usuário antes de commitar (`git status` mostrava trabalho
-de feature já em andamento -- encadeamento LTX/MiniMax, `--minimax-no-still`,
-`--ltx-no-still` -- misturado às correções da auditoria nos mesmos arquivos; não são a mesma
-mudança, mas tocam os mesmos arquivos e por isso não dá para separar em dois commits sem
-reescrever o diff à mão).
+**Diretor de ação/movimento concluído e validado (§3.87-3.91), AINDA NÃO COMMITADO.**
+`motion_director.py` liga InterGen -> `pose_video.py` -> LTX (IC-LoRA Union-Control) ou
+MiniMax H3 (ControlNet), 3/3 planos reais renderizados com sucesso em produção (piratas +
+colégio) pelo caminho LTX. 8 achados da auditoria externa de movimento/pose (§3.89) e 5 bugs
+reais achados só rodando com GPU de verdade (4 no caminho LTX + 1 no MiniMax, §3.90/3.91)
+foram corrigidos e testados (`pytest tests/` -- ver contagem por arquivo em cada seção). O
+caminho MiniMax H3 do diretor está validado ATÉ o penúltimo nó do grafo -- o ControlNet do H3
+em si continua bloqueado por uma causa de VRAM agora bem diagnosticada (§3.88), não mais só
+"lento sem explicação".
+
+`git status` acumula `minimax_h3_backend.py`, `script_pipeline/character_sheet.py`,
+`generate_storyboards.py`, `motion_conditioner.py`, `motionbricks_headless.py`,
+`render_shots.py`, `tests/test_motion_conditioner.py` modificados, mais 11 arquivos novos
+(`motion_director.py`, `motion_command_geometry.py`, `motion_to_h3_controlnet.py`,
+`motionbricks_command_controller.py`, `motionbricks_scene_director.py`, `pose_video.py`, os
+testes correspondentes, e `AUDITORIA_MOVIMENTO_STILLS_2026-09-17.md`). Confirme o escopo com
+o usuário antes de commitar -- é trabalho de UMA sessão longa (várias frentes: MotionBricks,
+InterGen/Inter-X, MiniMax ControlNet, auditoria, diretor), mas coerente o bastante para
+provavelmente caber num commit só, ao contrário do caso do §3.86 (que misturava feature em
+andamento com correção de auditoria nos MESMOS arquivos).
+
+A segunda auditoria de SCRIPTS (§3.86, escopo diferente -- cache/concat/watchdog, não
+movimento/pose) segue igualmente não commitada, sem mudança desde 2026-09-16.
 
 Tudo da auditoria de scripts ANTERIOR (§3.85) está commitado (`a6e5941`). Nada rodando,
-servidores desligados. O que ficou com o usuário, em ordem:
+servidores desligados (o MiniMax H3 caiu sozinho via `atexit` depois do crash do §3.91; GPU
+livre, confirmado com `nvidia-smi`). O que ficou com o usuário, em ordem:
+
+0. **ControlNet do MiniMax H3 continua bloqueado** (§3.88/3.91) -- causa raiz agora é VRAM
+   insuficiente para UNET+ControlNet+VAE simultâneos (não mais "lento sem explicação").
+   Resolver de verdade exigiria reorçar memória dentro do grafo vendorizado -- fora do escopo
+   de uma correção pontual. O caminho LTX do diretor de movimento já cobre produção hoje.
 
 1. **Assistir uma cena inteira com o fluxo novo** (`run_decupagem --dialogue-framing auto
    --ate final`, emoção de fala + TTS com cache + SyncNet + relatórios 8b/8c). Tudo foi
@@ -6753,6 +7022,900 @@ Ver §6.2. E lembre de §3.11: derrubar outro processo para "liberar VRAM" já
 quebrou uma geração em curso -- mais VRAM livre faz o ComfyUI escolher
 estratégia mais agressiva, e ele bate no teto.
 
+### 3.92 — Voo 702: continuidade estrutural e referências externas (2026-09-18)
+
+A decupagem passou a carregar um contrato por plano em
+`script_pipeline/continuity_audit.py`. O contrato mantém `location_id`, o mesmo
+avião em voo, objetos persistentes e o elenco secundário da cena; a auditoria
+roda antes dos clipes e bloqueia a passada quando há deriva estrutural. O
+detalhamento operacional está em `script_pipeline/CONTINUIDADE_VOO702.md`.
+
+As fotos externas de JI-HO, SEO-YEON, HA-EUN e MIN-JUN entram em
+`characters/refs/` e no `cast.json`. O importador usa leitura por bytes para
+contornar a falha do OpenCV com caminhos Windows acentuados. O travamento da
+character sheet foi eliminado ao evitar geração redundante quando todos os
+personagens já possuem uma âncora; PILOTO e COPILOTO usam anchors gerados
+previamente.
+
 Documentos vivos: `CLAUDE.md` (configuração operacional verificada da máquina) e
 este `MEMORIAL.md` (por quê, histórico e o que vem depois). Quando divergirem,
 este é o mais recente.
+
+### 3.93 — Gate visual Qwen3-VL: a auditoria textual aprovava pixels errados (2026-09-19)
+
+**Causa raiz medida, não inferida:** o contrato textual do Voo 702 estava correto
+(`same aircraft`, `airborne`, `never on a runway`), mas os stills já contrariavam
+o contrato. Os planos externos 27–32 mostravam avião em pista, solo e trem de
+pouso; o próprio still 0 do cockpit mostrava a pista pelo para-brisa. O LTX animou
+uma base já errada e acrescentou deriva temporal. Portanto, trocar apenas o LLM de
+parse não resolveria.
+
+`continuity_audit.py` verificava presença de termos no prompt, não pixels. Como
+`airborne` e `in flight` estavam escritos, declarou `aircraft_in_flight=true`.
+`storyboard_audit.py` agregava InsightFace e rostos duplicados, sem semântica de
+locação, objetos, aeronave, texto queimado ou cobertura do falante. Também não
+existia gate visual entre os clipes e lipsync/montagem. Esta foi a falha que deixou
+o erro atravessar a cadeia.
+
+Foi criado `script_pipeline/visual_continuity_audit.py` e ligado de forma
+obrigatória em `run_decupagem.py`:
+
+1. depois dos stills e antes do animatic/vídeo;
+2. depois dos clipes e antes de lipsync, mixagem e montagem.
+
+O gate faz duas chamadas separadas. A primeira descreve os pixels sem conhecer o
+contrato; a segunda compara a percepção neutra com o contrato. A separação é
+necessária: quando requisito e imagem foram enviados juntos, o modelo confirmou o
+texto desejado mesmo diante de uma pista visível. Fatos simples recebem travas
+determinísticas: pista/solo ou rodas apoiadas nunca podem virar “airborne” na
+segunda chamada; legenda/watermark detectados não podem ser apagados pela decisão.
+
+Para vídeo, o auditor extrai primeiro, meio e último quadro. Em fala planejada como
+close, a referência nominal precisa continuar como sujeito principal nos três
+quadros; presença parcial na borda ou no fundo não basta. Cenas internas não
+precisam mostrar o avião inteiro, mas não podem mostrar pista/solo. Closes podem
+recortar objetos persistentes; o juiz não pode inventar estado (“carrinho deve
+estar guardado”) que o roteiro não declarou. Texto de instrumentos é diegético e
+não é tratado como legenda artificial.
+
+**Modelos testados e decisão final:**
+
+- `gemma4:latest` foi descartado. Embora anunciasse visão, nesta instalação ora
+  dizia não receber a imagem, ora descrevia cockpit e avião como pessoas e carros
+  em estacionamento; produziu falsos bloqueios.
+- `qwen2.5vl:7b` detectou corretamente o avião em pista e serviu para provar a
+  arquitetura, mas ficou apenas como alternativa leve.
+- `qwen3-vl:30b` foi baixado via Ollama (19 GB no catálogo, ~22 GB carregado,
+  100% GPU na RTX 3090) e virou padrão tanto da percepção quanto da decisão.
+  O payload limita contexto a 8192 e saída a 800 tokens. Algumas builds devolvem
+  JSON em `message.thinking` com `content` vazio mesmo com `think=false`; o cliente
+  aceita ambos os campos.
+
+**Validação real sobre a corrida Voo 702:**
+
+- still 11: HA-EUN confirmada contra a foto, cabine e voo sem pista — APROVADO;
+- still 27: avião no solo/pista — BLOQUEADO;
+- clipe 16: SEO-YEON deixa de ser o sujeito principal do close durante a fala —
+  BLOQUEADO após exigir proeminência, rosto claro e ausência de recorte nos três
+  quadros;
+- suíte focal: 16 testes aprovados (`test_visual_continuity_audit.py` +
+  `test_production_project.py`).
+
+CLI operacional:
+
+```powershell
+python -m script_pipeline.visual_continuity_audit --run-dir <RUN> --stage stills
+python -m script_pipeline.visual_continuity_audit --run-dir <RUN> --stage video
+```
+
+O `run_decupagem` usa `--visual-audit-model qwen3-vl:30b` e
+`--visual-perception-model qwen3-vl:30b` por padrão. `--no-visual-audit` existe
+como opt-out explícito de diagnóstico, não como caminho recomendado de produção.
+O vídeo já montado não foi regenerado nesta mudança; o novo fluxo impede que os
+mesmos ativos reprovados atravessem uma próxima corrida.
+
+### 3.94 — Descarregamento do Ollama no fim da corrida e da WebUI (2026-09-19)
+
+O `qwen3-vl:30b` permanecia residente por `keep_alive: 10m` depois da auditoria.
+Na RTX 3090 isso significava cerca de 22 GB ainda ocupados quando o próximo
+estágio tentava carregar FLUX ou LTX. Além do conflito durante a cadeia, terminar
+ou interromper uma corrida pela WebUI não liberava os modelos de texto que o
+Ollama ainda mantinha em RAM/VRAM.
+
+Foi criado `script_pipeline/ollama_runtime.py`. Ele consulta `/api/ps` e envia
+`POST /api/generate` com prompt vazio e `keep_alive: 0` somente para tags que
+estão realmente residentes. O servidor não é encerrado e continua pronto para a
+próxima execução. A limpeza é best-effort: Ollama desligado ou uma falha HTTP é
+registrada, sem esconder o código de saída original do pipeline.
+
+Os pontos de encerramento agora são:
+
+1. `visual_continuity_audit.py`, em `finally`, descarrega os modelos de percepção
+   e decisão configurados depois de cada gate;
+2. `run_decupagem.py`, em `finally`, descarrega qualquer modelo restante em
+   sucesso, bloqueio visual, erro ou Ctrl+C;
+3. `decupagem_ui.py`, ao terminar a corrida, no botão Parar e no `atexit` do
+   processo da WebUI.
+
+Validação: 18 testes focais passaram, incluindo consulta dos modelos residentes,
+payload `keep_alive: 0`, deduplicação e indisponibilidade do servidor. A suíte
+também confirma que uma tag ausente não recebe `/api/generate`, evitando que uma
+versão do Ollama carregue um modelo só para descarregá-lo.
+
+### 3.95 — Endurecimento do gate visual e camada de correção (2026-09-19)
+
+Auditoria do §3.93/3.94 e implementação dos 7 itens que ela deixou em aberto.
+O gate detectava bem os defeitos do vídeo do Voo 702, mas tinha bugs de lógica
+e só **detectava**: nada corrigia, e a montagem/áudio seguiam com os problemas.
+
+**Bugs do gate (todos reproduzidos com teste antes de corrigir):**
+1. Deriva de locação passava: `"cabin" in descriptions` olhava o texto dos 3 quadros
+   *juntos* (um quadro de cabine bastava); `same_location_across_targets` e
+   `same_primary_people_across_targets` eram pedidos ao VLM e nunca lidos. Agora a
+   locação vale para **cada** quadro e a deriva declarada bloqueia.
+2. `"cropped"` reprovava falante visível ("cropped hair"). Trocado por frases de
+   oclusão reais (`partially visible`, `cropped at`, `back to the camera`...).
+3. `identity_matches` com menos booleanos que referências passava. Agora exige um por foto.
+4. `--only-shots` regravava o relatório só com os planos pedidos e `status: ok`,
+   apagando a auditoria completa (por isso a aprovação do plano 11 não era
+   verificável); e qualquer erro isolado do auditor abortava o laço inteiro.
+   Agora o relatório **mescla por plano**, `status` é `ok|partial|blocked` sobre o
+   plano completo, e só falha global (imagem não recebida / 3 erros seguidos) interrompe.
+5. **Generalidade**: roteiros comuns não trazem `index` no `shot_plan.json` (só o modo
+   projeto grava). Todo plano virava `-1` e o gate — ligado por padrão — reprovaria
+   *qualquer* roteiro fora do Voo 702. Agora o índice é a posição no plano.
+
+**Camada de correção:**
+- `gate_retry.py` + `run_decupagem --visual-max-retries N` (padrão 2): o gate reprova →
+  só os planos reprovados são refeitos com outra seed (a seed entra na chave de cache do
+  still e do clipe, então o cache invalida sozinho) → reauditoria só deles →
+  `shots/visual_gate_<stage>_retries.json`. `--visual-unresolved {block,continue}`.
+  A passada é por lote (não por plano) para não trocar Qwen3-VL/FLUX/LTX a cada clipe.
+- `location_master.py`: o `render_shots` registra o **primeiro** still de cada locação como
+  referência (`location_refs.json`). No Voo 702, `LOC_SKY` apontava para `shot027_wide.png`
+  — o avião na pista que o gate reprovou. A referência errada contaminou os planos 28-32
+  e o gate passou a medir "consistência com o erro". Agora, ao reprovar o plano que é a
+  referência, ela é descartada e os planos posteriores da locação entram na regeneração.
+- `speech_split.py` + `shot_plan --max-speech-seconds` (padrão 6, 0 desliga): fala longa vira
+  vários planos do **mesmo falante em close**, com o áudio recortado num silêncio
+  (`silencedetect`) e `audio_window` no plano. Consumidores usam `dialogue_entry()`.
+  Dados reais do Voo 702: 6 falas > 6 s (até 17,7 s) → 60 planos viram 69, segmentos de
+  áudio ≤ 6 s (+0,6 s de folga). Causa do lipsync: `LatentSync: Face not detected` — o
+  falante saía de quadro nas falas longas (§ avaliação do vídeo).
+- `lipsync_scenes`: detecta rosto antes de sincronizar; sem rosto pula com
+  `lipsync_skipped: no_face`, e o resumo diz alto quantos clipes de FALA ficaram sem lip-sync
+  (`lipsync/lipsync_skipped.json`). Antes era `lipsync_applied=false` em silêncio.
+- `visual_continuity_audit.face_check`: trava **numérica** (insightface/ArcFace, CPU) —
+  rosto em todos os quadros do falante e similaridade com a foto nominal ≥ 0,35. Só
+  **aperta** a decisão do VLM, nunca a afrouxa. No clipe 16 real: 3/3 quadros com rosto,
+  similaridade com Seo-yeon **0,008** — outra pessoa, confirmando o veredito do VLM.
+- `assemble_final`: master de áudio por padrão (loudnorm em 2 passadas + limiter,
+  -16 LUFS / -1,5 dBTP); também aplicado a `entregas/` em `production_post.conform_movie`.
+  Filme real do Voo 702: -12,81 LUFS / +3,90 dBTP → **-16,05 / -2,04**.
+  `--no-master`, `--room-tone-db` (ambiência contínua opcional, desligada).
+- `render_shots_stage`: passada parcial (`--only-shots`) agora **mescla** `scenes/clips.json`.
+  Bug meu, achado nesta auditoria: um teste anterior com `--only-shots` reduziu o manifesto do
+  run do colégio a 1 clipe (restaurado a partir dos clipes em disco; `shot001.mp4` do colégio
+  segue sendo o clipe Wan daquele teste, o LTX original foi sobrescrito).
+- `production_post.audio_stems`: o stem de diálogos usa o recorte do plano e o mesmo ponto de
+  entrada que o `mux_audio` (antes ignorava a centralização da fala no plano).
+
+**Aplicabilidade a outros roteiros:** gate, regeneração, divisão de fala, lipsync, master e
+manifesto são genéricos. Específicos do Voo 702: regra de aeronave (opt-in por título em
+`voo702_setup.py`) e as travas `LOC_CABIN/COCKPIT/SKY`; outro roteiro passa
+`continuity_contract["location_keywords"]` ou cai na consistência entre quadros + referência.
+
+**Não resolvido / limites:**
+- **J/L cut de verdade não existe**: exige áudio *além* das bordas do plano (margem/handle),
+  que a geração não produz. Feito só o room tone contínuo opcional.
+- Prompt negativo ("subtitles, captions") **não** funciona nas variantes destiladas do LTX
+  (CFG 1) nem no FLUX Klein; a defesa é o gate + regeneração (e `--post-strip-subtitles`).
+- Segmentos de uma mesma fala usam o mesmo still (mesmo prompt) — vira corte quase idêntico;
+  variar o ângulo por segmento exige reconstruir os prompts.
+- Nada disto foi rodado com GPU/Qwen3-VL numa corrida completa; validado por testes
+  (`tests/test_gate_hardening.py`, 29) e por dados reais do Voo 702 em cópia/temporário.
+
+### 3.96 — Estado espacial 3D integrado à decupagem WebUI e animatic do Voo 702 (2026-09-19/20)
+
+O plano de `PLANO_ESTADO_CENA_3D.md` saiu do desenho e ganhou uma implementação
+opt-in. O objetivo não é substituir FLUX ou LTX: é fornecer a eles uma fonte
+persistente de verdade para locação, posição, câmera, objeto, pose e continuidade
+entre planos. Projetos antigos continuam no caminho anterior enquanto não recebem
+um spec espacial explícito.
+
+**Camadas implementadas:**
+
+- `world_store.py`: SQLite com assets versionados, estados imutáveis, eventos
+  transacionais, snapshots e bindings por ID estável de plano;
+- `camera_geometry.py`: câmera perspectiva Z-up em metros, projeção, frustum e
+  sockets de attachment;
+- `blender_scene_worker.py` + `scene_composer.py`: blocking procedural no Blender,
+  beauty, depth métrico, normais, máscaras de instância e pose COCO-18, com
+  verificação numérica contra a projeção real do Blender;
+- `spatial_conditioning.py`: adaptação do beauty RGB para FLUX.2 Klein por img2img
+  e `ReferenceLatent`. Os passes depth/mask/pose são exportados, mas esta receita
+  ainda não os injeta como ControlNet;
+- `spatial_pipeline.py`: preparação, blocking, stills inicial/final, vídeo LTX,
+  gates, cache por conteúdo, auditoria e relatório;
+- `spatial_audit.py`, `spatial_report.py` e `spatial_ui.py`: inspeção separada e
+  interface de diagnóstico;
+- `voo702_spatial.py`: compilador do `shot_plan.json` para as locações
+  `LOC_COCKPIT`, `LOC_CABIN` e `LOC_SKY`, com PILOTO, COPILOTO, JI-HO, SEO-YEON,
+  HA-EUN, MIN-JUN e os carrinhos como entidades persistentes.
+
+**Integração na cadeia principal.** `generate_storyboards.py` e
+`render_shots.py` consomem o bundle espacial quando ele está presente.
+`run_decupagem.py` ganhou `--spatial-spec` e `--spatial-denoise`; a ponte
+`attach_to_run()` exige projeto mestre persistente, motor de imagens `flux` e
+cobertura exata de todos os IDs únicos do plano. Bindings estáticos entram na
+decupagem comum. Eventos que mudam o estado entre início e fim permanecem no
+runner temporal de `spatial_pipeline.py`, porque o estágio padrão ainda não
+consome os dois endpoints.
+
+`decupagem_ui.py` expõe isso no acordeão **Continuidade espacial 3D (opcional)**:
+ativação, caminho do spec, força de transformação e **Animatic diagnóstico**.
+O último encaminhava `--no-visual-audit` — que na verdade **desligava** o gate; corrigido em
+§3.99 para `--visual-diagnostic` (roda o gate, não bloqueia, para no animatic).
+
+**Piloto técnico anterior.** `outputs/spatial_pilot_20260919/` gerou quatro
+planos de cinco segundos com LTX, total exato de 480 frames/20 s. Como parte dos
+stills não passou no gate, `verification.json` registra
+`visual_approval: bypassed_for_diagnostic`. Isso é evidência de execução e
+movimento, não aprovação estética.
+
+**Teste pela rota da WebUI com o roteiro de emergência do Voo 702.** A função
+`decupagem_ui.rodar()` foi usada com o mesmo conjunto de argumentos produzido
+pela interface: FLUX, LTX, resolução de prévia 384×256, parada em `animatic`,
+spec espacial e modo diagnóstico. Para manter o teste curto, a corrida foi
+recortada para os cinco primeiros planos e o último foi ajustado para fechar
+20,000 s. O resultado em
+`outputs/decupagem/20260919_073649_VOO_702_-_CÉU_TURBULENTO/shots/animatic.mp4`
+tem 480 frames a 24 fps, cinco planos e três falas. `animatic_audit.json` ficou
+`status=ok`, duração planejada e realizada de 20,000 s, zero still ausente e
+3/3 falas aprovadas. O quadro de inspeção confirmou cockpit, dois pilotos e
+painel. A suíte focal terminou com **21 testes aprovados** em
+`tests/test_spatial_pipeline.py`.
+
+**Dois cuidados descobertos rodando de verdade:**
+
+1. Reexecutar a cadeia inteira sobre uma corrida pronta recalculou
+   `shot_plan.json` e ficou aguardando o planejador, embora os artefatos já
+   existissem. Para retomar um teste, preserve o plano e chame a etapa necessária;
+   não use a corrida de produção como rascunho descartável.
+2. `conform_plan()` produziu IDs repetidos para segmentos derivados da mesma fala.
+   A ponte espacial recusou corretamente o plano, pois bindings ambíguos não são
+   seguros. No smoke test os IDs repetidos receberam sufixos determinísticos
+   (`_02`, `_03`...). A correção estrutural pendente é gerar esses IDs únicos no
+   próprio conformador antes de criar o spec.
+
+Na corrida de teste, o plano integral de 69 planos foi preservado como
+`parse/shot_plan.full.json`. O recorte de cinco planos desse primeiro teste foi
+preservado depois como `parse/shot_plan.cockpit20.json`; o recorte ativo é o teste
+de cabine descrito no §3.97. A documentação operacional está em
+`script_pipeline/SPATIAL_PIPELINE.md` e o contrato do filme em
+`script_pipeline/CONTINUIDADE_VOO702.md`.
+
+### 3.97 — Auditoria espacial corrigida e teste de cabine com referências nominais (2026-09-20)
+
+O animatic inicial do §3.96 não sustentava identidade nem cenário: os cinco planos
+compartilhavam a mesma câmera, `denoise=0,95` destruía a geometria e o gate tratava
+“nenhum rosto detectado” como sucesso. A rodada corretiva separou estado semântico de
+estado de render, criou câmera por enquadramento/sujeito e tornou ausência de rosto uma
+falha em close espacial.
+
+O blocking do cockpit e da cabine foi ampliado com paredes, piso, teto, painel,
+radares, bancos, fileiras de assentos, janelas, bagageiros, corredor, galleys e
+carrinhos em coordenadas persistentes. Close mostra apenas o sujeito; medium/OTS
+mostra os participantes nomeados; wide/full usa o elenco da locação. Essa seleção
+não apaga entidades do mundo.
+
+O primeiro reteste com img2img a `0,65` preservou demais o manequim procedural. A
+receita final usa dois modos: `img2img` nos planos abertos e `reference` nos closes.
+No segundo, o ambiente entra na base da cadeia `ReferenceLatent` e a foto nominal
+fica por último. O prompt de close remove a cláusula explícita do parceiro, mas mantém
+o contrato da locação. A WebUI passa `--reuse-plan`, impedindo que uma retomada
+recalcule a decupagem estável.
+
+Também foi corrigido um falso gate: `visual_continuity_audit` usava o campo `index`
+do plano-fonte para localizar `shotNNN`, enquanto `render_shots` nomeia pela ordem do
+recorte. O teste de cabine gerava `shot000`–`shot003`, mas o gate lia stills antigos
+14–17. A auditoria agora usa a ordem atual e preserva o índice-fonte apenas como
+metadado.
+
+Teste final via `decupagem_ui.rodar()`: quatro planos contíguos da cabine, 384×256,
+24 fps, 480 quadros editoriais e 20,000 s. Referências externas: HA-EUN, MIN-JUN,
+JI-HO e SEO-YEON. Três planos passaram na primeira auditoria; HA-EUN foi regenerada
+seletivamente e passou com ArcFace 0,385. Resultado final:
+
+- `shots/visual_stills_audit.json`: `status=ok`, 4/4;
+- `shots/animatic.mp4`: 20,000 s;
+- `shots/animatic_audit.json`: `status=ok`, zero still ausente, 3/3 falas;
+- `world/voo702_cabin20_spatial_spec.json`: spec do teste;
+- 49 testes focais aprovados (`spatial`, `production_project`, `visual_continuity_audit`).
+
+O animatic também revelou que `amix` prolongava o arquivo quando uma fala ultrapassava
+o último plano. `render_shots.animatic()` agora limita a saída à duração editorial. No
+recorte final, a tomada OTS cedeu 24 quadros ao close falado, mantendo 480 quadros e a
+fala inteira dentro do plano. O vídeo final LTX de todos os planos continua fora do
+escopo desta validação.
+
+### 3.98 — Auditoria do estado espacial (§3.96/3.97) e animatic com still errado (2026-09-20)
+
+Auditoria dos artefatos do teste de cabine do Voo 702
+(`outputs/decupagem/20260919_073649_…`) e das atualizações espaciais.
+
+**Confere:** relatórios (`visual_stills_audit` ok 4/4, `animatic_audit` ok, 3/3 falas,
+20,000 s, 480 quadros editoriais), spec cobrindo exatamente os 4 IDs do plano, e a suíte
+(257 testes) passando.
+
+**Achado principal (bug meu, também nos animatics que eu tinha enviado):**
+`render_shots.animatic()` escolhia o still por `sorted(glob("shotNNN_*.png"))[0]`, não pelo
+manifesto `stills.json` que o gate audita. Sobras de planos anteriores com outro
+enquadramento (`shot002_close.png` ao lado de `shot002_ots.png`) vinham primeiro na ordem
+alfabética. Efeito medido: no run do Voo 702 de 68 planos, **23 planos** do animatic usavam
+still diferente do auditado; no teste de cabine de 4 planos, o plano 2 (OTS Ji-ho/Seo-yeon)
+mostrava um **cockpit com dois homens**, e o animatic "aprovado" não continha a imagem que o
+gate viu. Corrigido com `render_shots.still_candidates()` (manifesto primeiro, glob só como
+reserva), aplicado também em `clip_identity_audit` e `lora_ab`; teste de regressão. Os
+animatics do run 20260918 (FLUX e Z-Image) foram refeitos. **O run 20260919 não foi
+tocado**: o animatic dele ainda tem o still errado no plano 2 e precisa ser refeito.
+
+**Lacunas registradas, não corrigidas:**
+- O modo "Animatic diagnóstico" da WebUI encaminha `--no-visual-audit`, que **não roda o
+  gate** (não "mantém o relatório") e não impede `--ate final` de renderizar vídeo e montar
+  sem nenhum gate. O texto da UI/MEMORIAL §3.96 promete o contrário. Deveria limitar `--ate`
+  a `animatic` e rodar o gate com `--visual-unresolved continue`.
+- `spatial_audit.py` tem prompt específico do piloto (porta, banco, livro); a identidade é só
+  por roupa e "sem legenda" fica com o LLM (sem as travas de texto/rosto do gate principal).
+- Regra de objetos do gate principal (`_object_visible`) casa palavras genéricas
+  ("seated", "right"): um cockpit pode satisfazer o inventário de cabine.
+- `location_master.dependents` usa `shot["index"]`; com plano recortado, `index` ≠ posição.
+- `stills.json` e a pasta `stills/` acumulam entradas de planos antigos (26 entradas para 4
+  planos); `animatic_preview.jpg` do run é do teste anterior (cockpit).
+- §3.96 diz que os IDs repetidos do `conform_plan` são pendência; o código já os torna
+  únicos (`id_occurrences`) — documentação defasada.
+- 384×256 e ArcFace 0,32–0,39 nos closes aprovados: margem estreita sobre o limiar 0,35.
+
+
+### 3.99 — Correções da auditoria §3.98 e teste do Qwen2.5-VL como auditor (2026-09-20)
+
+**Corrigido (todos com teste em `tests/test_gate_hardening.py`, 264+ testes passando):**
+- Modo diagnóstico: `run_decupagem --visual-diagnostic` roda o gate, grava o relatório, força
+  `--visual-unresolved continue` e `--visual-max-retries 0`, e **recusa** `--ate` além de
+  `animatic`; não combina com `--no-visual-audit`. O checkbox da WebUI passou a usá-lo.
+- `spatial_audit.py`: prompt sem porta/banco/livro (genérico: `key_objects`, `text_kind`,
+  "held object"); travas deterministas que o LLM não contorna — legenda/marca d'água/texto
+  ilegível reprova; em close com foto nominal, similaridade ArcFace < 0,35 reprova; avisos de
+  similaridade marginal e de imagem < 640 px (também no relatório do gate principal:
+  `warnings`). ffmpeg via `LTX_FFMPEG`.
+- Gate principal: cockpit nunca satisfaz `LOC_CABIN` (e vice-versa, `LOCATION_FORBIDDEN`);
+  palavras genéricas ("seated", "right", "rows"...) não casam mais o inventário de objetos.
+- `location_master.dependents` usa a posição (nome `shotNNN`), não `index`.
+- `render_shots.prune_stale_stills` (chamada ao fim de toda passada completa de stills): move
+  para `stills/_stale/` os arquivos e entradas de manifesto de planos que o plano atual não
+  usa — nada é apagado. Aplicado ao run 20260919 (26 arquivos, 22 entradas) e o animatic dele
+  foi refeito (antes: `animatic_antes_da_correcao.mp4`).
+- `animatic_audit` confere existência do still pelo manifesto.
+- `spatial_pipeline._single_subject_prompt`: a regex removia tudo entre o PRIMEIRO "with" do
+  prompt e ". positioned" (reduzia o prompt a "Cinematic frame positioned on the left.");
+  agora remove só a cláusula do parceiro. Latente — o fixture dos testes escondia o defeito.
+- Imports não usados (ruff F401) removidos; F821/F811/F841/B006 limpos nos scripts novos.
+
+**Teste do "qwen2.1" (não existe; interpretado como `qwen2.5vl:7b`, o único Qwen-VL leve
+instalado) contra `qwen3-vl:30b`**, 9 stills do Voo 702 com resposta conhecida (5 corretos,
+4 defeituosos: cabine no lugar do cockpit, cockpit no lugar da cabine, foto de referência sobre
+fundo branco, avião na pista), mesmo código de gate endurecido:
+- `qwen3-vl:30b`: **9/9**, 131 s (~15 s/plano; MoE de ~3B ativos, por isso não é lento);
+- `qwen2.5vl:7b`: **5/9**, 90 s — **reprova 4 de 5 stills bons** e acerta os defeituosos por
+  motivos errados ("not a still image", "no target images are seen"): não segue o protocolo de
+  várias imagens (alvo + referências). Veredito: **manter `qwen3-vl:30b`**; o 7B não serve nem
+  como pré-filtro (80% de falso bloqueio).
+
+**Reanálise dos scripts espaciais (não corrigido, registrado):** `demo_spec()` e o roteiro fixo
+de `prepare()` são código de piloto; `spatial_pipeline.stills()/video()` usam semente fixa
+(8472) e ficam fora do mecanismo `seed_overrides.json`/`gate_retry`; `spatial_planner`,
+`voo702_spatial`, `spatial_ui` e `scene_state_planner` só tiveram leitura superficial.
+`camera_geometry`, `scene_composer`, `spatial_conditioning` e `world_store` revisados sem
+defeito de lógica encontrado.
+
+### 3.100 — Qwen-Image-2.1 no pipeline: corrida do Voo 702 e teste das capacidades nativas (2026-09-21)
+
+Motor instalado isoladamente (`E:\Users\home\Documents\Qwen-Image-2.1`, diffusers, 33 GB, `enable_model_cpu_offload`,
+porta 8192) e ligado como `--image-engine qwen-image-2.1`. **Licença: Qwen Research License — só uso não comercial
+(pesquisa/avaliação); comercial exige licença à parte** (`model-business@notice.qwencloud.com`); exige "Built with
+Qwen" se saídas treinam outro modelo; cláusula de indenização. Mesmo cuidado do InterGen.
+
+**Corrida completa (Voo 702, 68 planos, 960×544, 30 passos):** gate visual **68/68 na primeira passada**, 0
+regenerações; ArcFace nos 37 closes: média **0,823** (mín. 0,563, máx. 0,959) contra FLUX 0,37–0,57 e Z-Image
+0,10–0,31; 36,9 s/still (43 min os 70). Animatic 300,000 s, 25/25 falas. Fraquezas vistas: não respeita "close"
+(planos 32 e 49 saíram como dois-shot médio; o FLUX obedece melhor o enquadramento) e copia expressão (sorrindo para
+a câmera) e roupa da foto de referência. Arquivo em `_qwen_image21_20260921/` (com a folha FLUX×Z-Image×Qwen).
+
+**Capacidades nativas testadas pela ponte local** (`_qwen_image21_20260921/capacidades/`):
+- **RGBA nativo — funciona**: aeronave recortada, 89,7% transparente, 71 s; extração de sujeito de foto: RGBA
+  (55,9% transparente) mas com clareados/washed em roupa branca sobre fundo branco. **Todas as saídas do servidor
+  são PNG RGBA**, mesmo as opacas (alfa 0%).
+- **Edição com identidade + emoção — funciona bem**: still de dois personagens → "assustada/tensa, olhos
+  arregalados", ArcFace 0,54/0,53 mantidos, mesma cabine e uniformes, 39 s. Resolve a expressão "posada" do
+  Qwen em duas etapas (gerar identidade fiel → editar emoção).
+- **Folha de 3 vistas (frente/perfil/costas)** da Ha-eun em uniforme: excelente, 74 s a 1536×864 — candidato
+  direto a substituir a geração de character sheet.
+- **1920×1088** com 2 refs: 132 s (≈3,6× o custo de 960×544), identidade 0,86/0,80. Teto do servidor = 2048 por
+  lado (o recomendado 16:9 2752×1536 não é atingível).
+- **Texto exato**: "EXIT" saiu certo; "FASTEN SEAT BELT" e "19" não apareceram (várias strings = parcial).
+- **Edição local por círculo**: entendeu (círculo removido, resto preservado), mas o teste não provou remoção de
+  objeto específico. **Por máscara (2ª referência) falhou** com a convenção usada: a região preta virou preta.
+- **Panorama** a partir de um still: composição fisheye dupla distorcida — pouco utilizável como referência de locação.
+- **Prompt rewriting (PE-T2I/PE-I2I, Qwen3.5-VL 9B)**: não instalado, não testado.
+
+**Limite de VRAM (achado mais importante):** com cpu-offload na 3090, **2 refs 43 s, 3 refs 52 s, 4 refs a
+640×352 287 s, 4 refs a 960×544 > 600 s, 5 refs a 960×544 > 4 h** (24 GB a 100%, cada passo mais lento). O servidor
+atende um pedido por vez e **não cancela**: uma geração presa segura o lock e todo pedido seguinte espera. Isso
+invalidou uma bateria de 10 testes (5 h) até eu derrubar o servidor. O README anuncia "até 10 referências"; nesta
+máquina o prático é **3**.
+**Prompt:** com duas fotos e um prompt genérico ("os dois comissários") o modelo colapsou as identidades (duas
+Seo-yeon; ArcFace de Ji-ho 0,085) — é preciso amarrar cada referência a um papel; e o figurino vem da foto
+(camisa bordô, blazer verde) a menos que o prompt fixe o uniforme.
+
+**Feito:** `qwen_image21_backend.py` ganhou `MAX_REFERENCES=3` (trunca com aviso) e `DEFAULT_TIMEOUT=420`; em
+timeout reinicia o servidor (`gpu_watchdog.free_port`) — antes eram 1800 s por still preso.
+**Recomendações não implementadas:** edição de emoção como 2ª passada; 3 vistas para o character sheet; RGBA para
+aeronave/props em `production_post`; regenerar reprovados por edição em vez de resemear; PE models só depois de A/B
+contra os prompts de contrato; máscara exige descobrir a convenção do modelo.
+
+### 3.101 Qwen-Image-2.1 GGUF via ComfyUI (porta 8193) — o limite de referências some (2026-09-21)
+
+Instalação `E:\Users\home\Documents\Qwen-Image-2.1\ComfyUI` (ComfyUI 0.37 + ComfyUI-GGUF, venv próprio) com
+`abenzerps/Qwen-Image-2.1-GGUF`: transformer Q4_K_M (4,6 GB) e Q8_0 (7,6 GB), encoder `qwen3vl_8b_int8_convrot`
+(9,35 GB), VAE bf16. Backend `qwen_image21_comfy_backend.py` (mesma interface `generate/edit`; refs por
+`<imageN>`, `reference_roles`, `ref_resolution`, `/interrupt` real ao estourar timeout).
+
+MEDIDO na 3090, 960x544, 25 passos, refs = retratos do Voo 702 (pico de VRAM pelo nvidia-smi):
+
+| config | tempo | pico VRAM |
+|---|---|---|
+| Q4_K_M, sem ref | 37,5 s | 14,3 GB |
+| Q4_K_M, 2 refs | 43 s | 20,3 GB |
+| Q4_K_M, 3 / 4 / 5 refs | 81 / 95 / 113 s | 16,9 / 17,5 / 18,0 GB |
+| Q4_K_M, 5 refs, `ref_resolution=512` | **40 s** | 18,4 GB |
+| Q8_0, 4 refs | 89 s | 20,4 GB |
+| cache `cpu`+`int8` | FALHA ("aimdo memory compile error") | — |
+
+Contra o servidor diffusers+offload (8192): 4 refs @960x544 estourava 600 s e 5 refs travou >4 h; aqui 5 refs
+fecham em 113 s (40 s com refs a 512) e saem 5 identidades distintas na mesma cena. **Risco de VRAM: baixo** (pico
+≤20,4 GB de 24,5; o primeiro ref de 2 refs é o pico por carga do encoder). Não deixar residente junto do
+FLUX/LTX/Ollama (mesma 3090). Não use `QwenImage21Cache` cpu/int8 (falha). Q8_0 não ganha tempo do Q4_K_M e pesa
++3 GB: padrão Q4_K_M (`QWEN21_GGUF` troca). Qualidade Q4 vs Q8 e integração do motor na decupagem (ainda usa 8192)
+NÃO avaliadas. Licença Qwen Research = não comercial.
+
+**Ligação na decupagem (2026-09-21):** `qwen_image21_engine.py` escolhe o backend por `QWEN21_ENGINE` (`comfy` = padrão,
+GGUF 8193; `diffusers` = 8192 antigo). Stills, reparo/emoção por edição, folha de 3 vistas e liberação de VRAM (gate,
+estágio de vídeo: derrubam as DUAS portas) passam por ele; `generate_rgba` segue no diffusers (alfa no SaveImage do
+ComfyUI não validado). `edit` no ComfyUI usa `ref_resolution=0` (mantém o tamanho da imagem: 960x544 em 36 s; com
+1024 saía 1376x768 em 57 s). Edição de expressão validada em GPU real pelo engine.
+
+### 3.102 Quatro defeitos da auditoria 2026-09-21 corrigidos
+
+1. `gate_retry.py`: regeneração agora chamada com `obrigatorio=True` (o `run_step` é local à função,
+   não aborta a corrida) para o retorno dizer a verdade; se falhar, a rodada NÃO reaudita o still
+   velho (some `regen_failed: true` no round). Antes `passo(obrigatorio=False)` sempre devolvia
+   `True` e o retorno era descartado — uma regeneração que crashava consumia uma rodada de
+   `max_retries` reauditando a mesma imagem reprovada.
+2. `production_post.py`: `_pair_by_id()` substitui `zip(plan['shots'], edit['shots'])` em
+   `audio_stems`/`conform_movie` — casa pelo `id` do plano, não pela posição na lista. Sem isso, um
+   plano reconformado (reordenado/adicionado/removido) depois da timeline existir cruzava plano
+   errado com tomada errada em silêncio.
+3. `production_post.py::audio_stems`: quando o plano NÃO tem `audio_window` (o caso comum — só fala
+   longa dividida ganha janela), o stem agora mede a duração real do wav (`_audio_seconds`) e
+   centraliza igual ao `mux_audio` real (`render_shots.py`). Antes usava `lead=0`/`duration=span`
+   (duração do plano inteiro), e o stem exportado saía dessincronizado do vídeo final.
+4. `qwen_image21_comfy_backend.py`: as referências copiadas para `ComfyUI/input/` (nomes `uuid4`)
+   agora são apagadas em `finally` depois de cada `generate`/`edit`. Antes acumulavam sem limite.
+
+4 testes de regressão novos (`test_regen_failure_is_not_silently_reaudited`, `test_pair_by_id_...`,
+`test_audio_stems_measures_real_duration_without_window`); suíte completa: 279 passed.
+
+### 3.103 Pipeline completo via WebUI com Qwen-Image-2.1 (2026-09-21/22) — validado ponta a ponta
+
+Roteiro de 40s ("O Despertar das Runas", alta-fantasia, 2 personagens, 4 falas), rodado por
+`decupagem_ui.py` (motor de imagem `qwen-image-2.1`, LTX 2.5 `w4a8-v10`, TTS `auto`→xtts).
+14 planos, `--ate final`. Filme final: 1021 frames @ 24 fps (~42,5s), `verify_output` OK.
+
+Três problemas reais achados rodando de verdade (nenhum é do Qwen-Image-2.1 em si):
+
+1. **`qwen2.5:32b-instruct-q4_K_M` no Ollama falhou com HTTP 500** nas duas primeiras tentativas de
+   enriquecimento do parse (~8-11 min cada) porque o Fish Speech (TTS, ~22 GB) estava residente na
+   3090 ao mesmo tempo — o Ollama split o modelo entre as duas GPUs (3090+4070) e o `llama-server`
+   deu timeout na descoberta de GPU (`GPU discovery watchdog timed out`, log do Ollama). Encerrar o
+   Fish Speech antes do parse (ele só é necessário no estágio 4/TTS) resolveu na 3ª tentativa.
+   **Isso não estava documentado**: CLAUDE.md diz para subir o Fish Speech "antes de qualquer
+   corrida", mas não avisa que ele disputa VRAM com o Ollama durante o PARSE, que roda antes do TTS.
+2. **`continuity_audit.py` (`render_shots_stage.py`, `block_on_missing=True`) bloqueava TODO plano**
+   de um roteiro avulso sem projeto mestre: `location_id`/`continuity` só são preenchidos pelo
+   `shot_plan.py` quando existe location bible (`biblia/locacoes.json`) vinculada a um projeto
+   persistente — um roteiro colado direto na decupagem nunca ganha esses campos, e o gate exigia
+   os dois em TODO plano. Corrigido tornando a checagem opt-in (mesmo padrão já usado para
+   `AIRCRAFT_TERMS`): só bloqueia por `location_id`/`continuity` ausente quando ALGUM plano do
+   roteiro carrega `location_id` (ou seja, o projeto pretende usar contratos formais). Teste de
+   regressão: `test_continuity_audit_is_opt_in_when_project_has_no_location_contracts`.
+3. **`visual_continuity_audit.py` bloqueou 1/14 planos (close de LYRA) por `location_match`**, sem
+   exceção para close-ups (que legitimamente não mostram o ambiente) — 2 rodadas de regeneração/
+   reparo por edição não resolveram. Contornado com `--visual-unresolved continue` (flag já
+   existente); **não investigado se merece a mesma exceção que `persistent_objects`/`out_of_frame`
+   já tem para close/extreme_close/insert** — ficou pendente.
+
+Também corrigidos na mesma sessão (achados de uma auditoria externa, `MEMORIAL.md` §3.102):
+regeneração do gate que ignorava falha do subprocesso (`gate_retry.py`), plano×timeline casado por
+posição em vez de ID (`production_post.py`), stem de diálogo sem medir a duração real do áudio
+quando não há `audio_window`, e referências do Qwen-Image-2.1/ComfyUI nunca apagadas do
+`ComfyUI/input/`. Suíte completa: 280 passed.
+
+### 3.104 Comparação de motores de TTS quanto a emoção (2026-09-22)
+
+Mesmas 4 falas do §3.103 (medo, calma, angústia, entusiasmo) sintetizadas nos 3 motores:
+
+- **xtts** (usado no filme): clona o TIMBRE de um take emotivo por emoção (17 takes/personagem,
+  `pick_take`/`emotive_voice`), mas a "atuação" do take é herdada só do áudio de referência (3-8s);
+  a modulação própria do pipeline é só `speed`/pausa entre frases (ver §CLAUDE.md "dois canais").
+  Não há controle textual de prosódia -- o XTTS não aceita instrução de emoção, só o clone.
+- **fish** (Rich Emotion Library): usa a MESMA referência emotiva do xtts + tag `[panting]`,
+  `[sigh]`, `[excited tone]` etc. no texto (`EMOTION_TO_FISH_TAG`). Mais lento (140s a 1a chamada/
+  carga do modelo, depois 22-43s por fala) mas com sinal textual explícito de prosódia.
+- **qwen** (Qwen3-TTS 0.6B CustomVoice): NÃO usa a biblioteca de referência emotiva -- fala de
+  timbres fixos (`aiden/dylan/eric/ono_anna/ryan/serena/sohee/uncle_fu/vivian`), sem clonagem.
+  `instruct` (texto livre de emoção, único motor que usa) foi passado como o SLUG cru
+  (`com_medo`, `angustia`...), não uma instrução em linguagem natural -- `synthesize_dialogue.py`
+  usa `parenthetical or emotion` e o roteiro não tinha parentético explícito de emoção por fala.
+  Carrega rápido (9,3s) e sintetiza rápido (~65s para as 4), mas nunca testado com instrução real.
+
+**Achado, não corrigido**: para o qwen dar o sinal que promete, `instruct` deveria receber uma frase
+(ex. "voz trêmula de medo, respiração ofegante") e não o slug interno. `synthesize_dialogue.py` não
+traduz o slug para texto -- só `emotion_director` tem esse vocabulário (usado para casar o take do
+xtts/fish, nunca virou frase para o qwen). Comparação enviada ao usuário para julgamento auditivo;
+veredito dele ainda pendente nesta sessão.
+
+### 3.105 WebUI: controles que só existiam por CLI, Modo ALL, auditoria de ritmo (2026-09-22)
+
+- **`script_pipeline/pacing_audit.py` (novo)**: relata (nunca bloqueia) planos de AÇÃO longos/curtos
+  demais para o enquadramento -- faixa plausível por `framing`, dobrada quando o texto do plano tem
+  verbo de ação (correr/perseguir/atirar/explodir...). Rodado sempre após `shot_plan` (`P-pacing`,
+  `obrigatorio=False`). Teste real (CERCO EM SEUL, estilo `classico`): 9/20 planos de ação flagrados
+  "curto demais" (wides de 1,93s contra mínimo de 3,00s com perseguição/tiro no texto) -- confirma
+  a lacuna que a auditoria anterior apontou (§ análise de 2026-09-22) e agora tem instrumento.
+  BUG achado rodando de verdade: a chave usada para identificar o plano era `shot.get("index")`,
+  mas o `shot_plan.json` usa `position` -- todo `"shot"` saía `null` no relatório. Corrigido.
+- **`decupagem_ui.py`**: `▶ Rodar`/`■ Parar` saem de dentro da aba "Stills" e ficam fixos acima das
+  abas (achado de operabilidade rodando de verdade: o botão ficava escondido em quem não soubesse
+  onde procurar). Novos controles na aba Motores: `--motion-conditioning` (checkbox) e
+  `--visual-unresolved continue` (rádio) -- existiam só por CLI. **Modo ALL** (checkbox) liga os
+  dois mais `--camera-llm` de uma vez; NÃO liga o estado espacial 3D (exige projeto mestre + FLUX +
+  spec pronto -- documentado como fora do escopo, não fingido).
+- **Achado ao testar o Modo ALL de verdade (WebUI, JS puro)**: `form_input` num combobox Gradio com
+  `autocomplete` só digita o texto -- não comita a selecao sem clicar a OPÇÃO da lista. A primeira
+  tentativa do teste (CERCO EM SEUL) rodou com `--image-engine flux` mesmo eu tendo "preenchido"
+  `qwen-image-2.1`, porque só chequei `input.value` (que mostra o texto digitado) em vez de
+  clicar a `option`. Corrigido clicando a opção; documentado para não repetir.
+- **Teste real, CERCO EM SEUL (ação, 4 agentes, 8 falas, ~46s), Modo ALL**: parse 53s (sem
+  disputa de VRAM -- Fish Speech desligado antes do parse, ver §3.103), cast 4 personagens,
+  TTS 8/8 (xtts, auto), character sheet 4 personagens via Qwen-Image-2.1 (rapido: minutos, nao
+  os ~17min/candidato que a mesma etapa levou em FLUX na tentativa abortada), 20/20 stills,
+  animatic 46,3s aprovado (8/8 falas), pacing_audit com 9 avisos (ver acima). Vídeo LTX EM
+  AGUARDO: o primeiro plano (wide, DUAS referencias de personagem + `motion_conditioning` no
+  prompt) levou 1051s (17,5min) -- muito acima dos 66-331s medidos em planos de referência única
+  sem condicionamento de movimento (§3.101-3.103). Hipotese nao confirmada: prompt maior
+  (motion_conditioning) + IC de 2 referencias custam mais passo a passo no LTX w4a8-v10; nao
+  isolado qual dos dois pesa mais. Render seguiu em background; resultado final e tempo total
+  por plano ainda pendentes de reportar.
+
+### 3.106 Portar os avanços da decupagem para screenplay_ui/render_scenes.py -- bloqueado por modelo de dados
+
+Investigado (não implementado): `screenplay_ui.py` (porta 7810, "um clipe por fala") roda
+`script_pipeline.render_scenes.py`, que é CENA/FALA-based (`Scene`, `_load_lines`) -- zero import de
+`script_pipeline` no módulo (só stdlib). `continuity_audit.py`, `gate_retry.py`,
+`visual_continuity_audit.py` e `pacing_audit.py` (novo) são todos PLANO-based, lendo
+`parse/shot_plan.json` com `framing`/`location_id`/`continuity_contract`/`position` -- campos que
+`render_scenes.py` nunca produz nem consome. Portar exigiria migrar `render_scenes.py` para o
+mesmo `shot_plan.json` (reescrita grande, não uma chamada nova), não uma mudança pontual.
+
+O que JÁ chega la, por módulo compartilhado (confirmado por import, não suposição):
+- `synthesize_dialogue.py`/`dialogue_tts.py`: motores xtts/qwen/fish, cache por chave, emoção
+  por linha -- `screenplay_to_video.py:46` chama `script_pipeline.synthesize_dialogue`.
+- Motor de imagem (incl. Qwen-Image-2.1): `screenplay_to_video.py:45` chama
+  `script_pipeline.generate_storyboards`, o mesmo módulo que decupagem usa para stills.
+
+O que NÃO chega (vive só em `render_shots.py`/`gate_retry.py`/`continuity_audit.py`, todos
+shot_plan-based): gate visual com regeneração, contrato de continuidade estrutural, reparo por
+edição (Qwen), folha de 3 vistas, passada de emoção, auditoria de ritmo. Sem GPU/tempo nesta sessão
+para a migração de `render_scenes.py` -- registrado como pendência explícita, não como feito.
+
+**Atualização §3.105 (medido, não estimado)**: os dois primeiros planos do CERCO EM SEUL em Modo
+ALL levaram 1051,2s e 1033,2s cada (~17,3min) -- consistente, não outlier. Contra 66-331s medidos
+em planos de referência única sem `motion_conditioning` (§3.101-3.103), é 11-16x mais lento. 20
+planos nesse ritmo = ~5,8h, inviável para uma sessão. Não isolei experimentalmente se o custo vem
+da segunda referência de personagem (IC de 2 imagens) ou do texto de `motion_conditioning` mais
+longo no prompt -- fica como próximo passo (rodar 1 plano com só motion_conditioning e 1 só com
+2 referências, comparando tempo). Render interrompido por decisão, não por erro.
+
+### 3.107 CAUSA REAL da lentidão do §3.105/3.106: Fish Speech nunca era liberado antes do vídeo
+
+Isolado por A/B/C direto no `ltx25_backend`, mesmo still/prompt/resolução/frames (960x544, 49f,
+w4a8-v10), fora do `run_decupagem`:
+
+| caso | Fish Speech residente? | tempo |
+|---|---|---|
+| A: prompt sem cláusula de `motion_conditioning` | sim (~20 GB) | 715,6s |
+| B: prompt COM a cláusula | sim (~20 GB) | 755,4s (+5,6%, ruído) |
+| C: igual ao A | **não** | **81,5s** |
+
+**`motion_conditioning` e a 2ª referência de personagem (hipóteses do §3.105) não eram a causa** --
+a diferença A→B é ruído. A causa real: o Fish Speech (`START_API.ps1`, servidor HTTP persistente,
+~20 GB) fica de pé depois do estágio de TTS e **ninguém o derrubava antes do vídeo** -- ao contrário
+do Z-Image e do Qwen-Image-2.1, que já tinham essa limpeza (`render_shots.py`, achado 2026-09-06/
+2026-09-21). Com ele residente, o LTX cai pra modo de VRAM insuficiente e o mesmo plano vai de
+81,5s para 715,6s -- **8,8x mais lento**, sem nenhuma mensagem de erro ou aviso.
+
+Corrigido: `render_shots.py` agora libera a porta do Fish Speech (lida de
+`dialogue_tts.FISH_API_URL`) incondicionalmente antes do estágio de vídeo, mesmo padrão já usado
+para Z-Image/Qwen. `run_decupagem.py::_gate_step` faz o mesmo antes do gate visual (Qwen3-VL
+também disputa VRAM com o Fish). Isso explica RETROATIVAMENTE por que o Fish nunca apareceu como
+suspeito nos testes de variante do LTX 2.5 (§3.77): aqueles testes não usavam TTS na mesma corrida.
+
+Pendência: não medido se a mesma lacuna afeta o estágio de STILLS (Qwen-Image-2.1/FLUX/Z-Image
+rodando com o Fish residente) -- só o vídeo foi isolado aqui.
+
+**Corrigido (2026-09-22)**: `dialogue_tts.py::EMOTION_TO_QWEN_INSTRUCT` traduz os 17 slugs para
+frases de direção em inglês (ex.: `com_medo` → "Speak in a frightened, tense voice, alert, like an
+urgent warning whispered in a hurry."), reaproveitando o mesmo glossário de `emotion_director.
+SLUG_GLOSSARIO` como base semântica, mas escrito como instrução ao modelo, não como rótulo. Só
+substitui quando `instruct` bate exatamente com um slug conhecido -- um parentético real do
+roteiro nunca colide e passa intocado. Teste de regressão
+`test_qwen_job_translates_raw_slug_to_natural_instruction`; suíte completa: 284 passed. Regravado
+o teste comparativo do §3.104 (mesmas 4 falas) com a correção -- `qwen_fixed.wav`, enviado ao
+usuário para julgamento auditivo; veredito ainda pendente.
+
+### 3.108 CERCO EM SEUL, Modo ALL: concluído ponta a ponta (2026-09-23)
+
+Depois do fix do Fish Speech (§3.107), a corrida completou: 20/20 planos, gate de vídeo passou por
+`--visual-unresolved continue` com alguns planos ainda pendentes (aceito de propósito), lip-sync
+7/8 falas (1 engine_failed, mantido sem sync), `verify_output` OK (0 erros, 0 avisos). Achado
+operacional à parte: **o CLI/`run_decupagem` não tem marcador de "gate já aprovado"** -- cada
+retomada reaudita stills e vídeo do zero (Qwen3-VL completo de novo), mesmo quando nada mudou
+desde a última aprovação. Não é bug (a auditoria é barata comparada à geração), mas custa alguns
+minutos a cada retomada manual; não corrigido nesta sessão -- fica de pendência se for incômodo
+recorrente. Filme entregue ao usuário.
+
+### 3.109 CERCO EM SEUL: bug real de parse corrigido, mas gate continua reprovando em massa
+
+**Bug real, corrigido**: cabeçalho estilo `"Cena N - LOCAL - PERÍODO"` (e o estilo `"Bloco N: ..."`)
+nunca chamavam `_split_location_time()` -- só o estilo `INT./EXT.` chamava. `location` recebia o
+cabeçalho INTEIRO em caixa alta, incluindo o período do dia (`"AVENIDA DE SEUL, ENTRADA DE UM HOTEL
+- DIA"`), que ia direto pro prompt de still. FLUX/Qwen renderizavam isso como **placa/letreiro na
+cena** (`forbidden_text_detected`), reprovando planos que não tinham nenhum outro defeito. Testado:
+20/20 e depois 20/20 reprovados (2 tentativas, engines diferentes) antes do fix; a mesma corrida,
+já sem a frase-cabeçalho no prompt, caiu mas continuou alta. Corrigido em `parse_screenplay.py`
+(as duas branches) + defesa em profundidade em `shot_plan.py::_storyboard_prompt` (baixa a caixa de
+qualquer `location` >80% maiúscula antes de montar o prompt, para qualquer fonte de texto que passe
+pelo mesmo bug). Testes de regressão: `test_cena_style_heading_splits_time_of_day`,
+`test_storyboard_prompt_lowercases_shouting_location`.
+
+**Depois do fix, ainda 23/25 reprovados** -- outra causa, mais estrutural: o roteiro é uma cena de
+ação policial densa (carros de polícia, crachás, multidão, fachadas de loja), e **tanto FLUX quanto
+Qwen alucinam texto legível nesses elementos diegéticos** (`'POLICE'`, texto coreano garbled,
+até `'ΠΟΛΙΤΙΚΗ'` em grego) -- o gate `forbidden_text_detected` não distingue "letreiro inventado
+proeminente" de "textura de farda/crachá de fundo plausível", e reprova os dois igual. Some-se a
+isso: alucinação de figurantes/policiais não pedidos no plano (`subjects_match` falha porque
+"expected empty list" mas "observed crowd/police officers") e enquadramento ainda ignorado em
+planos com multidão/veículos (`insert`/`close` pedidos, `wide`/`medium` entregues) -- o mesmo
+problema documentado para Qwen (§3.100) também aparece no FLUX quando a cena é densa o bastante.
+
+**Não corrigido nesta sessão** -- decisão em aberto, não bug de código: se `forbidden_text_detected`
+deveria ter uma exceção para texto diegético plausível de baixo destaque (placa de rua desfocada,
+crachá) versus letreiro inventado grande, e se a densidade de figurantes deste roteiro específico
+pede um still mais controlado (referência de locação real, não só still gerado). Ver auditoria
+`shots/visual_stills_audit.json` desta corrida para os 23 casos detalhados.
+
+### 3.110 ACHADO SÉRIO: cargo genérico ("o Presidente") vira rosto de pessoa real
+
+Testando `flux-krea` no plano "tight insert on the detail, no face in frame" do CERCO EM SEUL: o
+still saiu com um rosto fotorrealista **reconhecível como Donald Trump** — o roteiro só descreve
+"O Presidente" sem aparência própria (diferente dos 4 agentes, que têm descritor físico fictício
+completo), e o modelo completou o vazio com a associação mais forte que tem para "the president"
+em um still fotorrealista. Enquadramento também ignorado (pedia sem rosto). Não reusei a imagem
+além deste diagnóstico. **Recomendação para qualquer roteiro futuro**: todo papel de cargo real
+(presidente, prefeito, general etc.) precisa de descritor físico fictício explícito, do mesmo jeito
+que os personagens nomeados já recebem — sem isso, os motores locais (testado: flux-krea; não
+testado se Qwen/FLUX padrão fazem o mesmo) tendem a gerar a pessoa real que ocupa o cargo hoje.
+
+### 3.111 HiDream-I1 (GGUF Q4_K_M) implementado como novo motor de still
+
+Baixado `city96/HiDream-I1-Dev-gguf` (Q4_K_M, 11,5 GB) + encoders de
+`Comfy-Org/HiDream-I1_ComfyUI` (clip_l/clip_g HiDream, llama-3.1-8b fp8, t5xxl fp8 scaled, VAE) --
+~27 GB total. Roda no MESMO ComfyUI 8188 (nós nativos: `UnetLoaderGGUF` + `QuadrupleCLIPLoader` +
+`CLIPTextEncodeHiDream`, já presentes no checkout, sem custom node novo). Grafo montado em Python
+direto em `generate_scene_storyboard()` (arquitetura `"hidream"`), não via template JSON -- mesmo
+padrão de exceção que `zimage`/`qwenimage21` já usam, porque o node graph do HiDream (4 encoders,
+mesmo prompt repetido nos 4 campos de `CLIPTextEncodeHiDream`) não se parece com nenhum dos
+templates FLUX/SD3.5 existentes. `--image-engine hidream` na CLI e no seletor da WebUI (3 dropdowns).
+**Sem referência de personagem** (não testado ReferenceLatent nesta arquitetura -- só txt2img).
+
+**MEDIDO nos 2 planos que causaram os 23/25 bloqueios do CERCO EM SEUL** (mesma resolução/seed,
+960x544, comparação direta fora do pipeline): dos três motores testados no mesmo par de prompts
+(Qwen-Image-2.1, flux-krea, HiDream-I1), **só o HiDream produziu uma avenida plausível de Seul**
+(torres de vidro, sinalização coreana pequena e plausível, carro de polícia) sem inventar letreiro
+grande nem copiar a fisionomia de uma figura pública real para "o Presidente" -- o `flux-krea`, no
+mesmo plano, gerou um rosto reconhecível como Donald Trump (ver §3.110) e uma avenida com palmeiras/
+obelisco (nada a ver com Seul). Tempo: 94,3s e 84,2s por still (24 passos) -- na faixa do FLUX,
+mais lento que Qwen-Image-2.1 (~40-90s) e mais rápido que FLUX bf16 grande.
+
+Teste de wiring (sem GPU): `tests/test_hidream_engine.py`. Suíte completa: 303+2=305 passed.
+
+**Não testado ainda**: gate visual completo numa corrida real (só os 2 planos isolados), referência
+de personagem/identidade facial, e o terceiro motor pedido (Qwen-Image 20B base, GGUF, em download).
+
+### 3.112 Qwen-Image base 20B (GGUF Q4_K_M) implementado, comparação final dos 4 motores
+
+Baixado `city96/Qwen-Image-gguf` (Q4_K_M, 13 GB) + `Comfy-Org/Qwen-Image_ComfyUI` (encoder
+Qwen2.5-VL-7B fp8 scaled, 9,4 GB + VAE, 0,25 GB). Wiring próprio em `generate_scene_storyboard`
+(arquitetura `"qwen-image-base"`, distinta de `"qwenimage21"` -- checar ordem dos `if` em
+`detect_architecture`, "2.1"/"21" tem prioridade): `UnetLoaderGGUF` + `CLIPLoader(type="qwen_image")`
++ `CLIPTextEncode` genérico (1 encoder só, mais simples que o HiDream) + `KSampler` com **CFG real
+(4.0)**, diferente do 2.1 que é destilado (cfg=1 sempre) -- o negative prompt importa de verdade aqui.
+`--image-engine qwen-image` na CLI e nos 3 seletores da WebUI.
+
+⚠️ Achado ao baixar (2x, mesmo padrão do HiDream): `hf_hub_download(..., local_dir=X)` preserva a
+estrutura de pastas do repo dentro de X (`X/split_files/text_encoders/arquivo.safetensors`) em vez
+de aplainar -- script de download inicial não previu isso; corrigido manualmente (`mv` + `rmdir`).
+Depois de mover os arquivos, **o ComfyUI precisou reiniciar** para reconhecer os novos arquivos --
+a lista de checkpoints é lida uma vez no boot, não escaneada a cada `/prompt` (mesmo princípio já
+documentado para outros loaders).
+
+**MEDIDO nos mesmos 2 planos** (960x544, seed 1234, comparação isolada fora do pipeline):
+
+| motor | tempo (2 planos) | avenida de Seul plausível? | texto/letreiro inventado grande? | "presidente" virou pessoa real reconhecível? |
+|---|---|---|---|---|
+| Qwen-Image-2.1 (já em produção) | -- | não (Buenos Aires/mediterrâneo, palmeiras) | sim (grego, coreano garbled) | não testado neste par |
+| flux-krea | 76,3s + 20,0s | não (obelisco, palmeiras) | não neste par | **sim -- Donald Trump** (§3.110) |
+| **HiDream-I1** | 94,3s + 84,2s | **sim** (torres de vidro, sinalização coreana) | não | não (agentes fictícios plausíveis) |
+| **Qwen-Image base** | 114,3s + 104,3s | **sim, e com montanhas ao fundo** (nenhum outro motor incluiu) | não | **provável -- figura idosa reconhecível, não confirmado** |
+
+**Veredito**: HiDream-I1 e Qwen-Image base são os dois motores mais coerentes nesta máquina para
+cena densa/multidão, empatados em qualidade ambiental -- Qwen-Image acertou até a referência
+geográfica (montanhas de Seul) que nenhum outro motor incluiu, mas também é o mais lento (~1,8min
+pelos 2 planos) e teve o mesmo risco de "pessoa real" que o flux-krea. HiDream não mostrou esse
+risco nos 2 planos testados (amostra pequena, não é garantia). **Nenhum dos quatro motores testados
+está livre do risco de gerar a semelhança de uma pessoa pública real quando o roteiro usa um cargo
+genérico sem descritor fictício** -- é responsabilidade do roteiro, não escolha de motor.
+
+Testes de wiring sem GPU: `tests/test_hidream_engine.py` (6 casos). Suíte completa: 307 passed.
+Nenhum teste de gate visual/identidade/regeneração feito ainda com os dois motores novos numa
+corrida real -- só os 2 planos isolados de comparação.
+
+### 3.113 HiDream em escala real: os 2 planos de teste enganaram -- mesmos problemas dos outros
+
+Rodando a decupagem INTEIRA (25 planos) com HiDream (não só os 2 planos isolados do §3.111-3.112):
+**23/25 reprovados**, mesmo padrão dos outros três motores -- texto diegético alucinado
+("Boutique de la Señora", "PASSEIO", "B201"/"B202", "EVEAÇA DE HOTEL") e enquadramento ignorado em
+massa (`insert`/`close`/`wide` pedidos, `medium` entregue). **A amostra de 2 planos do §3.111
+enganou**: não é representativa -- só por sorte de seed/prompt não bateu nesses defeitos. Além
+disso, `--image-engine hidream` **não usa a foto de referência do personagem** (implementação
+atual é só texto-para-imagem, sem ReferenceLatent nem edição por imagem) -- a auditoria de
+consistência (ArcFace) reprovou toda tentativa com 2 personagens porque não há nada ancorando a
+identidade a uma foto real. Corrigir isso exigiria um caminho de referência de imagem para HiDream
+(o checkpoint pode ter um, não investigado) -- fora do escopo desta sessão. Motores em produção
+continuam Qwen-Image-2.1 (com referência) e FLUX (com referência); HiDream/Qwen-Image-base ficam
+como escolha experimental sem referência de personagem até isso ser resolvido.
+
+### 3.114 Onde estão os stills, achado real sobre forbidden_text_detected, referência para HiDream
+
+**Localização dos stills gerados** (nenhum novo foi gerado, só apontando os já existentes):
+- HiDream: `outputs/decupagem/20260922_1715_CERCO_EM_SEUL_ALL/shots/stills/`
+- Qwen-Image base (com descritor do Presidente): `outputs/decupagem/20260924_CERCO_EM_SEUL_QWENIMAGE/shots/stills/`
+
+**Achado real ao investigar `forbidden_text_detected`** (pedido do usuário para afrouxar): o campo
+determinístico **já estava correto** -- `_apply_perception_locks` só marca `forbidden_text_detected
+= True` para `text_type` `subtitle_caption`/`watermark_logo`/`other`-com-texto; `diegetic_instrument`
+(placa, letreiro de loja, crachá) já passava. Conferido num caso real do CERCO EM SEUL/Qwen-Image:
+`model_output.forbidden_text_detected = false`, TODOS os sub-critérios passando, e mesmo assim
+`pass: false` -- porque **o campo isolado `visual_pass`** (veredito geral que o próprio LLM de
+decisão escreve) reprovou sozinho, citando no `reasons` a mesma frase do prompt antigo: "Reject
+invented subtitles, captions, watermarks, logos or **illegible text**". O LLM generalizava
+"illegible text" para QUALQUER texto de fundo, mesmo diegético, e derrubava `visual_pass` por conta
+própria -- inconsistente com o que ele mesmo preenchia em `forbidden_text_detected`.
+
+**Corrigido**: o prompt de decisão (`_evaluation_prompt`) agora instrui explicitamente que texto
+diegético ambiental plausível (placa de rua, vitrine, crachá, tela ao fundo) NÃO derruba
+`visual_pass` sozinho, mesmo garbled/ilegível -- só letreiro/legenda/marca-d'água/logo inventado OU
+lettering grande/proeminente que domina o quadro. Teste de regressão (prompt contém a nova
+instrução, não contém mais a frase antiga isolada): `test_evaluation_prompt_allows_diegetic_
+environmental_text`. **Não validado com uma corrida real ainda** -- é mudança de prompt de LLM, só
+testável de verdade rodando de novo (o usuário pediu para NÃO gerar novos stills agora).
+
+**Referência de personagem implementada para HiDream**: mesma técnica de img2img já usada em SD3.5/
+FLUX.1 (`_wire_img2img_reference`, mas reimplementada inline por causa da numeração de nós diferente
+do grafo HiDream) -- `VAEEncode` da foto de referência (redimensionada para a resolução do plano) e
+`denoise=0.55` no KSampler em vez de ruído puro. Só a primeira referência (`reference_image`);
+`reference_image_2` fica sem uso, HiDream não tem caminho de fusão de 2 fotos testado. Testes sem
+GPU: `test_hidream_wires_img2img_reference_when_given`,
+`test_hidream_without_reference_keeps_empty_latent`. **Não testado com GPU real ainda**.
+
+Suíte completa: 310 passed.
+
+### 3.115 MiniMax H3: workflow "long take" multitrack (`comfyui-easy-media`) avaliado, preparado, NÃO testado
+
+Usuário trouxe um workflow ComfyUI (`.json`, formato UI) de terceiros chamado "MINIMAX+H3+Motion+
+Context+V2" para avaliar uso na decupagem. É um grafo de **long take** via custom node
+`comfyui-easy-media` (`easy multiTrackEditor` + `easy multitrackProject`), técnica diferente do que
+o repositório usa hoje: cada segmento roda em **single-pass**, e um segmento em `continuity_mode:
+context` herda o **latente** de vídeo/áudio do segmento anterior em vez de ser reencadeado por
+imagem (I2V do último frame), que é como `continuous_chain.py` (LTX, ver [[project_ltx_continuous_
+video_plan]]) e o próprio `render_scenes`/`render_shots` fazem hoje. A ideia ataca exatamente o
+problema que aquele plano documentou: "a imagem-âncora pode vazar objetos que o negativo textual
+não bloqueia" -- herdar o latente evita reencodar/redecodar a cada emenda.
+
+**Não é o que `minimax_h3_backend.py` usa.** O backend de produção gera um clipe por chamada com o
+workflow oficial `video_minimax_h3_r2v.json` (nó `MiniMaxH3ReferenceToVideo`, checkpoints
+`minimax_h3_ref2va_pruned-*`). O grafo trazido usa um checkpoint diferente, não catalogado
+(`Minimax-h3_Singularity_ref2va_v1.3_int8`, fine-tune HDR de terceiros, 34 GB) e um custom node pack
+que não estava instalado (`comfyui-easy-media`).
+
+**Preparado para teste isolado**, sem tocar em `minimax_h3_backend.py`:
+- `ComfyUI-Easy-Media` (https://github.com/yolain/ComfyUI-Easy-Media) clonado em
+  `E:\Users\home\Documents\MiniMax-H3\ComfyUI\custom_nodes\`. Node package puro Python, sem
+  `requirements.txt` próprio -- não mexe no venv do H3 (risco documentado em §3.42/pip-install
+  memory).
+- Checkpoint trocado pela variante **w4a8 pruned de 11,8 GB**
+  (`Minimax-h3_Singularity_ref2va_v1.3_Pruned_w4a8.safetensors`, de
+  `huggingface.co/WarmBloodAban/Minimax-h3_Singularity`) em vez dos 34 GB do int8 original -- mesma
+  família de quantização do padrão atual do H3 (`w4a8` na tabela de `CLAUDE.md`), baixada para
+  `models/diffusion_models/`.
+- `taeh3.safetensors` (preview VAE do `ModelPreviewOverrideKJ`, 9,56 MB, de
+  `Kijai/MiniMax-H3-TAE`) baixado para `models/vae_approx/` -- confirmado no código do
+  `ComfyUI-KJNodes` (`preview_override_node.py`, `folder_paths.get_filename_list("vae_approx")`)
+  que é essa a pasta certa.
+- Workflow adaptado e salvo em
+  `E:\Users\home\Documents\MiniMax-H3\ComfyUI\user\default\workflows\test_h3_multitrack_longtake.
+  json`: 2 segmentos T2V triviais (bola vermelha rolando, sem precisar de imagem de referência de
+  personagem), 2s + 2s a 24 fps, 0,5 MP, `shot` → `context`. Validado por script (todo `id` de nó
+  referenciado por link existe, toda entrada com `link` aponta pra um link existente) depois de eu
+  remover dois nós de anotação e um `ModelAttentionBackend` desconectado (`mode: 4`, bypassado) que
+  o grafo original trazia mortos.
+
+**Por que não rodou ainda:** a 3090 estava ocupada com trabalho do usuário nas duas checagens de
+`nvidia-smi` feitas durante a preparação (21-60% de uso, até 23,3/24,5 GB). Seguindo a regra de
+conferir a GPU antes de qualquer teste (ver [[feedback_check_gpu_before_testing]]), não subi o
+servidor do H3 (porta 8189) nem enfileirei nada. **Nada neste workflow foi validado com geração
+real** -- só a estrutura do JSON.
+
+**Aplicabilidade ao LTX:** nula por portabilidade direta -- `comfyui-easy-media` e os nós de
+carregamento são específicos da arquitetura/checkpoints do H3. A *técnica* (contexto em latente em
+vez de reencadeamento por imagem) seria conceitualmente relevante para o problema de drift do
+`continuous_chain.py`, mas exigiria um mecanismo próprio para o LTX -- nada aqui é copiável.
+
+**Próximo passo, quando a GPU estiver livre:** subir o servidor 8189, abrir
+`test_h3_multitrack_longtake.json`, enfileirar, e inspecionar visualmente a emenda entre os dois
+segmentos antes de cogitar qualquer integração ao `minimax_h3_backend.py`.
+
+### 3.116 — MiniMax H3 Turbo (LightX2V) baixado para teste de velocidade, não testado (2026-09-24)
+
+Baixados de `huggingface.co/lightx2v/Minimax-h3-Turbo` (repo com 18 arquivos, 58,8 GB no total —
+variantes `ref2v`/`fl2v` × 4-step/8-step × versão × bf16/comfyui_bf16) para
+`E:\Users\home\Documents\MiniMax-H3\ComfyUI\models\diffusion_models\`:
+
+- `minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` (1,96 GB)
+- `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` (1,96 GB)
+
+Escolhidos por serem `ref2v` (a família mais próxima do `ref2va` já instalado — reference-to-video;
+o "a" de áudio não aparece no nome deste repo, então **não confirmado** se estas variantes trazem
+condicionamento de áudio) e formato `comfyui_bf16` (empacotado para carregar direto no ComfyUI, sem
+passar pelo `diffusers`).
+
+⚠️ **Tamanho não bate com um transformer completo.** O H3 já instalado (`ref2va_pruned`) tem
+checkpoints de dezenas de GB (`fp8int8`, `w4a8`, `gguf-q4km`); estes turbo têm ~2 GB — quase certo
+que são LoRAs/adapters de destilação (4 ou 8 passos) e não o modelo inteiro, apesar do nome de
+arquivo não trazer "lora". **Não verificado ainda**: se carregam via `UnetLoader` (substituindo o
+checkpoint) ou via `LoraLoader` (por cima do checkpoint atual) no grafo do `minimax_h3_backend.py`.
+
+**Não testado**: a 3090 estava ocupada com trabalho do usuário (ver
+[[feedback_check_gpu_before_testing]]) — só o download rodou, nada foi enfileirado no ComfyUI do H3
+(porta 8189). Antes de medir velocidade, inspecionar as chaves do safetensors (contagem de tensores,
+nomes) para decidir se entra como `MINIMAX_H3_UNET` (checkpoint completo) ou como LoRA no backend.

@@ -372,11 +372,20 @@ def parse_structure(text: str) -> list[Scene]:
         heading_alt = SCENE_HEADING_ALT_RE.match(stripped) if stripped else None
         if heading_alt:
             flush_dialogue()
+            # BUGFIX 2026-09-23 (achado rodando o CERCO EM SEUL de verdade): este estilo
+            # ("Cena N - LOCAL - PERIODO") nunca chamava `_split_location_time` -- ao
+            # contrario do estilo INT./EXT. logo acima -- e jogava o cabecalho INTEIRO,
+            # em maiusculas ("AVENIDA DE SEUL, ENTRADA DE UM HOTEL - DIA"), dentro de
+            # `location`. Isso ia direto pro prompt de still, e o FLUX/Qwen renderizavam
+            # o texto como placa/letreiro na cena (`forbidden_text_detected` no gate
+            # visual) -- 20/20 planos reprovados, nenhum por causa de still ruim de
+            # verdade, todos pela mesma contaminacao de prompt.
+            location, time_of_day = _split_location_time(heading_alt.group(1).strip())
             current = Scene(
                 index=len(scenes) + 1,
                 heading_raw=stripped,
-                location=heading_alt.group(1).strip(),
-                time_of_day="",
+                location=location,
+                time_of_day=time_of_day,
             )
             scenes.append(current)
             _attach_preamble(current)
@@ -385,11 +394,13 @@ def parse_structure(text: str) -> list[Scene]:
         heading_bloco = SCENE_HEADING_BLOCO_RE.match(stripped) if stripped else None
         if heading_bloco:
             flush_dialogue()
+            # BUGFIX 2026-09-23: mesmo bug do estilo "Cena N -" acima (ver comentario la).
+            location, time_of_day = _split_location_time(heading_bloco.group(1).strip())
             current = Scene(
                 index=len(scenes) + 1,
                 heading_raw=stripped,
-                location=heading_bloco.group(1).strip(),
-                time_of_day="",
+                location=location,
+                time_of_day=time_of_day,
             )
             scenes.append(current)
             _attach_preamble(current)
@@ -1135,7 +1146,7 @@ def enrich_with_llm_ollama(
                          {"role": "user", "content": user_prompt}],
             "stream": False,
             "think": False,
-            "options": {"num_predict": min(1500, 400 + 60 * len(scene.dialogue)),
+            "options": {"num_predict": min(12000, max(2000, 800 + len(scene.action_text) // 2 + 220 * len(scene.dialogue))),
                         "temperature": 0},
         }
         req_bytes = json.dumps(payload).encode("utf-8")

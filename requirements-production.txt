@@ -1,0 +1,2 @@
+# Optional project-master/editorial support, in the existing engine venv.
+opentimelineio==0.18.1

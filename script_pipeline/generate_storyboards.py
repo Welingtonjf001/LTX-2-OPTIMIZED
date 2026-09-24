@@ -122,6 +122,43 @@ IMAGE_ENGINES = {
         "descricao": "Z-Image-Turbo (6B, servidor proprio porta 8191) -- fotorrealista, "
                      "~19s/still depois do 1o (carga ~220s), aceita referencia via img2img",
     },
+    "qwen-image-2.1": {
+        "checkpoint": "qwen-image-2.1", "clip": "", "vae": "",
+        "steps": 30, "cfg": 0.0, "guidance": 0.0,
+        "descricao": "Qwen-Image-2.1 (servidor local 8192) -- texto, edicao e ate 10 referencias; "
+                     "ambiente isolado em E:/Users/home/Documents/Qwen-Image-2.1",
+    },
+    # HiDream-I1 Dev, GGUF Q4_K_M (pedido do usuario 2026-09-24, depois do CERCO EM SEUL
+    # mostrar Qwen-Image-2.1/FLUX/FLUX-Krea alucinando texto e cenario generico em plano
+    # denso com multidao/veiculos). MEDIDO no mesmo par de planos (mesma resolucao/seed):
+    # unico dos tres que produziu uma avenida plausivel de Seul (torres de vidro, sinalizacao
+    # coreana) sem letreiro inventado e sem copiar a fisionomia de uma figura publica real
+    # para "o Presidente" -- ver MEMORIAL 3.111. Roda no MESMO ComfyUI (8188) via
+    # UnetLoaderGGUF + QuadrupleCLIPLoader + CLIPTextEncodeHiDream, node graph proprio
+    # (nao usa os templates JSON -- ver generate_scene_storyboard).
+    "hidream": {
+        "checkpoint": "hidream-i1-dev-Q4_K_M.gguf",
+        "clip": "clip_l_hidream.safetensors,clip_g_hidream.safetensors,"
+                "t5xxl_fp8_e4m3fn_scaled.safetensors,llama_3.1_8b_instruct_fp8_scaled.safetensors",
+        "vae": "ae_hidream.safetensors",
+        "steps": 24, "cfg": 1.0, "guidance": 0.0,
+        "descricao": "HiDream-I1 Dev 17B, GGUF Q4_K_M -- melhor coerencia de cena/aderencia a "
+                     "prompt denso medida nesta maquina; sem referencia de personagem (so txt2img)",
+    },
+    # Qwen-Image (base 20B, DIFERENTE do "qwen-image-2.1"), GGUF Q4_K_M -- pedido do usuario
+    # 2026-09-24, mesmo teste do HiDream. Nao e destilado (CFG real, precisa de negative prompt
+    # de verdade, ao contrario do 2.1). MEDIDO no mesmo par de planos: skyline convincente de
+    # Seul (inclusive montanhas ao fundo, que nenhum outro motor testado incluiu) -- ver
+    # MEMORIAL 3.112. Mesmo risco do HiDream/flux-krea: papel de "chefe de estado" sem
+    # descritor fictício pode sair com a fisionomia de uma pessoa real.
+    "qwen-image": {
+        "checkpoint": "qwen-image-Q4_K_M.gguf",
+        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae": "qwen_image_vae.safetensors",
+        "steps": 20, "cfg": 4.0, "guidance": 0.0,
+        "descricao": "Qwen-Image base 20B, GGUF Q4_K_M -- CFG real (nao destilado); boa "
+                     "coerencia de cena densa, inclui pontos de referencia geograficos plausiveis",
+    },
 }
 
 # Nomes dos encoders do SD 3.5 quando o chamador nao passa a tripla explicita
@@ -268,8 +305,14 @@ def detect_architecture(checkpoint: str) -> str:
     Detectar pelo nome e fragil, mas e o que os tres formatos tem em comum aqui:
     o chamador passa um nome de arquivo, nao um tipo."""
     nome = checkpoint.lower()
+    if "qwen-image-2.1" in nome or "qwen-image21" in nome:
+        return "qwenimage21"
     if "zimage" in nome:
         return "zimage"
+    if "hidream" in nome:
+        return "hidream"
+    if "qwen-image" in nome:  # depois dos checks de "2.1"/"21" acima, que tem prioridade
+        return "qwen-image-base"
     # "flux1-..." (Krea/Kontext/dev/schnell) precisa vir ANTES do "flux" generico:
     # os dois nomes contem "flux", mas so o FLUX.2 Klein usa o CLIPLoader Qwen3
     # unico que o branch "flux" abaixo monta.
@@ -689,8 +732,12 @@ def generate_scene_storyboard(
     reference_image: str | None = None, reference_image_2: str | None = None,
     art_directed: bool = False,
     weight_dtype: str = "default", lora_name: str = "", lora_strength: float = 0.8,
+    control_bundle: dict | None = None, spatial_denoise: float = 0.65,
+    spatial_mode: str = 'img2img',
 ) -> bool:
     architecture = detect_architecture(checkpoint)
+    if control_bundle and architecture != "flux":
+        raise ValueError("Spatial conditioning currently requires FLUX.2 Klein")
     if architecture == "zimage":
         # Desvia do grafo ComfyUI inteiro: Z-Image-Turbo roda num servidor HTTP
         # PROPRIO (zimage_backend.py, porta 8191), nao no ComfyUI de `server`.
@@ -704,6 +751,109 @@ def generate_scene_storyboard(
         if ok:
             log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
         return ok
+    if architecture == "qwenimage21":
+        import qwen_image21_engine as qwen_image21_backend
+        prompt = prompt_override if prompt_override else build_prompt(scene, cast)
+        refs = [path for path in (reference_image, reference_image_2) if path]
+        ok = qwen_image21_backend.generate(
+            prompt, out_path, width=width, height=height, steps=steps, seed=seed,
+            reference_images=refs, log=log)
+        if ok:
+            log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
+        return ok
+    if architecture == "hidream":
+        # Grafo proprio, nao um template JSON: QuadrupleCLIPLoader (4 encoders) +
+        # CLIPTextEncodeHiDream (o MESMO texto repetido nos 4 campos -- e o padrao do
+        # workflow oficial) nao existe em nenhum outro motor daqui. Referencia de
+        # personagem (2026-09-24, pedido do usuario): mesma tecnica generica de
+        # `_wire_img2img_reference` (VAEEncode da foto + denoise parcial no KSampler),
+        # ja que o checkpoint I1-Dev nao tem IPAdapter/ReferenceLatent dedicado testado
+        # aqui -- so `reference_image` (a 1a); `reference_image_2` fica sem uso, HiDream
+        # nao tem um caminho de fusao de 2 fotos.
+        clip_names = clip.split(",") if clip else IMAGE_ENGINES["hidream"]["clip"].split(",")
+        clip_l, clip_g, clip_t5, clip_llama = (clip_names + [""] * 4)[:4]
+        vae_name = vae or IMAGE_ENGINES["hidream"]["vae"]
+        prompt = prompt_override if prompt_override else build_prompt(scene, cast)
+        negative = negative_prompt_for(art_directed=art_directed)
+        workflow = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": checkpoint}},
+            "2": {"class_type": "QuadrupleCLIPLoader", "inputs": {
+                "clip_name1": clip_l, "clip_name2": clip_g,
+                "clip_name3": clip_t5, "clip_name4": clip_llama}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
+            "4": {"class_type": "CLIPTextEncodeHiDream", "inputs": {
+                "clip": ["2", 0], "clip_l": prompt, "clip_g": prompt, "t5xxl": prompt, "llama": prompt}},
+            "5": {"class_type": "CLIPTextEncodeHiDream", "inputs": {
+                "clip": ["2", 0], "clip_l": negative, "clip_g": negative,
+                "t5xxl": negative, "llama": negative}},
+            "6": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "7": {"class_type": "KSampler", "inputs": {
+                "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
+                "seed": seed, "steps": steps, "cfg": cfg or 1.0,
+                "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {
+                "images": ["8", 0], "filename_prefix": f"storyboard_scene_{scene['index']:02d}"}},
+        }
+        if reference_image:
+            staged = _stage_reference(reference_image, f"{scene['index']:02d}_{out_path.stem}_hidream")
+            workflow["9001"] = {"class_type": "LoadImage", "inputs": {"image": staged}}
+            workflow["9002"] = {"class_type": "ImageScale", "inputs": {
+                "image": ["9001", 0], "upscale_method": "lanczos",
+                "width": width, "height": height, "crop": "center"}}
+            workflow["9003"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["9002", 0], "vae": ["3", 0]}}
+            workflow["7"]["inputs"]["latent_image"] = ["9003", 0]
+            workflow["7"]["inputs"]["denoise"] = 0.55
+            log(f"[img2img-ref] denoise=0.55 a partir de {Path(reference_image).name} "
+                f"redimensionada para {width}x{height}")
+        log(f"Cena {scene['index']}: {prompt[:120]}...")
+        entry = submit_and_wait(server, workflow, log=log)
+        if entry is None:
+            return False
+        image_path = _first_output_image(entry)
+        if image_path is None or not image_path.exists():
+            log(f"Cena {scene['index']}: ComfyUI concluiu mas nenhuma imagem foi encontrada.")
+            return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image_path, out_path)
+        log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
+        return True
+    if architecture == "qwen-image-base":
+        # Grafo proprio, mais simples que o HiDream: 1 encoder so (CLIPLoader type="qwen_image"),
+        # CLIPTextEncode generico -- mas NAO e destilado, entao o negative prompt importa de
+        # verdade aqui (ao contrario do qwen-image-2.1, cfg=1 sempre).
+        clip_name = clip or IMAGE_ENGINES["qwen-image"]["clip"]
+        vae_name = vae or IMAGE_ENGINES["qwen-image"]["vae"]
+        prompt = prompt_override if prompt_override else build_prompt(scene, cast)
+        negative = negative_prompt_for(art_directed=art_directed)
+        workflow = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": checkpoint}},
+            "2": {"class_type": "CLIPLoader", "inputs": {
+                "clip_name": clip_name, "type": "qwen_image", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative}},
+            "6": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "7": {"class_type": "KSampler", "inputs": {
+                "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
+                "seed": seed, "steps": steps, "cfg": cfg or 4.0,
+                "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {
+                "images": ["8", 0], "filename_prefix": f"storyboard_scene_{scene['index']:02d}"}},
+        }
+        log(f"Cena {scene['index']}: {prompt[:120]}...")
+        entry = submit_and_wait(server, workflow, log=log)
+        if entry is None:
+            return False
+        image_path = _first_output_image(entry)
+        if image_path is None or not image_path.exists():
+            log(f"Cena {scene['index']}: ComfyUI concluiu mas nenhuma imagem foi encontrada.")
+            return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image_path, out_path)
+        log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
+        return True
     # Guardado ANTES do reset abaixo (reference_image vira None pra qualquer
     # arquitetura que nao seja "flux") -- e o que _wire_img2img_reference usa
     # pra dar a sd35/flux1 uma referencia aproximada (ver comentario la).
@@ -769,6 +919,11 @@ def generate_scene_storyboard(
         arch_key = "flux-ref" if (used_reference_template or used_dual_reference) else architecture
         _apply_lora(workflow, arch_key, lora_name, lora_strength)
         log(f"Cena {scene['index']}: LoRA {lora_name} (forca {lora_strength}).")
+    if control_bundle:
+        from script_pipeline.spatial_conditioning import wire_spatial
+        wire_spatial(workflow, control_bundle, architecture=architecture,
+                     stage_image=lambda p: _stage_reference(p, 'spatial_' + control_bundle['fingerprint'][:16]),
+                     denoise=spatial_denoise, mode=spatial_mode)
     log(f"Cena {scene['index']}: {prompt[:120]}...")
     entry = submit_and_wait(server, workflow, log=log)
     if entry is None:
@@ -913,13 +1068,20 @@ def main(argv=None) -> int:
     elif args.prompt_override:
         parser.error("--prompt-override so e valido junto com --only-scene.")
 
-    if not args.no_auto_start:
-        if not ensure_comfyui_running(args.comfy_server, log=log):
-            log("Nao foi possivel iniciar/alcancar o ComfyUI. Rode start_comfyui_ltx.bat manualmente e tente de novo.")
+    # ACHADO 2026-09-17 (auditoria externa) #8: esta guarda checava/subia o
+    # ComfyUI incondicionalmente, mesmo com `--image-engine zimage` (motor
+    # independente, sem ComfyUI) -- impedia o motor zimage de funcionar
+    # quando o ComfyUI estava fora do ar. `render_shots.py` ja tinha essa
+    # mesma guarda de arquitetura (`detect_architecture(checkpoint) !=
+    # "zimage"`); replicada aqui.
+    if detect_architecture(args.checkpoint) not in {"zimage", "qwenimage21"}:
+        if not args.no_auto_start:
+            if not ensure_comfyui_running(args.comfy_server, log=log):
+                log("Nao foi possivel iniciar/alcancar o ComfyUI. Rode start_comfyui_ltx.bat manualmente e tente de novo.")
+                return 1
+        elif not comfy_is_up(args.comfy_server):
+            log(f"ComfyUI nao esta respondendo em {args.comfy_server} (--no-auto-start impediu o start automatico).")
             return 1
-    elif not comfy_is_up(args.comfy_server):
-        log(f"ComfyUI nao esta respondendo em {args.comfy_server} (--no-auto-start impediu o start automatico).")
-        return 1
 
     failures = 0
     seed_counter = 0

@@ -190,6 +190,31 @@ def test_still_close_sem_gesto_de_corpo_e_com_limite_de_quadro():
     assert "crosses her arms" in _storyboard_prompt(framing="medium", **kw)
 
 
+def test_still_close_sem_sujeito_descreve_detalhe_e_nao_rosto():
+    from script_pipeline.shot_plan import _storyboard_prompt
+    prompt = _storyboard_prompt(
+        framing="close", angle="low", subject="", location="storm sky",
+        time_of_day="day", look="cinematic", descriptor="", screen_side=None,
+        interior="exterior", pose="The aircraft crosses dark clouds.",
+    )
+    assert "close detail shot" in prompt
+    assert "no human face implied" in prompt
+    assert "face filling" not in prompt
+
+
+def test_establishing_de_cena_povoada_nao_declara_local_vazio():
+    from script_pipeline.shot_plan import _plano_de_estabelecimento, STYLES
+    scene = {
+        "index": 1, "location": "passenger cabin", "time_of_day": "day",
+        "heading_raw": "INT. PASSENGER CABIN - DAY", "characters": ["ANA", "BIA"],
+        "art_direction": "",
+    }
+    shot = _plano_de_estabelecimento(scene, STYLES["classico"], 0.3, fps=24)
+    assert "occupied" in shot["storyboard_prompt"]
+    assert "current occupants" in shot["video_prompt"]
+    assert "empty and still" not in shot["video_prompt"]
+
+
 def test_emocao_visivel_traduz_slug_conhecido():
     v = emocao_visivel("com_medo")
     assert v and "wide" in v  # "eyes wide and darting..."

@@ -41,6 +41,18 @@ python music_maker_ui_v2.py # 2 step (slow)
     *   **LoRA Support:** Checkbox selection for Camera Control.
     *   **Seed Control:** Reproducible generations.
 
+### Decupagem com continuidade espacial
+
+O pipeline de decupagem possui um modo opt-in de estado espacial persistente. A
+seção **Continuidade espacial 3D (opcional)** da `decupagem_ui.py` aceita um spec
+JSON por ID de plano, executa o blocking técnico e passa a referência RGB ao FLUX
+antes dos stills. O modo exige um projeto persistente e `flux` como motor de imagens;
+os gates visuais continuam valendo para liberar vídeo.
+
+Documentação detalhada: [`script_pipeline/SPATIAL_PIPELINE.md`](script_pipeline/SPATIAL_PIPELINE.md).
+O preset e o smoke test do roteiro de emergência do Voo 702 estão em
+[`script_pipeline/CONTINUIDADE_VOO702.md`](script_pipeline/CONTINUIDADE_VOO702.md).
+
 ## 📥 Model Download & Setup
 
 To run this, you need to download the specific FP8 distilled checkpoints and the Text Encoder.
@@ -231,6 +243,9 @@ This repository is organized as a monorepo with three main packages:
 Each package has its own README and documentation. See the [Documentation](#-documentation) section below.
 
 ## 📚 Documentation
+
+For the decupagem/storyboard production workflow and its fail-closed delivery
+gates, see [`script_pipeline/PRODUCAO_CINEMATOGRAFICA.md`](script_pipeline/PRODUCAO_CINEMATOGRAFICA.md).
 
 Each package includes comprehensive documentation:
 

@@ -76,6 +76,34 @@ EMOTION_TO_FISH_TAG = {
     "neutra": None,
 }
 
+# Achado 2026-09-21 (comparacao de motores de TTS, MEMORIAL 3.104): o unico motor com controle
+# textual de PROSODIA ("instruct") recebia o SLUG cru ("com_medo", "angustia") em vez de uma
+# instrucao em linguagem natural -- `synthesize_dialogue.py` faz so `parenthetical or emotion`,
+# e sem parentetico explicito no roteiro, `instruct` vira o proprio slug interno. O CustomVoice do
+# Qwen3-TTS espera uma frase de direcao ("voice trembling with fear, panting breath"), nao um
+# identificador de arquivo. Traduz aqui, no mesmo espirito do EMOTION_TO_FISH_TAG acima -- so
+# quando `instruct` bate exatamente com um slug conhecido (um parentetico real do roteiro nunca
+# colide com um destes textos e passa direto, sem traducao).
+EMOTION_TO_QWEN_INSTRUCT = {
+    "com_medo": "Speak in a frightened, tense voice, alert, like an urgent warning whispered in a hurry.",
+    "grito": "Shout at the top of your voice, screaming.",
+    "raiva": "Speak in an irritated, furious voice, hard and clipped.",
+    "angustia": "Speak in an anguished voice, tight, as if in pain and struggling to breathe.",
+    "excitada": "Speak in an agitated, urgent, electric voice.",
+    "espontanea_entusiasmada": "Speak excitedly and loosely, fast, with bright enthusiasm.",
+    "surpresa": "Speak as if caught off guard, startled, eyes wide.",
+    "alegre": "Speak in a happy, smiling, light voice.",
+    "confusa": "Speak hesitantly, as if confused and unsure what to say.",
+    "desdem": "Speak with contempt, irony and superiority.",
+    "apaixonada": "Speak in a tender, affectionate, admiring voice.",
+    "sensual": "Speak in a low, suggestive voice.",
+    "calma": "Speak in a serene, controlled, gentle voice.",
+    "tristeza": "Speak in a sad, tearful, heavy voice.",
+    "desanimo": "Speak with no energy, resigned, flat and low.",
+    "desapontamento": "Speak in a disappointed voice, frustrated that something failed.",
+    "neutra": "Speak in a neutral voice, with no particular emotional charge.",
+}
+
 # CustomVoice preset speakers with a rough gender tag, used only as a fallback when
 # cast.json's per-character "qwen_speaker" is left null. Lowercase to match
 # Qwen3TTSModel.get_supported_speakers()'s actual return values -- NOT the
@@ -225,12 +253,16 @@ def _fish_job(job: dict) -> dict:
 
 
 def _qwen_job(job: dict) -> dict:
+    instruct = job.get("instruct")
+    # Traduz o slug cru para uma frase de direcao (ver EMOTION_TO_QWEN_INSTRUCT acima); um
+    # parentetico real do roteiro nunca bate exatamente com um slug e passa direto.
+    instruct = EMOTION_TO_QWEN_INSTRUCT.get(instruct, instruct)
     return {
         "id": job["id"],
         "text": job["text"],
         "language": job.get("language_name", "Portuguese"),
         "speaker": job.get("qwen_speaker") or default_qwen_speaker(job.get("gender")),
-        "instruct": job.get("instruct"),
+        "instruct": instruct,
         "output_path": str(Path(job["output_path"]).resolve()),
     }
 

@@ -181,8 +181,8 @@ def _build_prompt(scenes: list[dict], det: dict, language: str) -> tuple[str, st
             f"  personagens={', '.join(d['characters']) or '(nenhum)'}"
             f"{'  entram=' + ', '.join(d['entering']) if d['entering'] else ''}"
             f"{'  saem=' + ', '.join(d['exiting']) if d['exiting'] else ''}\n"
-            f"  acao: {(s.get('action_text') or '(nenhuma)')[:400]}\n"
-            f"  falas: {len(dial)} ({quem})\n"
+            f"  acao: {s.get('action_text') or '(nenhuma)'}\n"
+            f"  falas: {json.dumps(dial, ensure_ascii=False)}\n"
         )
     user = ("Roteiro completo, cena a cena:\n\n" + "\n".join(blocos) +
             f"\nDevolva o JSON para as {len(blocos)} cenas.")
@@ -317,7 +317,22 @@ def build(scenes: list[dict], *, engine: str = DEFAULT_ENGINE, language: str = "
         f"{len(det['characters'])} personagem(ns) -- passe deterministico pronto.")
 
     system, user = _build_prompt(scenes, det, language)
-    llm = _call_ollama(system, user, engine, log=log)
+    if len(user) <= 24000:
+        llm = _call_ollama(system, user, engine, log=log)
+    else:
+        # Keep complete scenes and dialogue, with shared narrative memory. No 400-character truncation.
+        annotated, memory = [], []
+        for scene, derived in zip(scenes, det['scenes']):
+            scene_system, scene_user = _build_prompt([scene], {'scenes': [derived]}, language)
+            response = _call_ollama(scene_system, scene_user + '\nMemória das cenas anteriores:\n' +
+                                    json.dumps(memory[-12:], ensure_ascii=False), engine, log=log)
+            values = (response or {}).get('scenes', [])
+            annotated.extend(v for v in values if v.get('index') == scene['index'])
+            memory.extend({'index': v.get('index'), 'purpose': v.get('purpose'),
+                           'state_change': v.get('state_change')} for v in values)
+        overview = _call_ollama(system, 'Visão global a partir da memória das cenas completas:\n' +
+                               json.dumps(memory, ensure_ascii=False), engine, log=log) or {}
+        llm = {**overview, 'scenes': annotated} if annotated else None
 
     merged = {
         "logline": (llm or {}).get("logline", ""),

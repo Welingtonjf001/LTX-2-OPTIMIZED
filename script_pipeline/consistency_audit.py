@@ -44,8 +44,15 @@ def face_embedding(image_path: str):
     nenhum rosto foi detectado (still de wide/insert sem close o bastante,
     por exemplo -- nao e erro, so nao ha o que comparar)."""
     import cv2
+    import numpy as np
 
-    img = cv2.imread(str(image_path))
+    # cv2.imread on Windows cannot open paths containing non-ASCII characters
+    # (for example the Portuguese project folder ``CÉU_TURBULENTO``). Read
+    # bytes first and let imdecode handle the Unicode path independently.
+    try:
+        img = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    except (OSError, ValueError):
+        img = None
     if img is None:
         return None
     app = _get_app()
@@ -95,7 +102,7 @@ def detect_duplicate_faces(image_path: str, *, dup_threshold: float = 0.35) -> d
     import cv2
     import numpy as np
 
-    img = cv2.imread(str(image_path))
+    img = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return {"faces_detected": 0, "duplicate_pairs": [], "flagged": False}
     app = _get_app()

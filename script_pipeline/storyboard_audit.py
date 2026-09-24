@@ -37,6 +37,10 @@ def build_report(run_dir: Path) -> dict:
     if not manifest_path.exists():
         return {}
     manifesto = json.loads(manifest_path.read_text(encoding="utf-8"))
+    plan_path = Path(run_dir) / "parse" / "shot_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
+    framing_by_idx = {str(s.get("index")): str(s.get("framing", "")).casefold()
+                      for s in plan.get("shots", [])}
 
     planos_com_score = []
     scores_suspeitos = []
@@ -47,7 +51,10 @@ def build_report(run_dir: Path) -> dict:
             planos_com_score.append(score)
             if score < SCORE_SUSPEITO:
                 scores_suspeitos.append({"plano": int(idx), "score": score, "file": info.get("file")})
-        if info.get("duplicate_flag"):
+        # A wide/full/OTS frame naturally contains many passengers; facial
+        # duplicate detection is meaningful only where the intended subject
+        # is large enough to compare (close/medium).
+        if info.get("duplicate_flag") and framing_by_idx.get(str(idx)) in {"close", "medium"}:
             planos_duplicados.append({
                 "plano": int(idx), "file": info.get("file"),
                 "rostos_detectados": info.get("duplicate_faces_detected"),

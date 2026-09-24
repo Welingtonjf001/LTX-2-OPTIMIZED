@@ -78,6 +78,21 @@ FRAMINGS = {
     "extreme_close": "extreme close-up on the eyes, only the eyes and brow fill the frame",
     "insert":   "tight insert on the detail, no face in frame",
 }
+
+# Os rótulos acima descrevem pessoas porque esse é o caso dominante. Sem
+# sujeito, porém, frases como "the face filling most of the frame" fazem o
+# gerador inventar um rosto para um avião, painel ou compartimento. Mantemos o
+# tamanho do plano e trocamos somente a descrição por uma versão ambiental.
+FRAMINGS_SEM_SUJEITO = {
+    "wide": "wide environmental shot, the full location and its spatial layout visible, no foreground person",
+    "full": "full view of the primary object or environmental action, completely visible in frame, no person implied",
+    "medium": "medium environmental shot centered on the primary object or action, no person implied",
+    "medium_2": "medium environmental shot centered on the primary objects or action, no people implied",
+    "ots": "medium environmental shot centered on the primary object or action, no person implied",
+    "close": "close detail shot of the primary object or environmental feature, no human face implied",
+    "extreme_close": "extreme close detail of the primary object or environmental feature, no human face implied",
+    "insert": FRAMINGS["insert"],
+}
 # Complemento do enquadramento, colado na clausula do SUJEITO. Existe so onde o
 # enquadramento e ambiguo sobre QUEM aparece: no ots ha duas pessoas no quadro e
 # uma delas esta de costas, entao dizer qual e qual e a diferenca entre um plano
@@ -448,7 +463,7 @@ def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
     ação já calculado pelo chamador (não duplica enriquecimento) -- aqui
     entra encurtado e fraseado como um instante congelado, não a ação
     inteira em curso (que é o que o vídeo descreve)."""
-    partes = [FRAMINGS[framing]]
+    partes = [FRAMINGS[framing] if subject else FRAMINGS_SEM_SUJEITO[framing]]
     if ANGLES.get(angle):
         partes.append(ANGLES[angle])
     if subject:
@@ -479,7 +494,17 @@ def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
     # uma estrutura pintada AO AR LIVRE no still. O marcador de interior/exterior
     # esta no cabecalho e nao chegava ao prompt -- e "corredor" sozinho nao
     # obriga o modelo a ficar dentro de nada.
-    cenario = ", ".join(p for p in (interior, location, time_of_day) if p)
+    # Defesa em profundidade contra o bug corrigido em parse_screenplay.py (2026-09-23,
+    # CERCO EM SEUL): um cabecalho de cena mal separado (ou uma fonte diferente do parser,
+    # como --script vindo de outro lugar) pode entregar `location` ainda em CAIXA ALTA,
+    # igual a um letreiro -- e e exatamente esse padrao que faz o FLUX/Qwen renderizarem
+    # a frase como texto na cena (forbidden_text_detected no gate). Baixa a caixa quando o
+    # texto e majoritariamente maiusculo; nao muda nomes proprios normais (frase mista).
+    location_segura = location
+    letras = [c for c in location if c.isalpha()]
+    if letras and sum(1 for c in letras if c.isupper()) / len(letras) > 0.8:
+        location_segura = location.lower()
+    cenario = ", ".join(p for p in (interior, location_segura, time_of_day) if p)
     if cenario:
         partes.append(cenario)
     if look:
@@ -697,12 +722,24 @@ def _plano_de_estabelecimento(scene: dict, style: dict, tensao: float | None,
     cenario = ", ".join(p for p in (interior, scene.get("location", ""),
                                     scene.get("time_of_day", "")) if p)
     partes = [ESTABELECIMENTO_FRAMING]
+    occupants = [str(name) for name in (scene.get("characters") or []) if str(name).strip()]
+    if occupants:
+        # "empty and still" era uma contradição estrutural em cenas povoadas:
+        # o plano seguinte mostrava passageiros/coadjuvantes, mas o primeiro
+        # quadro ensinava ao modelo uma locação vazia. O wide agora estabelece
+        # também a ocupação corrente sem transformar todos em sujeitos de close.
+        partes.append("the space is occupied as described in the scene, with current occupants visible in their established positions")
     if cenario:
         partes.append(cenario)
     if look:
         partes.append(look)
-    corpo = (f"the {scene.get('location')} is revealed, empty and still"
-             if scene.get("location") else "the location is revealed, empty and still")
+    if occupants:
+        names = ", ".join(occupants)
+        corpo = (f"the {scene.get('location') or 'location'} and its current occupants "
+                 f"are revealed in a stable wide view; {names} remain in their established positions")
+    else:
+        corpo = (f"the {scene.get('location')} is revealed, empty and still"
+                 if scene.get("location") else "the location is revealed, empty and still")
     video = [corpo]
     if MOVEMENTS.get(movimento):
         video.append(MOVEMENTS[movimento])
@@ -892,6 +929,7 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             "position": pos,
             "type": item.get("type"),
             "line_index": item.get("line_index"),
+            "source_unit_id": item.get("source_unit_id"),
             "framing": enquadre,
             "angle": angulo,
             "movement": movimento,
@@ -1312,6 +1350,11 @@ def main() -> int:
                     help="characters/cast.json; os descritores entram nos prompts de still")
     ap.add_argument("--dialogue", default=None,
                     help="dialogue/lines.json; usa a duracao REAL do TTS por fala")
+    ap.add_argument("--max-speech-seconds", type=float, default=6.0,
+                    help="fala mais longa que isto vira varios planos de fala (mesmo falante em "
+                         "close, audio recortado em silencio) -- fala longa num clipe so faz o "
+                         "falante sair do quadro e o lipsync falhar (Voo 702). 0 desliga. So com "
+                         "duracao real de TTS e sem --include-quotes.")
     ap.add_argument("--out")
     ap.add_argument("--camera-llm", action="store_true",
                     help="deixa o LLM refinar movimento/luz por plano, dentro do "
@@ -1380,6 +1423,14 @@ def main() -> int:
                     include_quotes=args.include_quotes, style_changes=changes,
                     descriptors=descritores, durations=duracoes,
                     dialogue_close_only=so_close, off_screen=off_screen)
+    if duracoes and args.max_speech_seconds > 0 and not args.include_quotes:
+        from script_pipeline.speech_split import split_long_speech, load_audio_paths
+        plan = split_long_speech(plan, duracoes, load_audio_paths(dlg),
+                                 max_seconds=args.max_speech_seconds, folga=FALA_FOLGA_S,
+                                 frames_fn=frames_for, fps=args.fps)
+        info = plan.get("speech_split") or {}
+        print(f"[shot_plan] {info.get('falas_divididas', 0)} fala(s) longa(s) dividida(s) "
+              f"em planos de ate {args.max_speech_seconds:g}s")
     if args.camera_llm:
         enrich_camera_style(plan, engine=args.engine, log=print)
     out = Path(args.out) if args.out else sp.parent / "shot_plan.json"
