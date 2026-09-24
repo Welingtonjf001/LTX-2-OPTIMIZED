@@ -535,7 +535,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     do LTX. Duas cargas no total em vez de vinte."""
     import ltx25_backend
     import script_pipeline.generate_storyboards as sb
-    if engine == "minimax":
+    if engine in ("minimax", "minimax-longtake"):
         import minimax_h3_backend
     # LongCat (2026-09-13): motor SO de planos de fala; os planos sem fala do mesmo run
     # seguem no LTX. `engine="longcat"` = fala no LongCat, acao no LTX.
@@ -554,9 +554,9 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
     # sido derrubado. O orquestrador de producao (`run_decupagem.py`) sempre usa
     # duas passadas (--stills-only depois --videos-only) e nunca bate nisso; so a
     # chamada direta/avulsa (CLI ou função) expõe a combinação perigosa.
-    if engine == "minimax" and not stills_only and not videos_only:
+    if engine in ("minimax", "minimax-longtake") and not stills_only and not videos_only:
         raise ValueError(
-            "engine=minimax exige duas passadas: chame render() com stills_only=True "
+            f"engine={engine} exige duas passadas: chame render() com stills_only=True "
             "primeiro (todos os stills, com o ComfyUI do FLUX no ar) e depois "
             "videos_only=True (troca para o ComfyUI do MiniMax H3). O modo combinado "
             "derrubaria o 8188 antes de gerar os stills que ainda faltam.")
@@ -647,9 +647,9 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             log(f"[render] servidor Fish Speech ({_fish_port}) encerrado antes do estagio de "
                 "video (libera VRAM) -- suba de novo (START_API.ps1) antes da proxima corrida "
                 "que precise dele para TTS.")
-        if engine == "minimax":
+        if engine in ("minimax", "minimax-longtake"):
             if sb.comfy_is_up("http://127.0.0.1:8188"):
-                log("[render] motor=minimax: derrubando o ComfyUI do LTX 2.5 (8188) antes de subir o do MiniMax H3 (8189).")
+                log(f"[render] motor={engine}: derrubando o ComfyUI do LTX 2.5 (8188) antes de subir o do MiniMax H3 (8189).")
                 sb.stop_comfyui(8188, log=log)
             # minimax_h3_backend.generate() sobe o proprio servidor sozinho
             # (ensure_server, dentro de submit_and_wait) -- nao precisa de
@@ -723,6 +723,10 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         location_refs = {k: v for k, v in json.loads(location_ref_path.read_text(encoding='utf-8')).items()
                          if Path(v).is_file()}
     feitos = []
+    # engine="minimax-longtake": planos ficam aqui ate o laco terminar, e saem
+    # agrupados por cena numa unica chamada a generate_longtake() (ver
+    # _minimax_longtake_flush mais abaixo, MEMORIAL 3.117/3.118).
+    pendentes_longtake: list[dict] = []
 
     # Semente por plano (gate visual): o laco de regeneracao grava a semente nova de cada plano
     # refeito em shots/seed_overrides.json; sem lembrar dela, a proxima corrida (semente padrao)
@@ -873,7 +877,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # proprio texto fecha essa lacuna pros dois motores.
         import hashlib
         chave += f"|prompt={hashlib.sha1(shot['video_prompt'].encode('utf-8')).hexdigest()[:12]}"
-        if engine == "minimax":
+        if engine in ("minimax", "minimax-longtake"):
             # Mesmo bug de cache silencioso: sem isto, ligar/desligar
             # --minimax-no-still ou --minimax-chain-max-seconds reaproveitaria
             # o clipe velho (frames/still/prompt/engine iguais) em vez de
@@ -885,6 +889,11 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             chave += (f"|ar={minimax_aspect_ratio or ''}|mp={minimax_megapixels or 0}"
                       f"|turbo={int(minimax_turbo)}|refaudio={int(minimax_ref_audio)}"
                       f"|variant={os.environ.get('MINIMAX_H3_VARIANT', '')}")
+            if engine == "minimax-longtake":
+                # O checkpoint do long take e outro (Singularity, nao um dos
+                # MINIMAX_VARIANTS) -- sem isto trocar MINIMAX_H3_LONGTAKE_UNET
+                # reaproveitaria o clipe velho em silencio.
+                chave += f"|ltunet={minimax_h3_backend.LONGTAKE_UNET_FILENAME}"
         if engine == "ltx":
             chave += f"|nostill={int(ltx_no_still)}|chain={ltx_chain_max_seconds or 0}"
             # BUGFIX auditoria 2026-09-16 (A04): a VARIANTE do transformer 2.5
@@ -906,7 +915,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         # audio -- entram na chave, senao ligar um LoRA reaproveitaria o clipe velho em
         # silencio. So quando ligados: corrida sem eles mantem a chave antiga e o cache.
         prompt_video, ic_spec = shot["video_prompt"], None
-        if engine != "minimax":
+        if engine not in ("minimax", "minimax-longtake"):
             if video_loras:
                 chave += "|loras=" + ",".join(f"{n}@{s:g}" for n, s in video_loras)
             if ic_mode and ic_mode != "off":
@@ -1181,6 +1190,26 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                         duration_seconds=duracao_plano,
                         seed=seed_shot + i, turbo=minimax_turbo,
                         log_cb=lambda m: log(f"    [minimax_h3] {m}"), timeout=3600)
+            elif engine == "minimax-longtake":
+                # Nao gera agora -- acumula o segmento. O grupo inteiro (cena)
+                # sai numa unica chamada a generate_longtake() depois do laco
+                # de planos, pra usar contexto em latente entre eles em vez de
+                # reencadear por imagem. Mesmas referencias que o caminho
+                # "minimax" normal usaria (still do plano + sheet do
+                # personagem), so o primeiro plano do GRUPO leva ref_images de
+                # verdade -- os seguintes herdam identidade do contexto.
+                refs_minimax = [] if minimax_no_still else ([str(still)] if still else [])
+                sheet_do_sujeito = (character_sheets or {}).get(sujeito)
+                if sheet_do_sujeito and sheet_do_sujeito not in refs_minimax:
+                    refs_minimax.append(sheet_do_sujeito)
+                pendentes_longtake.append({
+                    "shot": i, "scene": shot["scene"], "framing": shot.get("framing"),
+                    "clip_path": clip_path,
+                    "marca": marca, "chave": chave, "still": still,
+                    "prompt": shot["video_prompt"], "ref_images": refs_minimax[:2],
+                    "duration_seconds": shot["frames"] / fps,
+                })
+                continue
             elif engine == "longcat" and wav_cond:
                 # Plano de FALA no LongCat-Avatar 1.5 (MEMORIAL 3.83): boca gerada junto com
                 # o video a partir do wav do TTS -- o lip-sync depois e opcional. Os planos
@@ -1268,9 +1297,159 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
             if engine == "minimax":
                 log("  reiniciando o servidor do MiniMax H3 antes do proximo plano (falha pode ter deixado geracao orfa presa na porta).")
                 sb.stop_comfyui(8189, log=log)
+    if pendentes_longtake:
+        feitos.extend(_minimax_longtake_flush(
+            pendentes_longtake, fps=fps, seed=seed,
+            minimax_aspect_ratio=minimax_aspect_ratio, minimax_megapixels=minimax_megapixels,
+            log=log))
     if not videos_only and not only_shots:
         prune_stale_stills(stills_dir, len(plan["shots"]), log=log)
     return feitos
+
+
+def _extract_subclip(src: str, dest: str, start_seconds: float, duration_seconds: float,
+                     *, log=print) -> bool:
+    """Recorta [start_seconds, start_seconds+duration_seconds) de `src` para
+    `dest`, reencodando (não `-c copy`) para garantir corte no frame exato --
+    um `-c copy` corta só em keyframe, e o vídeo combinado do long take pode
+    não ter um a cada fronteira de plano."""
+    r = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", src,
+                        "-ss", f"{start_seconds:.3f}", "-t", f"{duration_seconds:.3f}",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                        "-c:a", "aac", dest], capture_output=True, text=True)
+    if r.returncode != 0 or not Path(dest).exists():
+        log(f"    ffmpeg falhou ao recortar {dest}: {r.stderr[-300:]}")
+        return False
+    return True
+
+
+# Framings que ABREM um take novo -- são os dois que o próprio catálogo de
+# `FRAMINGS`/`FRAMINGS_SEM_PESSOA` em `shot_plan.py` descreve como "shot
+# establishing"/"full view", ou seja, o sinal mais próximo de "novo setup de
+# câmera" que o shot_plan já carrega hoje (nenhum campo marca "corte" de
+# forma explícita). `insert`/`close`/`medium`/`ots`/`extreme_close` ficam no
+# MESMO take do wide/full mais recente -- são a continuação/detalhe da MESMA
+# ação, não um novo lugar/ângulo geral. Pedido do usuário 2026-09-24 depois
+# de medir que agrupar por CENA (a unidade de ROTEIRO, não de câmera) juntava
+# os 25 planos de um roteiro inteiro num take só. Ver MEMORIAL 3.120.
+TAKE_BREAK_FRAMINGS = {"wide", "full"}
+
+
+def _assign_takes(pendentes_ordenados: list[dict]) -> None:
+    """Atribui `take_id` (em lugar, muta os dicts) -- toda troca de CENA
+    sempre abre um take novo, e dentro da mesma cena todo plano
+    `wide`/`full` TAMBÉM abre um take novo. Um wide/full sem framing
+    reconhecido (`None`) é tratado como quebra também -- mais seguro
+    juntar de menos que de mais quando a informação está faltando."""
+    take_id = -1
+    cena_anterior = object()
+    for p in pendentes_ordenados:
+        nova_cena = p["scene"] != cena_anterior
+        se_quebra = nova_cena or p["framing"] in TAKE_BREAK_FRAMINGS or not p["framing"]
+        if se_quebra:
+            take_id += 1
+        p["take_id"] = take_id
+        cena_anterior = p["scene"]
+
+
+def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
+                            minimax_aspect_ratio: str | None, minimax_megapixels: float | None,
+                            log=print) -> list[dict]:
+    """Agrupa os planos pendentes de `engine="minimax-longtake"` em TAKES
+    (ver `_assign_takes`: cena nova OU plano wide/full abre take) e gera cada
+    grupo com UMA chamada a `minimax_h3_backend.generate_longtake()` --
+    contexto em latente entre planos do mesmo take (MEMORIAL 3.117), em vez
+    do encadeamento por imagem que o resto do pipeline usa. O vídeo combinado
+    é recortado de volta em um arquivo por plano (`_extract_subclip`), na
+    MESMA convenção de nome (`clip_path`) que o caminho de clipe único usa --
+    o resto do pipeline (cache, `build_clips_manifest`, lipsync/mix/assemble)
+    não muda nada, vê os mesmos `shotNNN.mp4` de sempre.
+
+    Take de 1 plano só usa `generate()` normal -- sem um segundo segmento não
+    há contexto a herdar, e o long take só complicaria o split à toa.
+
+    NÃO CARACTERIZADO ainda: a grade exata de `duration_frames` que o H3
+    aceita neste caminho (ver `build_longtake_workflow`); aqui uso
+    `round(segundos * fps)` sem arredondamento algum -- revise visualmente se
+    a duração de um plano sair perceptivelmente errada. Nem o tamanho máximo
+    de take seguro -- só validado até 3 segmentos (MEMORIAL 3.119); um take
+    de 8-9 planos (como sai de um roteiro real com poucos wides) é NOVO
+    território, sem medição de tempo nem de estabilidade."""
+    import minimax_h3_backend
+    from itertools import groupby
+
+    feitos_novos = []
+    ordenados = sorted(pendentes, key=lambda p: (p["scene"], p["shot"]))
+    _assign_takes(ordenados)
+    for (cena, take_id), grupo_iter in groupby(ordenados, key=lambda p: (p["scene"], p["take_id"])):
+        grupo = list(grupo_iter)
+        if len(grupo) == 1:
+            p = grupo[0]
+            log(f"  [minimax-longtake] cena {cena} take {take_id}: 1 plano só -- gerando como clipe único")
+            try:
+                minimax_h3_backend.generate(
+                    p["prompt"], str(p["clip_path"]), ref_images=p["ref_images"] or None,
+                    aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
+                    megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
+                    duration_seconds=p["duration_seconds"], seed=seed + p["shot"],
+                    log_cb=lambda m: log(f"    [minimax_h3_longtake] {m}"), timeout=3600)
+                p["marca"].write_text(
+                    json.dumps({"key": p["chave"], "frames": _clip_frames(p["clip_path"])}),
+                    encoding="utf-8")
+                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": str(p["clip_path"])})
+            except Exception as e:
+                log(f"  [minimax-longtake] plano {p['shot']} FALHOU: {type(e).__name__}: {e}")
+                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": None})
+                import script_pipeline.generate_storyboards as _sb
+                _sb.stop_comfyui(8189, log=log)
+            continue
+
+        framings_grupo = [p["framing"] for p in grupo]
+        log(f"  [minimax-longtake] cena {cena} take {take_id}: {len(grupo)} planos "
+            f"({framings_grupo}) num take só")
+        if len(grupo) > 5:
+            log(f"    aviso: take de {len(grupo)} planos -- só validado até 3 segmentos "
+                "(MEMORIAL 3.119), acompanhe tempo/estabilidade de perto.")
+        segments = []
+        for j, p in enumerate(grupo):
+            duration_frames = max(1, round(p["duration_seconds"] * fps))
+            p["duration_frames"] = duration_frames
+            segments.append({
+                "prompt": p["prompt"], "duration_frames": duration_frames,
+                "continuity_mode": "shot" if j == 0 else "context",
+                "ref_images": p["ref_images"] if j == 0 else [],
+            })
+        combined_path = grupo[0]["clip_path"].parent / f"scene{cena:02d}_take{take_id:02d}_combined.mp4"
+        try:
+            minimax_h3_backend.generate_longtake(
+                segments, str(combined_path), frame_rate=int(fps),
+                aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
+                megapixels=minimax_megapixels if minimax_megapixels is not None else 0.5,
+                seed=seed + cena * 1000 + take_id, project_name=f"scene{cena:02d}_take{take_id:02d}",
+                log_cb=lambda m: log(f"    [minimax_h3_longtake] {m}"),
+                timeout=3600 * max(1, len(grupo)))
+        except Exception as e:
+            log(f"  [minimax-longtake] cena {cena} take {take_id} FALHOU: {type(e).__name__}: {e}")
+            import script_pipeline.generate_storyboards as _sb
+            _sb.stop_comfyui(8189, log=log)
+            for p in grupo:
+                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": None})
+            continue
+
+        cursor = 0
+        for p in grupo:
+            inicio_s = cursor / fps
+            dur_s = p["duration_frames"] / fps
+            if _extract_subclip(str(combined_path), str(p["clip_path"]), inicio_s, dur_s, log=log):
+                p["marca"].write_text(
+                    json.dumps({"key": p["chave"], "frames": _clip_frames(p["clip_path"])}),
+                    encoding="utf-8")
+                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": str(p["clip_path"])})
+            else:
+                log(f"  [minimax-longtake] falha ao recortar o plano {p['shot']} do take combinado")
+                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": None})
+            cursor += p["duration_frames"]
+    return feitos_novos
 
 
 # --------------------------------------------------------------------------

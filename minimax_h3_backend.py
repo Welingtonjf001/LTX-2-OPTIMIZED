@@ -30,6 +30,28 @@ MiniMaxH3ReferenceToVideo aceitar `ref_audios` e ja trazer `audio_vae`
 pronto) -- os nos LoadAudio sao criados por job em `build_workflow()`. Use
 combinado com a fala exata no `--prompt`, nomeando o personagem que fala,
 pra o modelo tentar gerar a fala real em vez de inventar uma voz propria.
+
+`generate_longtake()` (2026-09-24, MEMORIAL 3.117): segundo caminho de
+geracao, PARALELO ao `generate()` acima -- planos "long take" costurados por
+CONTEXTO EM LATENTE via o custom node `comfyui-easy-media`
+(`easy multiTrackEditor` + `easy multitrackProject`), em vez de reencadear
+por imagem (I2V do ultimo frame) como o resto do pipeline faz. Cada segmento
+roda em single-pass; um segmento com `continuity_mode="context"` herda o
+latente do segmento anterior, o que evita o vazamento de objeto pela
+imagem-ancora documentado em [[project_ltx_continuous_video_plan]]. Usa um
+CHECKPOINT DIFERENTE do resto deste modulo (`Minimax-h3_Singularity_ref2va`,
+nao um dos `MINIMAX_VARIANTS`) e depende do custom node estar instalado em
+`MINIMAX_ROOT/ComfyUI/custom_nodes/ComfyUI-Easy-Media`. VALIDADO com GPU real
+2x em 2026-09-24 (bola rolando sem referencia; depois com HA-EUN via ref2v,
+2 segmentos cada, sem erro) -- ver MEMORIAL 3.115-3.117. O grafo API vem de
+um TEMPLATE ESTATICO (`minimax_h3_longtake_api_template.json`, capturado do
+proprio `app.graphToPrompt()` do frontend do ComfyUI rodando), NAO do
+`comfy_workflow_tool.convert()` que o resto deste modulo usa -- esse node
+(`easy multiTrackEditor`) declara widgets em tipos que `convert()` nao
+reconhece (`COMFY_DYNAMICCOMBO_V3`, `TRACK_DATA`), e o mapeamento posicional
+corromperia o grafo em silencio (mesma classe de bug do `comfy_workflow_tool
+.convert() erra valores de widget` no CLAUDE.md). Antes de reusar esse
+padrao para outro node "easy media", confira `/object_info` primeiro.
 """
 from __future__ import annotations
 
@@ -72,6 +94,21 @@ N_UNET = "127"             # UNETLoader -- diffusion_models/*.safetensors ou *.g
 N_VIDEO_VAE = "119"        # VAELoader (video) -- tambem usado por N_R2V pra encode() das refs
 N_SAVE = "92"              # SaveVideo
 N_GUIDER = "126"           # BasicGuider -- consome o MODEL final (turbo/LoRA/SageAttn/ControlNet, o que estiver ligado)
+
+# Nos do grafo "long take" (comfyui-easy-media) -- template ESTATICO, nao
+# convertido por comfy_workflow_tool (ver docstring do modulo). IDs iguais
+# aos do JSON capturado em 2026-09-24.
+LONGTAKE_TEMPLATE_PATH = os.path.join(
+    ROOT, "comfyui_workflows", "minimax_h3_longtake_api_template.json")
+N_LT_UNET = "11"      # UNETLoader -- checkpoint Singularity, NAO um dos MINIMAX_VARIANTS
+N_LT_CLIP = "10"       # CLIPLoader
+N_LT_LORA = "6"        # LoraLoaderModelOnly -- turbo 4-step
+N_LT_SAGEATTN = "27"   # MiniMaxH3MemoryEfficientSageAttentionPatch
+N_LT_STEPS = "22"      # BasicScheduler -- 8 sigmas fixos, "steps" widget controla a densidade
+N_LT_PROJECT = "15"    # easy multitrackProject -- project_name/seed
+N_LT_EDITOR = "29"     # easy multiTrackEditor -- resolution.*/track_data
+N_LT_COMBINE = "17"    # easy multitrackProjectVideoCombine
+N_LT_SAVE = "35"       # SaveVideo -- mesmo class_type do N_SAVE (92) do r2v; submit_and_wait ja sabe ler
 
 # ControlNet de pose (MiniMax H3 Fun ControlNet Union, integrado ao ComfyUI em
 # 31/08/2026) -- IDs novos, criados por job em build_workflow() quando
@@ -141,6 +178,19 @@ _variant_unet, _variant_clip = MINIMAX_VARIANTS[DEFAULT_MINIMAX_VARIANT]
 UNET_FILENAME = os.environ.get("MINIMAX_H3_UNET", _variant_unet)
 CLIP_FILENAME = os.environ.get("MINIMAX_H3_CLIP", _variant_clip)
 
+# Checkpoint do long take: fine-tune de terceiro (WarmBloodAban/Minimax-h3_
+# Singularity), baixado 2026-09-24 na variante w4a8 pruned (11,8 GB, contra
+# 34 GB do int8 original) -- mesmo formato de quantizacao do padrao w4a8 ja
+# catalogado acima, so que treino diferente. NAO faz parte de MINIMAX_VARIANTS
+# porque e um checkpoint de terceiro, nao um dos oficiais.
+LONGTAKE_UNET_FILENAME = os.environ.get(
+    "MINIMAX_H3_LONGTAKE_UNET",
+    "Minimax-h3_Singularity_ref2va_v1.3_Pruned_w4a8.safetensors")
+LONGTAKE_CLIP_FILENAME = os.environ.get("MINIMAX_H3_LONGTAKE_CLIP", CLIP_FILENAME)
+LONGTAKE_LORA_FILENAME = os.environ.get(
+    "MINIMAX_H3_LONGTAKE_LORA",
+    "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
+
 DEFAULT_ASPECT = "16:9 (Widescreen)"
 DEFAULT_MEGAPIXELS = 0.4
 
@@ -178,6 +228,7 @@ CONTROLNET_WEIGHT_FILE = os.environ.get(
 _server_proc = None
 _server_log_handle = None
 _base_api_cache: dict | None = None
+_base_api_longtake_cache: dict | None = None
 _BOOT_LOCK_PATH = os.path.join(MINIMAX_ROOT, "logs", "minimax_h3.boot.lock")
 _BOOT_LOCK_STALE_S = 600
 
@@ -629,6 +680,180 @@ def submit_and_wait(api: dict, log_cb=None, timeout: int = 3600,
     raise RuntimeError(f"Timeout após {timeout}s.")
 
 
+def base_api_longtake() -> dict:
+    """Carrega o template ESTATICO do grafo long take (ver docstring do
+    modulo pra porque nao passa por `comfy_workflow_tool.convert()`) e
+    aplica os overrides de checkpoint. Cacheado como `base_api()`."""
+    global _base_api_longtake_cache
+    if _base_api_longtake_cache is None:
+        ensure_server()
+        api = json.load(open(LONGTAKE_TEMPLATE_PATH, encoding="utf-8"))
+        esperados = [N_LT_UNET, N_LT_CLIP, N_LT_LORA, N_LT_SAGEATTN, N_LT_STEPS,
+                    N_LT_PROJECT, N_LT_EDITOR, N_LT_COMBINE, N_LT_SAVE]
+        faltando = [n for n in esperados if n not in api]
+        if faltando:
+            raise RuntimeError(
+                "O template do long take mudou de estrutura: nós esperados "
+                f"ausentes {faltando}. Reveja {LONGTAKE_TEMPLATE_PATH} e os IDs "
+                "N_LT_* no topo deste módulo.")
+        api[N_LT_UNET]["inputs"]["unet_name"] = LONGTAKE_UNET_FILENAME
+        api[N_LT_CLIP]["inputs"]["clip_name"] = LONGTAKE_CLIP_FILENAME
+        api[N_LT_LORA]["inputs"]["lora_name"] = LONGTAKE_LORA_FILENAME
+        _base_api_longtake_cache = api
+    return json.loads(json.dumps(_base_api_longtake_cache))  # copia rasa por job
+
+
+def build_longtake_workflow(segments: list[dict], *, aspect_ratio: str = DEFAULT_ASPECT,
+                            megapixels: float = 0.5, frame_rate: int = 24,
+                            project_name: str | None = None, seed: int = 42,
+                            steps: int = 8, filename_prefix: str = "minimax_h3_longtake") -> dict:
+    """Monta o grafo API de um plano "long take" a partir de uma lista de
+    segmentos contiguos. Cada `segments[i]` e um dict:
+
+    - `prompt` (obrigatorio): texto do segmento. Se citar `ref_images`, cite
+      `<Picture N>` no proprio texto -- ver `build_prompt_with_refs`
+      (`generate_longtake` injeta automaticamente por padrao).
+    - `duration_frames` (obrigatorio): quantidade de frames do segmento.
+      NENHUM arredondamento e aplicado aqui -- os dois testes validados
+      (2026-09-24) usaram 48 frames/segmento a 24fps sem erro, mas a grade
+      exata que o H3 aceita (tipo o "5 + 17k" do r2v) nao foi caracterizada
+      pra este caminho. Se a geracao recusar um valor, tente um multiplo de
+      8 (tamanho de bloco visto no log: "Pinned N frames as N/8 blocks").
+    - `continuity_mode`: "shot" (independente), "context" (herda o latente
+      do segmento anterior -- o mecanismo que este caminho existe pra usar)
+      ou "context_swap" (troca de personagem preservando o audio). Default:
+      "shot" pro primeiro segmento, "context" pros seguintes.
+    - `ref_images`: 0+ caminhos LOCAIS de imagem (identidade). So faz
+      sentido no primeiro segmento de um take -- os seguintes herdam a
+      identidade via o proprio contexto em latente. Ativa `task_mode="ref"`
+      automaticamente.
+    - `task_mode`: override explicito ("default"/"ref") -- normalmente
+      deduzido de `ref_images`.
+
+    NAO estagia arquivos (isso e `generate_longtake`) -- esta funcao so
+    monta o grafo, os `ref_images` devem ja ser nomes de arquivo presentes
+    em `MINIMAX_ROOT/ComfyUI/input/`."""
+    if not segments:
+        raise ValueError("build_longtake_workflow precisa de pelo menos 1 segmento.")
+    api = base_api_longtake()
+    proj = project_name or f"longtake_{uuid.uuid4().hex[:8]}"
+    api[N_LT_PROJECT]["inputs"]["project_name"] = proj
+    api[N_LT_PROJECT]["inputs"]["seed"] = seed
+    api[N_LT_EDITOR]["inputs"]["resolution.aspect_ratio"] = aspect_ratio
+    api[N_LT_EDITOR]["inputs"]["resolution.megapixels"] = megapixels
+    api[N_LT_STEPS]["inputs"]["steps"] = steps
+    # SEM subpasta ("video/..."): `submit_and_wait` copia pelo NOME do
+    # arquivo que o ComfyUI devolve no historico, sem o "subfolder" que o
+    # SaveVideo tambem retorna -- um filename_prefix com "/" cria uma
+    # subpasta real em disco (ex. output/video/foo.mp4) que o
+    # `os.path.join(COMFY_OUTPUT, files[0])` de generate_longtake() nunca
+    # encontra (files[0] e so "foo_00001_.mp4", sem o "video/"). MEDIDO
+    # 2026-09-24: FileNotFoundError depois de 591s de geracao bem-sucedida --
+    # o video existia, so no lugar errado. O caminho r2v (build_workflow)
+    # nunca bateu nisso porque nunca prefixou com subpasta.
+    api[N_LT_SAVE]["inputs"]["filename_prefix"] = filename_prefix
+
+    track_segments = []
+    cursor = 0
+    for i, seg in enumerate(segments):
+        dur = int(seg["duration_frames"])
+        if dur <= 0:
+            raise ValueError(f"segmento {i}: duration_frames deve ser > 0 (recebeu {dur}).")
+        mode = seg.get("continuity_mode") or ("shot" if i == 0 else "context")
+        images = [{
+            "id": f"ref-{i}-{j}",
+            "source_type": "input",
+            "file_path": os.path.basename(path),
+            "file_name": os.path.basename(path),
+            "shared_reference": True,
+        } for j, path in enumerate(seg.get("ref_images") or [])]
+        task_mode = seg.get("task_mode") or ("ref" if images else "default")
+        track_segments.append({
+            "id": str(uuid.uuid4()),
+            "start_frame": cursor,
+            "end_frame": cursor + dur,
+            "color": "var(--multitrack-task-bg)",
+            "content": {
+                "media_type": "none",
+                "task_mode": task_mode,
+                "continuity_mode": mode,
+                "ref_image_size": "max" if images else "match",
+                "images": images,
+                "muted": False,
+                "volume_db": 0,
+                "user_prompt": seg["prompt"],
+            },
+        })
+        cursor += dur
+
+    track_data = {
+        "muted": False, "volume_db": 0, "task_markers": [], "task_overview": False,
+        "tracks": [{
+            "id": str(uuid.uuid4()), "name": "Task 0", "type": "task",
+            "task_mode": "default", "color": "var(--multitrack-task-bg)",
+            "muted": False, "solo": False, "volume_db": 0, "locked": False,
+            "segments": track_segments,
+        }],
+        "total_length": cursor,
+        "frame_rate": frame_rate,
+    }
+    api[N_LT_EDITOR]["inputs"]["track_data"] = json.dumps(track_data, ensure_ascii=False)
+    return api
+
+
+def generate_longtake(segments: list[dict], output_path: str, *,
+                      aspect_ratio: str = DEFAULT_ASPECT, megapixels: float = 0.5,
+                      frame_rate: int = 24, seed: int = 42, steps: int = 8,
+                      project_name: str | None = None, auto_cite_refs: bool = True,
+                      tag_style: str = "picture", log_cb=None,
+                      timeout: int = 3600) -> str:
+    """Gera um plano "long take" (2+ segmentos costurados por contexto em
+    latente, ver `build_longtake_workflow`) e copia o vídeo final combinado
+    para *output_path*. Estagia as `ref_images` de cada segmento em
+    `MINIMAX_ROOT/ComfyUI/input/` (como `generate()`) e limpa no final.
+
+    VALIDADO com GPU real 2026-09-24: 2 segmentos sem referência (284s) e 2
+    segmentos com referência de identidade via ref2v (214s), ambos sem erro
+    — ver MEMORIAL 3.115-3.117. Não testado ainda: 3+ segmentos,
+    `context_swap`, planos de fala (áudio de referência)."""
+    if not segments:
+        raise ValueError("generate_longtake precisa de pelo menos 1 segmento.")
+    staged_paths: list[str] = []
+    staged_segments: list[dict] = []
+    for seg in segments:
+        seg = dict(seg)
+        refs = seg.get("ref_images") or []
+        staged = [_stage_input(p) for p in refs]
+        staged_paths.extend(staged)
+        seg["ref_images"] = staged
+        if auto_cite_refs and staged and "<Picture" not in seg["prompt"] and "Image1" not in seg["prompt"]:
+            seg["prompt"] = build_prompt_with_refs(seg["prompt"], len(staged), tag_style=tag_style)
+        staged_segments.append(seg)
+
+    prefix = os.path.splitext(os.path.basename(output_path))[0] or "minimax_h3_longtake"
+    api = build_longtake_workflow(
+        staged_segments, aspect_ratio=aspect_ratio, megapixels=megapixels,
+        frame_rate=frame_rate, project_name=project_name, seed=seed, steps=steps,
+        filename_prefix=prefix)
+    _log(f"[minimax_h3_longtake] {len(segments)} segmento(s), modos "
+        f"{[s.get('continuity_mode') or ('shot' if i == 0 else 'context') for i, s in enumerate(segments)]}",
+        log_cb)
+    try:
+        files = submit_and_wait(api, log_cb=log_cb, timeout=timeout, expect_node=N_LT_SAVE)
+        if not files:
+            raise RuntimeError("A geração terminou sem produzir arquivo de saída.")
+        src = os.path.join(COMFY_OUTPUT, files[0])
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        shutil.copy2(src, output_path)
+        return output_path
+    finally:
+        for p in staged_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def generate(prompt: str, output_path: str, *, ref_images: list[str] | None = None,
             ref_audios: list[str] | None = None,
             aspect_ratio: str = DEFAULT_ASPECT, megapixels: float = DEFAULT_MEGAPIXELS,
@@ -693,8 +918,12 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="MiniMax H3 reference-to-video via ComfyUI")
-    ap.add_argument("--prompt", required=True)
+    ap.add_argument("--prompt")
     ap.add_argument("--output-path", required=True)
+    ap.add_argument("--longtake-json", default=None,
+                    help="caminho de um JSON com uma lista de segmentos (ver "
+                         "build_longtake_workflow) -- usa generate_longtake() em vez do "
+                         "caminho de clipe unico; --prompt e ignorado quando presente.")
     ap.add_argument("--ref-image", action="append", default=[], dest="ref_images")
     ap.add_argument("--ref-audio", action="append", default=[], dest="ref_audios",
                     help="audio de referencia (timbre/cadencia/emocao de voz), 0-2. "
@@ -724,13 +953,22 @@ if __name__ == "__main__":
     ap.add_argument("--timeout", type=int, default=3600)
     args = ap.parse_args()
 
-    out = generate(
-        args.prompt, args.output_path, ref_images=args.ref_images,
-        ref_audios=args.ref_audios, tag_style=args.tag_style,
-        aspect_ratio=args.aspect_ratio, megapixels=args.megapixels,
-        duration_seconds=args.duration_seconds, seed=args.seed, turbo=args.turbo,
-        clip_on_cpu=args.clip_on_cpu, timeout=args.timeout,
-        control_video=args.control_video, control_strength=args.control_strength,
-        control_start_percent=args.control_start_percent,
-        control_end_percent=args.control_end_percent)
+    if args.longtake_json:
+        segments = json.load(open(args.longtake_json, encoding="utf-8"))
+        out = generate_longtake(
+            segments, args.output_path, aspect_ratio=args.aspect_ratio,
+            megapixels=args.megapixels, seed=args.seed, tag_style=args.tag_style,
+            timeout=args.timeout)
+    else:
+        if not args.prompt:
+            ap.error("--prompt é obrigatório (a menos que --longtake-json seja usado).")
+        out = generate(
+            args.prompt, args.output_path, ref_images=args.ref_images,
+            ref_audios=args.ref_audios, tag_style=args.tag_style,
+            aspect_ratio=args.aspect_ratio, megapixels=args.megapixels,
+            duration_seconds=args.duration_seconds, seed=args.seed, turbo=args.turbo,
+            clip_on_cpu=args.clip_on_cpu, timeout=args.timeout,
+            control_video=args.control_video, control_strength=args.control_strength,
+            control_start_percent=args.control_start_percent,
+            control_end_percent=args.control_end_percent)
     print(f"OK -> {out}")

@@ -85,7 +85,7 @@ def build_clips_manifest(feitos: list, plan: dict, dialogue: dict, engine: str =
         i = f["shot"]
         shot = plan["shots"][i]
         from script_pipeline.speech_split import dialogue_entry
-        entrada_fala = None if engine == "minimax" else dialogue_entry(shot, dialogue)
+        entrada_fala = None if engine in ("minimax", "minimax-longtake") else dialogue_entry(shot, dialogue)
         wav = entrada_fala[0] if entrada_fala else None
         out.append({
             "id": f"scene{shot['scene']:02d}_shot{i:03d}",
@@ -101,7 +101,7 @@ def build_clips_manifest(feitos: list, plan: dict, dialogue: dict, engine: str =
             # pulando lip-sync" e a fala do MiniMax nunca era auditada -- nem
             # SyncNet, nem correlacao boca-audio, nada. Ver lipsync_scenes.py.
             "minimax_native_speech": bool(
-                engine == "minimax" and shot.get("line_index") is not None),
+                engine in ("minimax", "minimax-longtake") and shot.get("line_index") is not None),
             # BUGFIX auditoria 2026-09-16 (A07): `bool(caminho)` so confere que a
             # STRING nao e vazia, nao que o ARQUIVO existe -- um concat que falhou
             # (ver A07 em render_shots.py) podia deixar `clip` apontando pra um
@@ -146,11 +146,16 @@ def main() -> int:
     ap.add_argument("--no-reference", action="store_true")
     # Ver render_shots.py: sem condicionamento o LTX inventa voz propria.
     ap.add_argument("--no-audio-conditioning", action="store_true")
-    ap.add_argument("--engine", default="ltx", choices=["ltx", "minimax", "longcat", "wan"],
+    ap.add_argument("--engine", default="ltx",
+                    choices=["ltx", "minimax", "minimax-longtake", "longcat", "wan"],
                     help="motor de video. ltx = LTX 2.5 via ComfyUI (8188), condicionado "
                          "pela fala sintetizada (TTS). minimax = MiniMax H3 (ComfyUI "
                          "separado, 8189) -- fala e lip-sync NATIVOS a partir do texto "
                          "do prompt, sem passar pelo TTS/lipsync/mix do pipeline. "
+                         "minimax-longtake = MESMO MiniMax H3, mas planos consecutivos da "
+                         "MESMA CENA saem numa unica chamada, costurados por CONTEXTO EM "
+                         "LATENTE (comfyui-easy-media) em vez de clipes independentes -- "
+                         "validado com GPU real 2026-09-24, ver MEMORIAL 3.117/3.118. "
                          "wan = Wan 2.2 TI2V 5B, MESMO ComfyUI do LTX (8188) -- video SEMPRE "
                          "MUDO (sem audio_conditioning), fala normal depende do TTS/lip-sync "
                          "como no LTX. Validado com GPU real 2026-09-18, ver wan22_backend.py.")
@@ -268,8 +273,8 @@ def main() -> int:
 
     shots_dir = run_folder.subdir(run_dir, "shots")
     log = lambda m: print(m, flush=True)  # noqa: E731
-    if args.engine == "minimax" and not args.videos_only and not dialogo:
-        print("[5-D] motor=minimax: a fala do MiniMax H3 vem do texto do "
+    if args.engine in ("minimax", "minimax-longtake") and not args.videos_only and not dialogo:
+        print(f"[5-D] motor={args.engine}: a fala do MiniMax H3 vem do texto do "
               "video_prompt, nao do dialogue/lines.json -- confira se o "
               "shot_plan/decoupagem ja escreveu a fala dentro do prompt de "
               "cada plano (mesma convencao dos prompts de teste do usuario).")

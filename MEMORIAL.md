@@ -7919,3 +7919,266 @@ checkpoint) ou via `LoraLoader` (por cima do checkpoint atual) no grafo do `mini
 [[feedback_check_gpu_before_testing]]) — só o download rodou, nada foi enfileirado no ComfyUI do H3
 (porta 8189). Antes de medir velocidade, inspecionar as chaves do safetensors (contagem de tensores,
 nomes) para decidir se entra como `MINIMAX_H3_UNET` (checkpoint completo) ou como LoRA no backend.
+
+**Resolvido indiretamente no §3.117**: é LoRA, não checkpoint — o workflow "long take" do §3.115
+usa esse MESMO arquivo (`minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`) num node
+`LoraLoaderModelOnly` por cima do `UNETLoader` do checkpoint Singularity, e rodou 2/2 vezes sem
+erro nessa posição — confirma que é um adapter de destilação de passos, aplicável por cima de
+qualquer checkpoint compatível, não um transformer completo.
+
+### 3.117 — MiniMax H3 long take: VALIDADO com GPU real e integrado ao `minimax_h3_backend.py`
+
+Continuação do §3.115 (preparado, não testado). Com a GPU livre, rodei o workflow duas vezes pela
+UI do ComfyUI do H3 (porta 8189):
+
+1. **Sem referência de personagem** (T2V puro): bola vermelha rolando, 2 segmentos de 48 frames
+   (shot → context), 960x544, 24fps — **284s, sem erro**. O log confirma o mecanismo de contexto em
+   latente ativo: `"Re-encoded video anchor: soft context=22 frames, hard anchor=5 frames"` no
+   segundo segmento.
+2. **Com referência de personagem real**: a mesma estrutura de 2 segmentos, agora com `task_mode=
+   "ref"` no primeiro segmento citando `<Picture 1>` e a foto de `characters/refs/HA-EUN.png`
+   (Voo 702) como `shared_reference` — **214s, sem erro**, cache de condicionamento mostrando
+   `参考图片(568.88 KiB)` (a imagem de referência foi de fato consumida).
+
+Os dois vídeos finais foram entregues ao usuário para avaliação visual da emenda — julgamento de
+qualidade (identidade consistente, corte suave) é dele, não medido aqui.
+
+**Integração ao pipeline** (pedido do usuário: "funcionou muito bem nos dois exemplos, integre ao
+pipeline"): implementei `generate_longtake()`/`build_longtake_workflow()`/`base_api_longtake()` em
+`minimax_h3_backend.py`, no MESMO padrão do `generate()`/`build_workflow()`/`base_api()` já
+existente pro caminho de clipe único (r2v). Escopo desta integração: uma função de biblioteca
+completa e testada, reusável por qualquer chamador (CLI própria via `--longtake-json`, ou
+diretamente por outro módulo Python) — **não** inclui ainda a decisão de QUANDO usar long take em
+vez do encadeamento por imagem que `render_shots`/`render_scenes` já fazem (isso exigiria decidir
+como detectar planos contíguos sem corte dentro de uma cena, o que não foi pedido nem especificado
+nesta sessão).
+
+**Achado que mudou a abordagem**: `comfy_workflow_tool.convert()` (o conversor genérico UI→API que
+`base_api()` usa pro workflow r2v) **não pode ser usado pro grafo do long take**. Conferido contra
+`/object_info` do `easy multiTrackEditor`: os campos `resolution` (`COMFY_DYNAMICCOMBO_V3`) e
+`track_data` (`TRACK_DATA`) não batem com nenhum dos tipos que `widget_input_names()` reconhece
+como widget (`COMBO` exato, ou `INT`/`FLOAT`/`STRING`/`BOOLEAN`) — o zip posicional descartaria
+esses dois nomes da lista e desalinharia todo widget declarado depois deles, corrompendo o grafo em
+silêncio (mesma classe de bug do item "`comfy_workflow_tool.convert()` erra valores de widget" já
+documentado no `CLAUDE.md`). Em vez de arriscar um fix genérico no conversor (que atende outros dois
+backends em produção, `ltx25_backend.py` e o r2v deste mesmo módulo), usei o método mais seguro:
+com o workflow já validado e rodando na UI real do ComfyUI, chamei `window.app.graphToPrompt()` via
+JavaScript no próprio navegador — é o CONVERSOR DE VERDADE do frontend, que faz o mapeamento por
+NOME (não por posição) e por isso não sofre desse bug. O JSON resultante virou o template estático
+`minimax_h3_longtake_api_template.json`, carregado direto (sem passar por `convert()`) e com os
+nomes de arquivo de checkpoint/LoRA sobrescritos por job em `base_api_longtake()` — mesma estratégia
+de "template fixo + patch por ID de nó" que o resto do módulo já usa, só que a fonte do template é
+uma captura do navegador em vez de uma reexportação de `.json` do editor.
+
+**`build_longtake_workflow(segments, ...)`**: aceita uma lista de dicts (`prompt`,
+`duration_frames`, `continuity_mode` opcional — default `shot` no primeiro segmento e `context` nos
+demais —, `ref_images` opcional só faz sentido no primeiro segmento de um take, já que os seguintes
+herdam identidade via o próprio contexto em latente). Monta o JSON de `track_data` calculando
+`start_frame`/`end_frame` a partir da duração acumulada. `generate_longtake()` estagia as imagens de
+referência em `ComfyUI/input/` (mesmo `_stage_input()` do r2v) e injeta a citação `<Picture N>`
+automaticamente, reusando `build_prompt_with_refs()` já existente.
+
+Testes sem GPU em `tests/test_minimax_h3_longtake.py` (8 casos): estrutura do template, 1 e 2
+segmentos, `continuity_mode` explícito, checkpoint/resolução aplicados, validação de entrada
+(lista vazia, duração zero), e `generate_longtake()` de ponta a ponta com `submit_and_wait`
+mockado (confirma estágio/limpeza de arquivo e citação automática de referência). Suíte roda com
+`ensure_server()` mockado — não sobe o ComfyUI.
+
+**Não testado ainda**: 3+ segmentos, `context_swap`, planos de fala (áudio de referência
+combinado com long take), nem a grade exata de `duration_frames` que o H3 aceita sem erro (os dois
+testes usaram 48 frames/segmento sem problema; a grade "5 + 17k" documentada pro r2v não foi
+confirmada pra este caminho). Wiring em `render_shots`/`run_decupagem` como opção de motor —
+deliberadamente fora do escopo desta sessão, ver acima.
+
+### 3.118 — `engine="minimax-longtake"` cabeado em `render_shots`/`render_shots_stage`/
+`run_decupagem`/`decupagem_ui` (2026-09-24)
+
+Continuação do §3.117 (usuário: "funcionou muito bem nos dois exemplos, integre ao pipeline" →
+depois "desenhe o long take" pedindo a integração completa). Escrito primeiro sem GPU real (só
+sintaxe/import/testes mockados) e **validado com GPU real na mesma sessão** (ver §3.119).
+
+**Desenho escolhido**: agrupar por CENA, não por "take" explícito — não existe hoje nenhum sinal no
+`shot_plan.json` que marque "corte aqui dentro da cena" (a única fronteira de continuidade que o
+plano já carrega é a própria cena). Todo plano de uma cena com `engine=minimax-longtake` vira UM
+segmento do mesmo take, na ordem do `shot_plan`; cenas diferentes nunca se misturam. Isso é uma
+aproximação deliberada — uma cena com um corte de câmera real no meio (plano/contraplano, por
+exemplo) ainda seria tratada como um take contínuo. Não há dado no pipeline hoje pra fazer melhor
+sem pedir uma anotação nova no roteiro/decupagem.
+
+**Onde a geração acontece** (`script_pipeline/render_shots.py`): o laço por-plano de sempre
+continua gerando STILLS normalmente (idêntico ao `engine="minimax"`, refs/location_refs/cache
+inalterados) — cada plano só precisa do próprio still como quadro de identidade do segmento 0 de
+CADA cena. Na etapa de vídeo, em vez de chamar `minimax_h3_backend.generate()` por plano, o novo
+ramo `elif engine == "minimax-longtake":` só ACUMULA o plano em `pendentes_longtake` (prompt, still,
+duração em segundos, `ref_images`) e faz `continue` — sem gerar nada ainda. Depois que o laço
+inteiro termina, `_minimax_longtake_flush()`:
+
+1. Agrupa `pendentes_longtake` por `shot["scene"]` (via `itertools.groupby`, já ordenado).
+2. Grupo de 1 plano só → `minimax_h3_backend.generate()` normal (sem segundo segmento não há
+   contexto a herdar, e o long take só complicaria o split à toa).
+3. Grupo de 2+ → monta `segments` (primeiro `continuity_mode="shot"` com `ref_images` do still/
+   sheet; os demais `"context"`, sem `ref_images` — herdam identidade do contexto em latente) e
+   chama `generate_longtake()` UMA vez pro grupo inteiro.
+4. O vídeo combinado é recortado de volta em um arquivo por plano com `_extract_subclip()`
+   (`ffmpeg -ss/-t`, REENCODANDO — não `-c copy`, porque o combinado pode não ter keyframe exato em
+   cada fronteira de plano) — grava em `clip_path` (o MESMO nome que o caminho de clipe único
+   sempre usou, `shotNNN.mp4`). O resto do pipeline (`build_clips_manifest`, cache `.key`,
+   lipsync/mix/assemble) não muda NADA — vê exatamente os arquivos que sempre viu.
+
+**Cache**: nova entrada na chave (`|ltunet=...`) além de tudo que `engine="minimax"` já usava
+(frames/still/prompt/engine/aspect/megapixels/turbo/variant) — troca de `MINIMAX_H3_LONGTAKE_UNET`
+invalida os clipes velhos, igual qualquer outra troca de checkpoint.
+
+**Pontos estendidos pra reconhecer `"minimax-longtake"` além de `"minimax"`** (mesmo comportamento
+de fala nativa/sem TTS/sem lip-sync/troca de servidor pro 8189): `render_shots.render()` (guarda de
+duas passadas, troca 8188→8189, chave de cache, exclusão de LoRA/IC-LoRA que são só-LTX),
+`render_shots_stage.build_clips_manifest` (`audio_path=None`, `minimax_native_speech=True`) e seu
+`--engine` choices, `run_decupagem.py` (`--video-engine` choices, `--include-quotes` automático no
+`shot_plan`, reinício do 8189 entre estágios, passthrough de `--minimax-no-still`), e o dropdown
+"Motor de vídeo" do `decupagem_ui.py`. **Deliberadamente NÃO estendido**: `--minimax-ref-audio` e
+`--minimax-chain-max-seconds` — nenhum dos dois tem equivalente implementado no caminho long take
+ainda (`generate_longtake` não aceita `ref_audios`, e não há encadeamento por sub-plano aqui, é
+contexto em latente); passar os dois com `--video-engine minimax-longtake` agora só imprime aviso e
+é ignorado, não quebra.
+
+Testes sem GPU: `tests/test_render_shots_longtake.py` (4 casos) — grupo de 1 plano cai no
+`generate()` normal, grupo de 2+ chama `generate_longtake()` uma vez com os `duration_frames`/
+`continuity_mode`/`ref_images` certos e recorta 2 sub-clipes nos tempos certos, cenas diferentes não
+se misturam num grupo só, falha no grupo marca todos os planos do grupo como `clip: None` (não
+deixa um `.key` órfão apontando pra um arquivo que não existe). Os 12 testes novos (este arquivo +
+`test_minimax_h3_longtake.py`) passam rodados sozinhos. **Não tentei rodar a suíte inteira** —
+`pytest --collect-only` na raiz mostra 38 erros de COLETA pré-existentes e não relacionados a este
+trabalho (`ModuleNotFoundError: No module named 'tests.test_...'`, aparentemente uma colisão de
+nome de pacote no rootdir do pytest que também atinge outros arquivos de teste recentes não citados
+aqui, ex. `test_spatial_pipeline.py`) — os dois arquivos novos deste caderno entram nessa lista
+quando coletados junto com TUDO, mas passam limpos isolados. Não investiguei a causa raiz do
+problema de coleta; é pré-existente, não uma regressão desta sessão.
+
+**Servidor derrubado ao final desta sessão** (`taskkill /F` no PID do ComfyUI do H3, GPU voltou a
+0%/~2GB) — nada ficou residente.
+
+### 3.119 — `minimax-longtake` VALIDADO com GPU real numa cena curta; 1 bug de path achado e corrigido
+
+Validação pedida pelo usuário ("valide numa cena curta") antes de comprometer o CERCO EM SEUL
+inteiro — mesma lógica do `--ate animatic` do pipeline. Montei um run-dir isolado
+(`outputs/decupagem/20260924_validacao_longtake/`) com os 3 primeiros planos REAIS do CERCO EM
+SEUL (`shot_plan.json` cortado pros índices 0-2, mesma cena 1: sirenes/convoy → presidente se
+aproxima do carro → motociclista deixa a mochila), reaproveitando os stills FLUX já gerados na
+corrida original (sem gastar GPU de imagem). Rodei
+`render_shots_stage --engine minimax-longtake --videos-only` de verdade.
+
+**1ª tentativa: geração funcionou, cópia falhou.** `generate_longtake()` completou os 3 segmentos
+em 591s (log confirma o mecanismo de contexto em latente nos segmentos 1 e 2, igual §3.117), mas
+`_minimax_longtake_flush()` morreu com `FileNotFoundError` DEPOIS da geração, ao tentar copiar o
+resultado. Causa: `build_longtake_workflow()` setava `filename_prefix = f"video/{prefix}"` (pra
+combinar com o `filename_prefix` visto na captura do navegador em §3.117), o que faz o ComfyUI
+salvar numa SUBPASTA real (`output/video/...`) — mas `submit_and_wait()` (compartilhado com o
+caminho r2v) só devolve o NOME do arquivo do histórico do ComfyUI, não o `subfolder`, e
+`generate_longtake()` monta `os.path.join(COMFY_OUTPUT, files[0])` sem ele. O vídeo existia
+(`ComfyUI/output/video/scene01_longtake_combined_00001_.mp4`, confirmado e mandado pro usuário
+como prova), só não era encontrado no lugar que o código esperava. **Corrigido**: tirei o prefixo
+`"video/"` — `filename_prefix` vira o nome puro, igual o caminho r2v (`build_workflow`) sempre fez;
+o ComfyUI salva direto em `output/`, sem subpasta, e o join simples funciona. Esse bug só existia
+no caminho longtake — o r2v nunca prefixou com subpasta, por isso nunca bateu nele.
+
+**2ª tentativa (com o fix): 3/3 clipes, ponta a ponta.** 473,5s de geração + split. Os 3 planos
+saíram como `shot000.mp4`/`shot001.mp4`/`shot002.mp4` (49f/33f/33f, batendo com o `shot_plan`),
+`scenes/clips.json` com `ok: true` nos 3, `continuity_audit` sem bloqueio. Concatenados numa prévia
+de 4,87s (49+33+33 frames / 24fps = 4,79s teórico, bate) e entregues ao usuário pra avaliação
+visual da emenda — julgamento de qualidade é dele, não medido aqui.
+
+**Confirma o desenho do §3.118 ponta a ponta**: agrupamento por cena, `generate_longtake()` uma vez
+só, split de volta em arquivos por plano no formato que `build_clips_manifest` sempre esperou —
+zero mudança necessária nos estágios 6-9 (lipsync/mix/assemble/verify), exatamente como o desenho
+prometia.
+
+Teste de regressão adicionado (`test_checkpoint_e_resolucao_aplicados` em
+`test_minimax_h3_longtake.py`) corrigido pra não esperar mais o prefixo `"video/"`. Suíte dos dois
+arquivos novos: 12/12 passed.
+
+**Ainda não avaliado**: qualidade visual da emenda (aguardando o usuário), planos com fala/áudio de
+referência, cena maior (4+ planos), `context_swap`. Servidor derrubado ao final — GPU livre.
+
+### 3.120 — Agrupamento trocado de "cena inteira" pra "take" real (wide/full abre take)
+
+O usuário perguntou como o agrupamento funcionava de verdade e apontou o problema: `shot_plan.json`
+usa `scene` no sentido de CENA DE ROTEIRO, não de tomada de câmera — conferido no CERCO EM SEUL, os
+**25 planos inteiros caem em `scene: 1`** (uma cena de roteiro só, aparentemente porque este corte
+do roteiro nunca foi dividido em cenas de verdade). Com a regra do §3.118 ("todo plano da mesma
+cena = 1 take"), rodar `minimax-longtake` nesse projeto juntaria os 25 planos num take só — muito
+além do validado (3 planos) e sem nenhuma garantia de estabilidade.
+
+Perguntei ao usuário como prefere resolver (grupos automáticos de tamanho fixo, marcação manual, ou
+heurística por enquadramento) — escolheu **heurística por enquadramento**: `wide`/`full` sempre
+abrem um take novo (são os dois enquadramentos que o próprio catálogo `FRAMINGS`/
+`FRAMINGS_SEM_PESSOA` de `shot_plan.py` descreve como "establishing"/"full view" — o sinal mais
+próximo de "novo setup de câmera" que o `shot_plan` já carrega, já que não existe campo explícito de
+corte). `insert`/`close`/`medium`/`ots`/`extreme_close` ficam dentro do take do wide/full mais
+recente. Troca de CENA continua sempre abrindo take novo também (nunca mistura cenas diferentes).
+Framing ausente (`None`) também quebra — mais seguro juntar de menos que de mais com dado faltando.
+
+Nova função `_assign_takes()` (muta a lista de planos pendentes, atribui `take_id`) chamada antes do
+`groupby` em `_minimax_longtake_flush`, que agora agrupa por `(scene, take_id)` em vez de só
+`scene`. **Simulado contra o `shot_plan.json` real do CERCO EM SEUL** (sem gastar GPU — só a lógica
+de agrupamento): dá **4 takes de 8/4/4/9 planos**, em vez de 1 take de 25. Os dois maiores (8 e 9)
+ainda estão além do que foi validado com GPU real (3 planos, §3.119) — `_minimax_longtake_flush`
+agora imprime um aviso quando um take passa de 5 planos, mas não bloqueia nem limita: a decisão de
+tentar um take grande de verdade fica pro usuário, não decidida em silêncio aqui.
+
+Testes sem GPU: 3 novos em `tests/test_render_shots_longtake.py` (15 no arquivo, todos passando) --
+`_assign_takes` reproduz exatamente os 4 grupos 8/4/4/9 do padrão real de framings do CERCO EM SEUL,
+cena nova quebra take mesmo sem wide/full, e um grupo de 3 planos com wide no meio quebra em 2 takes
+(1 + 2) dentro do `_minimax_longtake_flush` de ponta a ponta (mockado).
+
+Esta mudança **ainda não foi testada com GPU real** — a validação do §3.119 usou 3 planos da MESMA
+cena sem nenhum wide no meio (por acaso caíam todos no mesmo take mesmo com a regra antiga); o
+comportamento de quebrar DENTRO de uma sequência de planos não foi exercitado com um `generate_
+longtake()` de verdade ainda.
+
+### 3.121 — Quebra de take (wide/full) VALIDADA com GPU real
+
+Continuação imediata do §3.120 ("teste a validação"). Peguei os planos **6-9 reais** do CERCO EM
+SEUL (`insert, medium, wide, close` — o `wide` no índice 8 devia abrir um take novo no meio da
+sequência) e rodei `render_shots_stage --engine minimax-longtake` de verdade, run-dir isolado
+(`20260924_validacao_longtake_break`), reaproveitando os 4 stills já existentes.
+
+Log confirmou a quebra ANTES de qualquer GPU rodar: `"cena 1 take 0: 2 planos (['insert',
+'medium'])"` seguido depois por `"cena 1 take 1: 2 planos (['wide', 'close'])"` — exatamente os 2
+grupos de 2 que `_assign_takes()` previa. **2 chamadas separadas a `generate_longtake()`** (262,4s
+e 217,8s, 480,2s no total) — nenhuma tentativa de juntar os 4 planos num take só. `continuity_audit`
+ok, **4/4 clipes** em `scenes/clips.json`, sem o bug de path do §3.119 (já corrigido, não voltou).
+
+Os 2 takes combinados e a concatenação dos 4 planos recortados foram entregues ao usuário pra
+avaliação visual — inclusive dá pra comparar o ponto de corte real (fim do plano 1 / início do
+plano 2, onde o take muda) contra os cortes dentro de cada take (que usam contexto em latente).
+
+**Confirma o §3.120 ponta a ponta com GPU real**: a heurística wide/full funciona exatamente como
+simulado, incluindo quebrar NO MEIO de uma sequência de planos consecutivos (não só entre cenas).
+Ainda não testado: um take de verdade nos tamanhos 8/9 que o CERCO EM SEUL completo produziria
+(§3.120) — essa validação usou grupos de 2, não de 8-9.
+
+### 3.122 — Template do long take movido pra `comfyui_workflows/` (estava fora do git por acidente)
+
+Achado no commit desta sessão: `minimax_h3_longtake_api_template.json` (criado no §3.117, na raiz do
+repo) caía no `*.json` genérico do `.gitignore` — o arquivo existia em disco e os testes passavam
+(rodando localmente), mas um `git clone` novo NUNCA teria o template, e `base_api_longtake()`
+quebraria com `FileNotFoundError` na primeira chamada. Não é hipotético: `git status` confirmou que
+o arquivo nunca apareceu como untracked nem staged em nenhum commit anterior desta sessão. Movido
+pra `comfyui_workflows/` (onde os outros templates de workflow ComfyUI do repo já vivem e já são
+rastreados apesar do `.gitignore` — `git ls-files` confirma o precedente) e `LONGTAKE_TEMPLATE_PATH`
+atualizado. Suíte dos dois arquivos de teste do long take: 15/15 passed depois da mudança.
+
+### 3.123 — Atores importados pro CERCO EM SEUL via `import_reference.py`
+
+Usuário mandou 4 fotos de ator/atriz (headshots neutros) nomeadas por arquivo (`Ha-eun.png`,
+`Ji-ho.png`, `Min-jun.png`, `Seo-yeon.png` — mesmos nomes dos personagens do Voo 702, cujas fotos
+JÁ eram exatamente as mesmas de `characters/refs/` daquele run, confirmado por tamanho de arquivo
+idêntico). Salvas numa pasta reutilizável nova, `actors/` (raiz do repo, fora de qualquer run
+específico). Como o CERCO EM SEUL usa OS MESMOS 4 NOMES de personagem (agentes de segurança, cast
+diferente do Voo 702 — descritores de figurino divergem, mas o nome bate), rodei
+`script_pipeline.import_reference --run-dir <CERCO_EM_SEUL> --character X --image actors/X.png`
+pros 4: rosto detectado nos 4 (insightface/buffalo_l), `cast.json` do CERCO EM SEUL atualizado com
+`reference_image`/`reference_source: external` pros 4 personagens. Isso ativa a rota de consistência
+por sheet (MEMORIAL 3.54) pra esses personagens na próxima corrida de stills -- sem essas 4 fotos, o
+figurino/identidade viria só do texto do `cast.json` (descritor), sem nenhuma imagem de referência
+até o primeiro still de perto de cada um virar referência sozinho.

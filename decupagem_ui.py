@@ -1093,7 +1093,7 @@ def _argv(run: Path, script: str, estilo: str, trocas: str, largura: int,
     # still) e a opcao de dividir plano longo em sub-planos encadeados por
     # ultimo-frame (MEDIDO em _test_minimax_duration_cap.py: ~16s+ trava
     # 30min+ numa chamada so). Os dois so tem efeito com motor_video minimax.
-    if minimax_no_still and motor_video == "minimax":
+    if minimax_no_still and motor_video in ("minimax", "minimax-longtake"):
         cmd.append("--minimax-no-still")
     if minimax_chain_max_seconds and motor_video == "minimax":
         cmd += ["--minimax-chain-max-seconds", str(minimax_chain_max_seconds)]
@@ -1639,15 +1639,22 @@ def build() -> None:
                              "vídeo, lipsync e montagem são recusados). Não aprova stills.")
                     gr.Markdown("Modo opt-in. A aprovação visual continua obrigatória antes do vídeo.")
                     motor_video = gr.Dropdown(
-                        choices=["ltx", "minimax", "longcat", "wan"], value="ltx", scale=1,
+                        choices=["ltx", "minimax", "minimax-longtake", "longcat", "wan"],
+                        value="ltx", scale=1,
                         label="Motor de video",
                         info="ltx: LTX 2.5, fala vem do TTS (estagios lipsync/mix rodam normal). "
                              "minimax: MiniMax H3 -- fala e lip-sync NATIVOS a partir do texto "
                              "do plano (o video_prompt precisa ja carregar o dialogo, entre "
                              "aspas, como nos exemplos de teste); lipsync/mix viram passthrough. "
-                             "wan: Wan 2.2 TI2V 5B, mesmo ComfyUI do ltx -- video SEMPRE MUDO, "
-                             "fala vem do TTS/lipsync normal (como o ltx). Validado com GPU "
-                             "real 2026-09-18; sem LoRA/IC-LoRA/encadeamento ainda.")
+                             "minimax-longtake: MESMO MiniMax H3, mas planos consecutivos da "
+                             "MESMA CENA saem numa unica chamada, costurados por contexto em "
+                             "latente (comfyui-easy-media) em vez de clipes independentes -- "
+                             "validado com GPU real 2026-09-24, MEMORIAL 3.117/3.118; "
+                             "--minimax-ref-audio/--minimax-chain-max-seconds nao tem efeito "
+                             "aqui ainda. wan: Wan 2.2 TI2V 5B, mesmo ComfyUI do ltx -- video "
+                             "SEMPRE MUDO, fala vem do TTS/lipsync normal (como o ltx). "
+                             "Validado com GPU real 2026-09-18; sem LoRA/IC-LoRA/encadeamento "
+                             "ainda.")
                     motor_voz = gr.Dropdown(
                         choices=["auto", "xtts", "qwen", "fish"], value="auto", scale=1,
                         label="Motor de voz (TTS)",

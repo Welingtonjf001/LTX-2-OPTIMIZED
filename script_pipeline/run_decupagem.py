@@ -164,15 +164,20 @@ def main() -> int:
                          "flux-kontext = FLUX.1, ver MEMORIAL 3.48.")
     ap.add_argument("--recast", action="store_true",
                     help="deixa o emotion_director reescolher a VOZ de cada personagem")
-    ap.add_argument("--video-engine", default="ltx", choices=["ltx", "minimax", "longcat", "wan"],
+    ap.add_argument("--video-engine", default="ltx",
+                    choices=["ltx", "minimax", "minimax-longtake", "longcat", "wan"],
                     help="motor de VIDEO (nao confundir com --engine, que e o LLM de "
                          "estrutura). ltx = LTX 2.5, condicionado pela fala sintetizada "
                          "(TTS + lipsync + mix rodam normalmente). minimax = MiniMax H3 -- "
                          "fala e lip-sync NATIVOS a partir do texto do video_prompt; os "
                          "estagios 6/7 (lipsync/mix) viram passthrough pra esses planos, "
-                         "ja que o audio ja vem pronto no clipe. wan = Wan 2.2 TI2V 5B, MESMO "
-                         "ComfyUI do LTX (8188) -- video SEMPRE MUDO, TTS+lipsync+mix rodam "
-                         "normalmente (como no ltx). Validado com GPU real 2026-09-18.")
+                         "ja que o audio ja vem pronto no clipe. minimax-longtake = MESMO "
+                         "MiniMax H3, mas planos consecutivos da MESMA CENA saem numa unica "
+                         "chamada, costurados por contexto em latente em vez de clipes "
+                         "independentes -- validado com GPU real 2026-09-24, MEMORIAL "
+                         "3.117/3.118. wan = Wan 2.2 TI2V 5B, MESMO ComfyUI do LTX (8188) -- "
+                         "video SEMPRE MUDO, TTS+lipsync+mix rodam normalmente (como no "
+                         "ltx). Validado com GPU real 2026-09-18.")
     ap.add_argument("--ltx-variant", default="w4a8-v10",
                     choices=["w4a8-v10", "distilled", "dev", "gguf-q6k"],
                     help="variante do checkpoint LTX 2.5 (so importa com "
@@ -457,7 +462,7 @@ def main() -> int:
                "--out", str(run / "parse" / "shot_plan.json")]
             if args.style_changes:
                 cmd += ["--style-changes", args.style_changes]
-            if args.video_engine == "minimax":
+            if args.video_engine in ("minimax", "minimax-longtake"):
             # BUGFIX (achado critico do proprio usuario, corrigido manualmente
             # antes desta sessao de fixes -- ver MEMORIAL): sem isto o MiniMax
             # H3 gera fala NATIVA a partir so do video_prompt, sem a fala real
@@ -653,7 +658,7 @@ def main() -> int:
         # estagio e um subprocesso novo. `minimax_h3_backend.generate()` sobe o
         # servidor de novo sozinho quando precisar (~30s de boot, medido) --
         # muito mais barato que os 22 min perdidos.
-        if args.video_engine == "minimax":
+        if args.video_engine in ("minimax", "minimax-longtake"):
             stop_comfyui(port=8189, log=lambda m: print(f"[reinicio-minimax] {m}", flush=True))
 
         # `passo()` roda o subprocesso com o `os.environ` ATUAL herdado (nao
@@ -676,10 +681,14 @@ def main() -> int:
                     "--engine", args.video_engine]
         if args.video_engine == "minimax" and args.minimax_ref_audio:
             cmd_video.append("--minimax-ref-audio")
-        if args.video_engine == "minimax" and args.minimax_no_still:
+        if args.video_engine in ("minimax", "minimax-longtake") and args.minimax_no_still:
             cmd_video.append("--minimax-no-still")
         if args.video_engine == "minimax" and args.minimax_chain_max_seconds:
             cmd_video += ["--minimax-chain-max-seconds", str(args.minimax_chain_max_seconds)]
+        if args.video_engine == "minimax-longtake" and (args.minimax_ref_audio or args.minimax_chain_max_seconds):
+            print("[render] aviso: --minimax-ref-audio/--minimax-chain-max-seconds nao tem "
+                  "efeito com --video-engine minimax-longtake (nao implementados nesse "
+                  "caminho ainda) -- ignorados.")
         if args.video_engine == "ltx" and args.ltx_no_still:
             cmd_video.append("--ltx-no-still")
         if args.video_engine == "ltx" and args.ltx_chain_max_seconds:

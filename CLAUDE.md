@@ -10,12 +10,31 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-24 (checkpoints turbo do MiniMax H3 [LightX2V]
+Última verificação: 2026-09-24 (template do long take movido pra
+`comfyui_workflows/` -- estava fora do git por causa do `*.json` genérico
+do `.gitignore`; e os 4 atores importados pro cast.json do CERCO EM SEUL
+via `import_reference.py`; detalhes em `MEMORIAL.md` §3.122/§3.123).
+Verificação anterior: 2026-09-24 (quebra de take wide/full VALIDADA com GPU
+real: planos 6-9 do CERCO EM SEUL, wide no meio abriu 2 takes de 2 planos,
+480s total, 4/4 clipes; detalhes em `MEMORIAL.md` §3.121).
+Verificação anterior: 2026-09-24 (agrupamento do `minimax-longtake` trocado de
+"cena inteira" pra "take" real -- wide/full abre take novo, pedido do
+usuário depois de ver que o CERCO EM SEUL inteiro caía numa cena só; NÃO
+validado com GPU real ainda; detalhes em `MEMORIAL.md` §3.120).
+Verificação anterior: 2026-09-24 (`engine="minimax-longtake"` VALIDADO com GPU
+real ponta a ponta numa cena curta do CERCO EM SEUL, 3/3 clipes; achado e
+corrigido bug de path na cópia final `output/video/` vs `output/`; detalhes
+em `MEMORIAL.md` §3.119).
+Verificação anterior: 2026-09-24 (`engine="minimax-longtake"` cabeado em
+`render_shots`/`render_shots_stage`/`run_decupagem`/`decupagem_ui` -- agrupa
+planos da MESMA CENA num take só; NÃO validado com GPU real ainda, só
+sintaxe/testes mockados; detalhes em `MEMORIAL.md` §3.118).
+Verificação anterior: 2026-09-24 (workflow "long take" multitrack do MiniMax H3
+VALIDADO com GPU real 2x e integrado ao `minimax_h3_backend.py` como
+`generate_longtake()`; detalhes em `MEMORIAL.md` §3.117).
+Verificação anterior: 2026-09-24 (checkpoints turbo do MiniMax H3 [LightX2V]
 baixados para teste de velocidade — ver seção MiniMax H3 abaixo — NÃO
 validados com GPU real ainda; detalhes em `MEMORIAL.md` §3.116).
-Verificação anterior: 2026-09-24 (workflow "long take" multitrack do MiniMax H3
-via `comfyui-easy-media` avaliado e preparado para teste isolado, NÃO validado
-com GPU real ainda; detalhes em `MEMORIAL.md` §3.115).
 Verificação anterior: 2026-09-20 (estado espacial 3D integrado à WebUI de
 decupagem e animatic de cabine de 20 s do Voo 702; detalhes em `MEMORIAL.md` §3.97 e
 `script_pipeline/SPATIAL_PIPELINE.md`).
@@ -602,18 +621,50 @@ LTX (`script_pipeline/generate_storyboards.py`, mesmo bug, mesmo fix). Se o
 MiniMax H3 "morrer sem traceback" de novo num ponto específico e
 reproduzível, suspeitar do watchdog ANTES de suspeitar de crash nativo.
 
-### Workflow "long take" multitrack (`comfyui-easy-media`) — preparado, NÃO testado
+### Workflow "long take" multitrack (`comfyui-easy-media`) — VALIDADO, integrado ao backend
 
-Existe um segundo mecanismo de continuidade para o H3, diferente do que o `minimax_h3_backend.py`
-usa hoje: o custom node `comfyui-easy-media` (`easy multiTrackEditor` + `easy multitrackProject`)
-gera segmentos em single-pass onde um segmento `context` herda o **latente** do anterior, em vez de
-reencadear por imagem (I2V do último frame, que é o que `render_scenes`/`render_shots` fazem hoje
-para todos os motores, incluindo o H3). Clonado em
-`E:\Users\home\Documents\MiniMax-H3\ComfyUI\custom_nodes\ComfyUI-Easy-Media`, checkpoint de terceiro
-(`Minimax-h3_Singularity_ref2va_v1.3_Pruned_w4a8.safetensors`, 11,8 GB) baixado, workflow de teste
-de 2 segmentos salvo em `ComfyUI\user\default\workflows\test_h3_multitrack_longtake.json`. **Nunca
-rodado com GPU real** — a 3090 estava ocupada em toda checagem feita até agora. Não usar em produção
-até validar a emenda entre segmentos visualmente. Ver `MEMORIAL.md` §3.115.
+Segundo mecanismo de continuidade pro H3, diferente do clipe único que `generate()` faz hoje: o
+custom node `comfyui-easy-media` (`easy multiTrackEditor` + `easy multitrackProject`) gera
+segmentos em single-pass onde um segmento `continuity_mode="context"` herda o **latente** do
+anterior, em vez de reencadear por imagem (I2V do último frame, que é o que
+`render_scenes`/`render_shots` fazem hoje pra todos os motores, incluindo o H3). Clonado em
+`E:\Users\home\Documents\MiniMax-H3\ComfyUI\custom_nodes\ComfyUI-Easy-Media`, checkpoint de
+terceiro (`Minimax-h3_Singularity_ref2va_v1.3_Pruned_w4a8.safetensors`, 11,8 GB).
+
+**VALIDADO com GPU real 2026-09-24, 2x**: T2V puro (bola rolando, 2 segmentos, 284s) e ref2v com
+identidade real (HA-EUN do Voo 702, 2 segmentos, 214s) — ambos sem erro, mecanismo de contexto em
+latente confirmado no log (`"Re-encoded video anchor: soft context=..."`).
+
+**Cabeado como motor de pipeline** (`--video-engine minimax-longtake` em `run_decupagem.py`/
+`decupagem_ui.py`, `--engine minimax-longtake` em `render_shots_stage.py`): agrupa os planos em
+TAKES (cena nova OU plano `wide`/`full` sempre abre um take novo — `scene` no `shot_plan.json` é
+cena de ROTEIRO, não de câmera; o CERCO EM SEUL inteiro tem 25 planos numa cena só, então agrupar
+só por `scene` juntaria tudo num take gigante) e gera cada take com UMA chamada a
+`generate_longtake()`, recortando o vídeo combinado de volta em um `shotNNN.mp4` por plano — o
+resto do pipeline (cache, lipsync/mix/assemble) não muda nada. **VALIDADO com GPU real** duas vezes:
+3 planos de uma sequência sem wide (3/3 clipes, 473,5s — achado e corrigido 1 bug de path na cópia
+final, `filename_prefix` com subpasta `"video/"` que `submit_and_wait()` não sabia resolver de
+volta) e 4 planos com um `wide` NO MEIO (planos 6-9 do CERCO EM SEUL: insert/medium/wide/close),
+confirmando que a quebra de take funciona de verdade — 2 chamadas separadas a `generate_longtake()`
+(262s + 218s), 4/4 clipes. **Ainda não testado**: um take de 8-9 planos (o tamanho real que o CERCO
+EM SEUL completo produz, §3.120) — só grupos de até 3 foram medidos. `--minimax-ref-audio`/
+`--minimax-chain-max-seconds` não têm efeito neste caminho (avisa e ignora). Ver `MEMORIAL.md`
+§3.118/§3.119/§3.120/§3.121.
+
+**Integrado ao `minimax_h3_backend.py`** como segunda função de geração:
+`generate_longtake(segments, output_path, ...)` / `build_longtake_workflow()` /
+`base_api_longtake()`, mesmo padrão do caminho de clipe único (r2v) já existente. `segments` é uma
+lista de dicts (`prompt`, `duration_frames`, `continuity_mode` opcional, `ref_images` opcional só
+no primeiro segmento). ⚠️ **NÃO usa `comfy_workflow_tool.convert()`** — o `easy multiTrackEditor`
+declara widgets em tipos (`COMFY_DYNAMICCOMBO_V3`, `TRACK_DATA`) que o conversor genérico deste
+repo não reconhece, e o zip posicional corromperia o grafo em silêncio. O template API
+(`comfyui_workflows/minimax_h3_longtake_api_template.json`) foi capturado direto de
+`window.app.graphToPrompt()` no navegador com o workflow já validado — é o conversor de verdade do
+frontend, que mapeia por nome, não por posição. Testes sem GPU: `tests/test_minimax_h3_longtake.py`
+(8 casos, `ensure_server()` mockado). **Não incluído nesta integração**: escolher automaticamente
+quando usar long take em vez do encadeamento por imagem dentro de `render_shots`/`run_decupagem`
+— isso é decisão de produto (que planos formam um "take" contíguo) não especificada ainda. Ver
+`MEMORIAL.md` §3.115/§3.117.
 
 ### Checkpoints turbo (LightX2V) — baixados para teste de velocidade, NÃO testados
 
