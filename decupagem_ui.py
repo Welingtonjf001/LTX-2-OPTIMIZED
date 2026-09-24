@@ -113,7 +113,7 @@ atexit.register(_descarregar_ollama)
 # q4_K_M" (o default corrigido depois do crash do qwen3.6-35b-a3b, ver
 # MEMORIAL 3.65/3.76) nem sempre esta entre os modelos baixados.
 # --------------------------------------------------------------------------
-_MOTOR_LLM_FALLBACK = ["qwen2.5:32b-instruct-q4_K_M", "gemma4",
+_MOTOR_LLM_FALLBACK = ["qwen2.5:32b-instruct-q4_K_M", "gemma4", "mimo",
                        "mistral-nemo:12b-instruct-2407-q4_K_M", "qwen3.6-35b-a3b:latest"]
 # Preferencia quando o modelo documentado como seguro nao esta na lista:
 # modelos DENSOS (nao MoE) de INSTRUCAO GERAL primeiro -- o crash medido
@@ -1564,7 +1564,12 @@ def build() -> None:
                              "antes. ⚠️ qwen3.6-35b-a3b:latest (MoE) crasha o backend CUDA do "
                              "Ollama em prompt longo -- o próprio enriquecimento do parse -- "
                              "MEDIDO e documentado no CLAUDE.md/MEMORIAL §3.65; só escolha se "
-                             "souber o que está fazendo.")
+                             "souber o que está fazendo. \"mimo\" roda o MiMo-V2.6-Distill-"
+                             "Qwen-9B local (venv isolado, fora do Ollama) -- digite manualmente, "
+                             "não aparece sozinho na lista. EVALUADO 2026-09-24: saída correta e "
+                             "sem alucinação, mas ~55-65s/cena (contra ~41s do qwen2.5:32b) e "
+                             "tende a fatiar a decupagem em mais planos que o padrão para o "
+                             "mesmo texto -- disponível como opção, não recomendado como troca.")
                     consistencia = gr.Number(
                         value=0.35, label="Auditoria de consistência facial (limiar)", scale=1,
                         info="InsightFace/ArcFace compara cada still novo ao still de "

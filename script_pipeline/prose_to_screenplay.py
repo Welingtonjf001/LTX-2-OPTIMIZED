@@ -34,6 +34,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 GEMMA4_ENV_PYTHON = str(ROOT / "gemma4_env" / "Scripts" / "python.exe")
 GEMMA4_WORKER = str(ROOT / "script_pipeline" / "llm_workers" / "gemma4_worker.py")
+# MiMo lives OUTSIDE this repo, as a sibling install under Documents -- see
+# parse_screenplay.py's matching constants.
+MIMO_ENV_PYTHON = r"E:\Users\home\Documents\MiMo-V2.6-Distill-Qwen-9B\runtime\Scripts\python.exe"
+MIMO_WORKER = str(ROOT / "script_pipeline" / "llm_workers" / "mimo_worker.py")
 
 # Straight and typographic quote pairs. LTX prompts written by the prompt guide
 # use the curly ones; hand-typed text usually uses straight ones.
@@ -343,6 +347,37 @@ def _run_gemma4(user_prompt: str, *, max_new_tokens: int, log=print) -> str | No
     return (results[0].get("raw_text") or "").strip()
 
 
+def _run_mimo(user_prompt: str, *, max_new_tokens: int, log=print) -> str | None:
+    """One-shot call to the isolated MiMo runtime venv worker (same pattern as
+    _run_gemma4)."""
+    if not Path(MIMO_ENV_PYTHON).exists():
+        log(f"[prose_to_screenplay] MiMo runtime nao encontrado em {MIMO_ENV_PYTHON}")
+        return None
+    jobs = [{"id": "convert", "system_prompt": SYSTEM_PROMPT,
+             "user_prompt": user_prompt, "max_new_tokens": max_new_tokens}]
+    with tempfile.TemporaryDirectory() as tmp:
+        jobs_path = Path(tmp) / "jobs.json"
+        results_path = Path(tmp) / "results.json"
+        jobs_path.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+        command = [MIMO_ENV_PYTHON, "-u", MIMO_WORKER,
+                   "--jobs", str(jobs_path), "--results", str(results_path)]
+        log("[prose_to_screenplay] convertendo prosa -> roteiro via MiMo (venv isolado)...")
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, universal_newlines=True,
+                                encoding="utf-8", errors="replace")
+        for line in proc.stdout:
+            log(line.rstrip("\n"))
+        proc.wait()
+        if not results_path.exists():
+            log("[prose_to_screenplay] worker nao produziu results.json.")
+            return None
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+    if not results or not results[0].get("ok"):
+        log(f"[prose_to_screenplay] conversao falhou: {results[0].get('error') if results else 'sem resultado'}")
+        return None
+    return (results[0].get("raw_text") or "").strip()
+
+
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
 
@@ -435,6 +470,8 @@ def convert(text: str, *, engine: str = "gemma4", log=print) -> tuple[str | None
         raw = _run_gemma4(text, max_new_tokens=budget, log=log)
     elif engine == "gemma3":
         raw = _run_gemma3(text, max_new_tokens=budget, log=log)
+    elif engine == "mimo":
+        raw = _run_mimo(text, max_new_tokens=budget, log=log)
     else:
         # anything else is taken as an Ollama model tag, e.g. "qwen3.6-35b-a3b"
         raw = _run_ollama(text, model=engine, max_new_tokens=budget, log=log)

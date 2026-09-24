@@ -1109,6 +1109,101 @@ def enrich_with_llm_gemma4(
     return scenes
 
 
+# MiMo lives OUTSIDE this repo, as a sibling install under Documents -- same
+# convention as MiniMax H3, LongCat-Video-Avatar and Fish Speech (see CLAUDE.md).
+MIMO_ENV_PYTHON = r"E:\Users\home\Documents\MiMo-V2.6-Distill-Qwen-9B\runtime\Scripts\python.exe"
+MIMO_WORKER = str(ROOT / "script_pipeline" / "llm_workers" / "mimo_worker.py")
+
+
+def enrich_with_llm_mimo(
+    scenes: list[Scene], *, log=print, translate_scenes_to_english: bool = True, language: str = "pt",
+) -> list[Scene]:
+    """Same enrichment contract/output as the other engines, dispatched to
+    mimo_worker.py in the isolated MiMo-V2.6-Distill-Qwen-9B/runtime venv (see
+    that module's docstring for why -- transformers 5.17 for the qwen3_5
+    architecture, not available in the main venv). Mirrors
+    enrich_with_llm_gemma4()'s subprocess/job-file pattern exactly: one call for
+    the whole screenplay, the worker loads the model once and loops jobs itself.
+
+    EVALUATED 2026-09-24 (see MEMORIAL): output is schema-correct and free of
+    hallucinated characters/locations on the real scenes tested, but measured
+    ~55-65s/scene against qwen2.5:32b-instruct-q4_K_M's ~41s (even with
+    causal_conv1d/flash-linear-attention installed), and tends to over-segment
+    the shot_list (12 shots against 9 for an identical scene) -- more rendered
+    planos per scene for the same content, at no measured quality gain. Left
+    available as an explicit opt-in, not wired into any default/preference list.
+    """
+    import subprocess
+    import tempfile
+
+    system_prompt = build_enrich_system_prompt(
+        translate_scenes_to_english=translate_scenes_to_english, language=language,
+    )
+    jobs = []
+    scene_by_id: dict[str, tuple[Scene, list]] = {}
+    for scene in scenes:
+        user_prompt, lines_needing_emotion = _build_scene_user_prompt(scene)
+        job_id = str(scene.index)
+        jobs.append({
+            "id": job_id, "system_prompt": system_prompt, "user_prompt": user_prompt,
+            # MiMo's shot_list tends to be more granular than the other engines'
+            # (MEASURED: 12 shots against 9 for the same scene text), so its
+            # budget gets more headroom per dialogue line/action length than
+            # gemma4's -- a truncated shot_list here silently drops the tail of
+            # the scene's action instead of just writing a shorter one.
+            "max_new_tokens": min(2500, 500 + 90 * len(scene.dialogue) + len(scene.action_text) // 4),
+        })
+        scene_by_id[job_id] = (scene, lines_needing_emotion)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        jobs_path = Path(tmp) / "jobs.json"
+        results_path = Path(tmp) / "results.json"
+        jobs_path.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+        command = [MIMO_ENV_PYTHON, "-u", MIMO_WORKER, "--jobs", str(jobs_path), "--results", str(results_path)]
+        log(f"[parse_screenplay] enriquecendo {len(scenes)} cena(s) via MiMo (venv isolado)...")
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, universal_newlines=True, encoding="utf-8", errors="replace",
+        )
+        for line in process.stdout:
+            log(line.rstrip("\n"))
+        process.wait()
+        if not results_path.exists():
+            log("[parse_screenplay] mimo_worker nao produziu results.json (subprocesso pode ter crashado); seguindo sem enriquecimento em nenhuma cena.")
+            for scene in scenes:
+                scene.visual_prompt = None
+            return scenes
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+
+    for result in results:
+        scene, lines_needing_emotion = scene_by_id.get(result["id"], (None, None))
+        if scene is None:
+            continue
+        if not result["ok"]:
+            log(f"[parse_screenplay] cena {scene.index}: mimo falhou ({result.get('error')}); seguindo sem visual_prompt/emocoes.")
+            scene.visual_prompt = None
+            continue
+        payload = _extract_json(result["raw_text"] or "")
+        if payload is None:
+            log(f"[parse_screenplay] cena {scene.index}: resposta do MiMo nao era JSON valido; resposta bruta: {(result['raw_text'] or '')[:200]!r}")
+            scene.visual_prompt = None
+            continue
+        scene.visual_prompt = payload.get("visual_prompt")
+        _apply_setting(scene, payload)
+        line_visuals = payload.get("line_visuals") or {}
+        for i, line in enumerate(scene.dialogue):
+            beat = line_visuals.get(str(i))
+            if beat:
+                line.beat_visual = str(beat)
+        _apply_shot_list(scene, payload, log=log)
+        line_emotions = payload.get("line_emotions") or {}
+        for i, _name, _text in lines_needing_emotion:
+            emotion = line_emotions.get(str(i))
+            if emotion:
+                scene.dialogue[i].emotion = str(emotion)
+    return scenes
+
+
 def enrich_with_llm_ollama(
     scenes: list[Scene], *, model: str, log=print,
     translate_scenes_to_english: bool = True, language: str = "pt",
@@ -1253,7 +1348,11 @@ def main(argv=None) -> int:
     parser.add_argument("--enrich-engine", default="gemma3",
                          help="gemma3: in-process, main venv (transformers 4.x). gemma4: subprocess in the "
                               "isolated gemma4_env venv (transformers 5.x, native bf16 E2B -- no quantization, "
-                              "avoids the CUDA device-side-assert-under-sampling issue measured with Gemma3 8-bit).")
+                              "avoids the CUDA device-side-assert-under-sampling issue measured with Gemma3 8-bit). "
+                              "mimo: subprocess in the isolated MiMo-V2.6-Distill-Qwen-9B/runtime venv -- "
+                              "schema-correct output but measured slower (~55-65s/scene) and prone to "
+                              "over-segmenting the shot_list versus the Ollama default; opt-in only, see "
+                              "enrich_with_llm_mimo()'s docstring.")
     args = parser.parse_args(argv)
 
     from script_pipeline import run_folder
@@ -1345,6 +1444,8 @@ def main(argv=None) -> int:
             enrich_fn = enrich_with_llm_gemma4
         elif args.enrich_engine == "gemma3":
             enrich_fn = enrich_with_llm
+        elif args.enrich_engine == "mimo":
+            enrich_fn = enrich_with_llm_mimo
         else:
             enrich_fn = functools.partial(enrich_with_llm_ollama, model=args.enrich_engine)
         scenes = enrich_fn(
