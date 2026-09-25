@@ -8345,6 +8345,18 @@ caracterizada. Ainda não chegou aos 8-9 planos que um roteiro real sem wides pr
 maior take medido até agora (anterior: 4). Vídeo enviado ao usuário pra conferência visual de deriva
 de identidade nesse tamanho.
 
+**Veredito do usuário sobre a deriva neste take de 6 planos:** "a identidade quase se manteve, as
+roupas, o rosto com pequena diferença e o cabelo que mudou o penteado, mantendo o comprimento de um
+look 'molhado' para seco". Ou seja, MESMO SEM o reforço (que travaria de qualquer forma), a deriva
+em 6 planos é mais branda do que o relato anterior do CERCO EM SEUL sugeria: roupas estáveis, rosto
+quase igual, e o único desvio claro é o cabelo mudando de molhado pra seco sem perder o comprimento
+(não é troca de identidade, é troca de ESTADO/textura do cabelo -- hipótese: o modelo reinterpreta
+"cabelo molhado" como transitório entre segmentos, já que nenhum prompt do teste pedia chuva/água
+contínua). Ainda não dá pra separar quanto disso é limite do mecanismo de contexto em latente do
+`comfyui-easy-media` e quanto é ausência de âncora textual pro estado do cabelo nos prompts dos
+segmentos 2-6. Próximo passo, se for atacar isso: fixar o estado do cabelo explicitamente em CADA
+prompt de segmento (mitigação textual, sem mexer no grafo) antes de tentar de novo qualquer reforço
+via imagem.
 **Checkpoint turbo LightX2V (§3.116) -- CONFIRMADO como LoRA, e já em produção.** Inspecionado o
 `.safetensors`: `metadata.source_format = "Diffusers PEFT LoRA"`, rank 128, alpha 8, base
 `minimax_h3_fl2va_bf16.safetensors`. Só o `4step_v0.1` existe em disco (o `8step_v1.0_768p` citado
