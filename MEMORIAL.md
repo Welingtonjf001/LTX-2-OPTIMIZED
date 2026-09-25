@@ -8409,6 +8409,16 @@ Auditoria completa (construído/pendente/precisa-teste/débito técnico) não re
 brevidade -- rodada por subagente no início da sessão, cobrindo o estado do repositório até
 2026-09-24/25.
 
+**Ancoragem textual VALIDADA com GPU real -- resolve a deriva de estado.** Teste dedicado: 3
+segmentos, mesma referência de HA-EUN, descritor com o estado do cabelo explicitado ("drenched and
+dripping wet from the rain... tied back in a tight ponytail") reafirmado via `_anchor_appearance()`
+em TODO segmento. Fechou em 575s, sem erro. **Veredito do usuário: "manteve a consistência, cabelo
+preso e molhado, roupa, etc."** -- confirma que a deriva observada antes (§3.126, cabelo molhado ->
+seco) era mesmo falta de âncora textual, não limitação do mecanismo de contexto em latente nem do
+`shared_reference`. `_anchor_appearance()` (implementada em `render_shots.py`, generalizada pra
+qualquer roteiro que tenha `cast_descriptors` carregado) fica confirmada como a mitigação certa pra
+deriva de figurino/cabelo no `minimax-longtake` -- não precisa de nenhum mecanismo novo no grafo.
+
 ### 3.127 — Licon MSR V2 (2.5): LoRA e custom node BAIXADOS, NÃO ligados no pipeline
 
 Usuário pediu pra planejar e depois baixar o modelo `LiconStudio/LTX-2.5-Multiple-Subject-Reference`

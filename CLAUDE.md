@@ -10,7 +10,14 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-25 (auditoria geral + reforço de identidade no
+Última verificação: 2026-09-25 (ancoragem textual de figurino/cabelo em todo
+segmento do `minimax-longtake` -- `_anchor_appearance()` -- VALIDADA com GPU
+real: usuário confirmou "manteve a consistência, cabelo preso e molhado,
+roupa" num take de 3 planos, resolvendo a deriva de estado do teste
+anterior; e baixados o LoRA Licon MSR V2 e o custom node ComfyUI-LTX2.5-MSR
+para o 2.5 [não ligados no pipeline ainda]; detalhes em `MEMORIAL.md`
+§3.126/§3.127).
+Verificação anterior: 2026-09-25 (auditoria geral + reforço de identidade no
 `minimax-longtake`: TESTADO COM GPU REAL E REJEITADO -- trava o
 comfyui-easy-media, GPU 100% sem terminar o segmento 1; achado e corrigido
 bug do watchdog do MiniMax H3 no processo (1800s matava take grande
