@@ -8182,3 +8182,72 @@ pros 4: rosto detectado nos 4 (insightface/buffalo_l), `cast.json` do CERCO EM S
 por sheet (MEMORIAL 3.54) pra esses personagens na próxima corrida de stills -- sem essas 4 fotos, o
 figurino/identidade viria só do texto do `cast.json` (descritor), sem nenhuma imagem de referência
 até o primeiro still de perto de cada um virar referência sozinho.
+
+### 3.124 — CERCO EM SEUL: filme final ENTREGUE (33s, 12 planos), decupagem substituída por storyboard curado
+
+Depois do gate visual reprovar 20/25 stills do FLUX (§3.115 contexto, `visual_stills_audit.json`:
+sujeito errado em 17/20, locação em 13/20, enquadramento em 11/20, identidade em 8/20 — problema de
+**geração por prompt em cena de multidão/ação**, não do `minimax-longtake` nem dos atores), o usuário
+trouxe 12 quadros de storyboard já prontos (`storyboard/quadros-individuais/cerco-em-seul-quadro-
+01..12.png`) e pediu pra tratá-los como a decupagem DE VERDADE, substituindo os 25 planos.
+
+**Reconstrução do `shot_plan.json`** (script em `scratchpad/build_12shot_plan.py`, não commitado —
+é um script de produção pontual, não parte do pipeline): reusa as funções REAIS de
+`script_pipeline/shot_plan.py` (`_storyboard_prompt`, `_video_prompt`, `shot_seconds`, `frames_for`)
+pra montar 12 shots com schema idêntico ao que `plan_all()` produziria, evitando reimplementar as
+regras de enquadramento/emoção/negative-prompt na mão. Cada quadro foi mapeado por inspeção visual
+pra `framing`/`subject`/`co_subject`/ação em inglês (ex.: quadro 02 = SEO-YEON close, acha a mochila;
+quadro 09 = OTS, atira contra o atirador na janela) — mapeamento e narrativa validados pelo próprio
+Claude olhando as 12 imagens, não uma correspondência automática.
+
+**Tentativa de enganar o cache de still FALHOU e foi abandonada.** Primeira tentativa: computar
+`_still_key()` manualmente (mesmos `width`/`height`/`checkpoint`/`steps`/`cfg`/`guidance`/
+`weight_dtype`/`consistency_threshold`/`seed` que o runtime usaria) e escrever `stills.json` na mão
+pra o pipeline achar "já existe, bate com o prompt" e nunca chamar o FLUX. Na prática o hash NÃO
+bateu (motivo não diagnosticado — possivelmente uma diferença sutil em algum campo do `shot` dict
+não replicada) e a corrida real começou a **regenerar por cima dos 12 stills curados com FLUX**,
+descoberto e abortado (`taskkill`) antes de qualquer arquivo real ser sobrescrito (confirmado por
+tamanho de arquivo idêntico byte-a-byte ao quadro original nos 12).
+
+**Solução que funcionou**: usar o caminho `--videos-only` de `render_shots.py`, que NUNCA toca still
+nenhum — só faz `glob(shotNNN_*.png)` e usa o que encontrar, sem checar chave de cache nenhuma. Rodei
+os estágios manualmente por CLI (fora da WebUI, que não expõe `--reuse-plan` fora do modo espacial;
+adicionar isso na UI ficou pra depois — risco de mexer numa lista posicional de argumentos do Gradio
+sem necessidade imediata) — `run_decupagem.py --reuse-plan` até o estágio de motion (preserva o
+shot_plan de 12 e roda `[M movimento]`/`[C character-sheet]`/TTS normalmente), depois
+`render_shots_stage.py --videos-only --engine minimax-longtake` isolado.
+
+**Resultado**: agrupamento automático em **4 takes reais** (heurística wide/full do §3.120,
+funcionando pela primeira vez numa decupagem de produção): take 0 = planos 0-2 (3, full+close+
+medium_2, 864,6s), take 1 = planos 3-4 (2, 313,0s), take 2 = planos 5-8 (4 planos — **maior grupo já
+testado**, 4 segmentos reais, sem problema), take 3 = planos 9-10 (2, 277,1s), plano 11 sozinho
+(`full` sem nada depois) caiu no `generate()` de clipe único, não no long take.
+
+**O plano 11 (clipe único) falhou 2x antes de fechar** — problema NOVO, não visto nos testes
+anteriores desta sessão, e aparentemente restrito ao caminho de FALLBACK de 1 plano (que usa o grafo
+r2v clássico, não o template do long take):
+1ª tentativa (`fp8int8`, padrão): "loaded partially" com 79 lowvram patches, **228s/passo** (deveria
+ser ~5-10s) — sintoma de VRAM insuficiente pro modelo caber inteiro naquele momento. Matei depois de
+~900s sem terminar 1 dos 4 passos.
+2ª tentativa (`w4a8`, mais leve): travou de vez ANTES de carregar o transformer (nenhum log novo por
+5+ minutos, mesmo ponto de um bug documentado no CLAUDE.md pra outro contexto — texto encoder na CPU
+carregado, silêncio depois). Matei o servidor.
+3ª tentativa (`fp8int8` de novo, sem trocar nada): fechou normal, "loaded completely" (não parcial),
+16s/passo, 441,8s total. **Não identifiquei causa raiz** — pode ser estado de VRAM fragmentado por
+tentativas anteriores na mesma sessão do servidor, não uma regressão do código. Registrar como
+suspeita aberta: o caminho de fallback de 1 plano dentro de `_minimax_longtake_flush` pode precisar
+de um retry automático (hoje falha uma vez e marca `clip: None`, sem tentar de novo) — considerar
+adicionar 1-2 retries automáticos ali, mesmo padrão que `consistency_max_retries` já usa pros stills.
+
+**Filme final**: `outputs/decupagem/20260922_1715_CERCO_EM_SEUL_ALL/final/movie.mp4`, 32,95s, 12/12
+planos, master de áudio -15,69 LUFS/-1,91 dBTP (alvo -16/-1,5). Entregue ao usuário. Todos os 12
+clipes fecharam sem erro definitivo; nenhum bloqueio do `continuity_audit` (9 avisos, 0 bloqueios —
+o motion_conditioner reclamou de parceiro não resolvido pra primitivas `protect`/`reach` em alguns
+planos, caindo em movimento genérico, não crítico).
+
+**Pendências reais desta corrida** (não escondidas, ficam aqui): (1) `--reuse-plan` não exposto na
+WebUI fora do modo espacial — usei CLI direto; (2) causa raiz da flakiness do fallback de 1 plano não
+isolada; (3) o `build_12shot_plan.py` é um script pontual no scratchpad, não uma ferramenta
+reutilizável do repo — se "decupagem a partir de storyboard pronto" virar um caso de uso recorrente,
+vale promovê-lo a um módulo de verdade (`script_pipeline/storyboard_import.py` ou similar) em vez de
+recriar essa lógica à mão na próxima vez.

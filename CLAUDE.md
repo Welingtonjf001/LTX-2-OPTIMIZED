@@ -10,7 +10,12 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-24 (template do long take movido pra
+Última verificação: 2026-09-24 (CERCO EM SEUL: filme final ENTREGUE, 33s/12
+planos -- decupagem de 25 planos trocada por 12 quadros de storyboard
+curados depois do gate reprovar 20/25 stills do FLUX; `minimax-longtake`
+agrupou em 4 takes reais automaticamente, maior grupo testado até agora (4
+planos); detalhes em `MEMORIAL.md` §3.124).
+Verificação anterior: 2026-09-24 (template do long take movido pra
 `comfyui_workflows/` -- estava fora do git por causa do `*.json` genérico
 do `.gitignore`; e os 4 atores importados pro cast.json do CERCO EM SEUL
 via `import_reference.py`; detalhes em `MEMORIAL.md` §3.122/§3.123).

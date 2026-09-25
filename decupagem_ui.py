@@ -1619,6 +1619,39 @@ def build() -> None:
                              "nesta cadeia ate agora. qwen-image-2.1: servidor local separado, "
                              "texto/edicao e ate 10 referencias. Trocar o motor REFAZ os stills (ele entra "
                              "na chave de cache).")
+                with gr.Row():
+                    # BUGFIX 2026-09-24: motor_video/motor_voz viviam DENTRO do
+                    # Accordion "Continuidade espacial 3D" abaixo (open=False) --
+                    # o seletor de motor de vídeo inteiro (ltx/minimax/minimax-
+                    # longtake/longcat/wan) ficava escondido atrás de um recurso
+                    # opt-in não relacionado. Movido pra fora, logo depois do
+                    # Motor das imagens, onde sempre esteve visível.
+                    motor_video = gr.Dropdown(
+                        choices=["ltx", "minimax", "minimax-longtake", "longcat", "wan"],
+                        value="ltx", scale=1,
+                        label="Motor de video",
+                        info="ltx: LTX 2.5, fala vem do TTS (estagios lipsync/mix rodam normal). "
+                             "minimax: MiniMax H3 -- fala e lip-sync NATIVOS a partir do texto "
+                             "do plano (o video_prompt precisa ja carregar o dialogo, entre "
+                             "aspas, como nos exemplos de teste); lipsync/mix viram passthrough. "
+                             "minimax-longtake: MESMO MiniMax H3, mas planos agrupados em TAKES "
+                             "(cena nova OU plano wide/full abre take novo) saem numa unica "
+                             "chamada, costurados por contexto em latente (comfyui-easy-media) "
+                             "em vez de clipes independentes -- validado com GPU real 2026-09-24, "
+                             "MEMORIAL 3.117-3.121; --minimax-ref-audio/--minimax-chain-max-"
+                             "seconds nao tem efeito aqui ainda. wan: Wan 2.2 TI2V 5B, mesmo "
+                             "ComfyUI do ltx -- video SEMPRE MUDO, fala vem do TTS/lipsync "
+                             "normal (como o ltx). Validado com GPU real 2026-09-18; sem LoRA/"
+                             "IC-LoRA/encadeamento ainda.")
+                    motor_voz = gr.Dropdown(
+                        choices=["auto", "xtts", "qwen", "fish"], value="auto", scale=1,
+                        label="Motor de voz (TTS)",
+                        info="auto: XTTS/Qwen, sem setup extra (padrao). fish: qualidade/emocao "
+                             "melhores, mas precisa do servidor do fish-speech JA NO AR "
+                             "(fish-speech/START_API.ps1, ~1 min, ~22 GB de VRAM) -- sem ele, cada "
+                             "fala falha com mensagem clara. Recente (2026-09-03), nao amadurecido "
+                             "ainda -- ver MEMORIAL 3.53/3.55. So afeta o motor ltx (minimax fala "
+                             "nativamente, nao usa TTS nenhum).")
                 with gr.Accordion("Continuidade espacial 3D (opcional)", open=False):
                     spatial_on = gr.Checkbox(
                         value=False, label="Ativar estado espacial persistente", scale=1,
@@ -1638,32 +1671,6 @@ def build() -> None:
                              "corrida para no animatic (exige 'Ir até' = animatic ou antes; "
                              "vídeo, lipsync e montagem são recusados). Não aprova stills.")
                     gr.Markdown("Modo opt-in. A aprovação visual continua obrigatória antes do vídeo.")
-                    motor_video = gr.Dropdown(
-                        choices=["ltx", "minimax", "minimax-longtake", "longcat", "wan"],
-                        value="ltx", scale=1,
-                        label="Motor de video",
-                        info="ltx: LTX 2.5, fala vem do TTS (estagios lipsync/mix rodam normal). "
-                             "minimax: MiniMax H3 -- fala e lip-sync NATIVOS a partir do texto "
-                             "do plano (o video_prompt precisa ja carregar o dialogo, entre "
-                             "aspas, como nos exemplos de teste); lipsync/mix viram passthrough. "
-                             "minimax-longtake: MESMO MiniMax H3, mas planos consecutivos da "
-                             "MESMA CENA saem numa unica chamada, costurados por contexto em "
-                             "latente (comfyui-easy-media) em vez de clipes independentes -- "
-                             "validado com GPU real 2026-09-24, MEMORIAL 3.117/3.118; "
-                             "--minimax-ref-audio/--minimax-chain-max-seconds nao tem efeito "
-                             "aqui ainda. wan: Wan 2.2 TI2V 5B, mesmo ComfyUI do ltx -- video "
-                             "SEMPRE MUDO, fala vem do TTS/lipsync normal (como o ltx). "
-                             "Validado com GPU real 2026-09-18; sem LoRA/IC-LoRA/encadeamento "
-                             "ainda.")
-                    motor_voz = gr.Dropdown(
-                        choices=["auto", "xtts", "qwen", "fish"], value="auto", scale=1,
-                        label="Motor de voz (TTS)",
-                        info="auto: XTTS/Qwen, sem setup extra (padrao). fish: qualidade/emocao "
-                             "melhores, mas precisa do servidor do fish-speech JA NO AR "
-                             "(fish-speech/START_API.ps1, ~1 min, ~22 GB de VRAM) -- sem ele, cada "
-                             "fala falha com mensagem clara. Recente (2026-09-03), nao amadurecido "
-                             "ainda -- ver MEMORIAL 3.53/3.55. So afeta o motor ltx (minimax fala "
-                             "nativamente, nao usa TTS nenhum).")
                 with gr.Row():
                     ltx_variant = gr.Dropdown(
                         choices=["w4a8-v10", "distilled", "dev", "gguf-q6k"], value="w4a8-v10", scale=1,
