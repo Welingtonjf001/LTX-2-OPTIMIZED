@@ -98,6 +98,53 @@ def test_grupo_de_2_planos_usa_generate_longtake_e_recorta(tmp_path, monkeypatch
     assert recortes[0][2] == 0.0 and recortes[0][3] == 2.0
     assert recortes[1][2] == 2.0 and recortes[1][3] == 3.0
 
+
+def test_anchor_appearance_reafirma_descritor_no_texto():
+    """Regra geral (MEMORIAL 3.126): todo segmento leva figurino/cabelo
+    reafirmado em texto, nao so o primeiro -- a referencia de imagem sozinha
+    nao evita deriva de ESTADO (ex. cabelo molhado -> seco)."""
+    desc = "dark-blue tactical suit, hair tied back in a wet ponytail"
+    out = rs._anchor_appearance("HA-EUN sprints across the alley.", "HA-EUN", {"HA-EUN": desc})
+    assert "HA-EUN sprints across the alley." in out
+    assert desc in out
+    assert "HA-EUN is still wearing/styled exactly as described" in out
+
+
+def test_anchor_appearance_sem_descritor_ou_sujeito_nao_quebra():
+    prompt = "acao generica sem personagem nomeado"
+    assert rs._anchor_appearance(prompt, None, {"HA-EUN": "algo"}) == prompt
+    assert rs._anchor_appearance(prompt, "HA-EUN", None) == prompt
+    assert rs._anchor_appearance(prompt, "GENTE-SEM-CAST", {"HA-EUN": "algo"}) == prompt
+
+
+def test_grupo_de_2_planos_ancora_figurino_em_todos_os_segmentos(tmp_path, monkeypatch):
+    """cast_descriptors passado pro flush deve aparecer no prompt de TODOS os
+    segmentos do take (nao so o primeiro, que ja tem ref_images de imagem)."""
+    import minimax_h3_backend as b
+    chamadas_longtake = []
+
+    def fake_generate_longtake(segments, out_path, **kw):
+        chamadas_longtake.append((segments, out_path, kw))
+        Path(out_path).write_bytes(b"combined")
+        return out_path
+
+    monkeypatch.setattr(b, "generate_longtake", fake_generate_longtake)
+    monkeypatch.setattr(rs, "_extract_subclip", lambda src, dest, s, d, **kw: (
+        Path(dest).write_bytes(b"sub"), True)[-1])
+
+    desc = "dark-blue tactical suit, hair tied back in a wet ponytail"
+    pend = [
+        {**_pendente(0, scene=3, tmp_path=tmp_path, ref_images=["/ref/haeun.png"]), "subject": "HA-EUN"},
+        {**_pendente(1, scene=3, tmp_path=tmp_path), "subject": "HA-EUN"},
+    ]
+    feitos = rs._minimax_longtake_flush(
+        pend, fps=24, seed=10, minimax_aspect_ratio=None, minimax_megapixels=None,
+        cast_descriptors={"HA-EUN": desc})
+
+    segments = chamadas_longtake[0][0]
+    assert desc in segments[0]["prompt"]
+    assert desc in segments[1]["prompt"]
+
     assert [f["shot"] for f in feitos] == [0, 1]
     assert all(f["clip"] for f in feitos)
     assert all(pend[i]["marca"].exists() for i in range(2))

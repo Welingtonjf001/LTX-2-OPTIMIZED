@@ -1233,6 +1233,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     "marca": marca, "chave": chave, "still": still,
                     "prompt": shot["video_prompt"], "ref_images": refs_minimax[:2],
                     "duration_seconds": shot["frames"] / fps,
+                    "subject": sujeito,
                 })
                 continue
             elif engine == "longcat" and wav_cond:
@@ -1326,6 +1327,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
         feitos.extend(_minimax_longtake_flush(
             pendentes_longtake, fps=fps, seed=seed,
             minimax_aspect_ratio=minimax_aspect_ratio, minimax_megapixels=minimax_megapixels,
+            cast_descriptors=cast_descriptors,
             log=log))
     if not videos_only and not only_shots:
         prune_stale_stills(stills_dir, len(plan["shots"]), log=log)
@@ -1377,8 +1379,28 @@ def _assign_takes(pendentes_ordenados: list[dict]) -> None:
         cena_anterior = p["scene"]
 
 
+def _anchor_appearance(prompt: str, subject: str | None,
+                       cast_descriptors: dict[str, str] | None) -> str:
+    """Reafirma no TEXTO do prompt o figurino/cabelo do personagem, pra todo
+    segmento de um take -- não só o primeiro. Regra geral pra qualquer
+    roteiro/decupagem (MEMORIAL 3.126): a referência de imagem
+    (`shared_reference`) já propaga a IDENTIDADE do rosto automaticamente
+    pra todos os segmentos de um `minimax-longtake` (ver `generate_longtake`),
+    mas isso não amarra ESTADO transitório -- cabelo molhado vira seco entre
+    segmentos porque nenhum prompt reafirma "ainda molhado". Anexa o
+    descritor completo do `cast.json` (já traz roupa e cabelo por escrito, ex.
+    "dark-blue tactical suit... hair tied back in a ponytail") como cláusula
+    fixa; sem descritor ou sujeito, devolve o prompt inalterado (nunca
+    quebra por falta do dado)."""
+    desc = (cast_descriptors or {}).get(subject or "", "").strip()
+    if not desc:
+        return prompt
+    return f"{prompt} {subject} is still wearing/styled exactly as described: {desc}"
+
+
 def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
                             minimax_aspect_ratio: str | None, minimax_megapixels: float | None,
+                            cast_descriptors: dict[str, str] | None = None,
                             log=print) -> list[dict]:
     """Agrupa os planos pendentes de `engine="minimax-longtake"` em TAKES
     (ver `_assign_takes`: cena nova OU plano wide/full abre take) e gera cada
@@ -1393,11 +1415,19 @@ def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
     Take de 1 plano só usa `generate()` normal -- sem um segundo segmento não
     há contexto a herdar, e o long take só complicaria o split à toa.
 
+    Todo segmento de um take de 2+ planos leva `_anchor_appearance()` no
+    texto -- regra geral desde 2026-09-25 (MEMORIAL 3.126): a referência de
+    imagem já propaga identidade de rosto sozinha (`shared_reference`, ver
+    `generate_longtake`), mas figurino/cabelo em texto reduz deriva de
+    ESTADO (ex.: cabelo "molhado" virando "seco" entre segmentos) sem
+    precisar de nenhum mecanismo novo no grafo -- só reafirmar o descritor
+    em cada prompt. NÃO validado com GPU real ainda.
+
     NÃO CARACTERIZADO ainda: a grade exata de `duration_frames` que o H3
     aceita neste caminho (ver `build_longtake_workflow`); aqui uso
     `round(segundos * fps)` sem arredondamento algum -- revise visualmente se
     a duração de um plano sair perceptivelmente errada. Nem o tamanho máximo
-    de take seguro -- só validado até 3 segmentos (MEMORIAL 3.119); um take
+    de take seguro -- validado até 6 segmentos (MEMORIAL 3.126); um take
     de 8-9 planos (como sai de um roteiro real com poucos wides) é NOVO
     território, sem medição de tempo nem de estabilidade."""
     import minimax_h3_backend
@@ -1432,15 +1462,16 @@ def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
         framings_grupo = [p["framing"] for p in grupo]
         log(f"  [minimax-longtake] cena {cena} take {take_id}: {len(grupo)} planos "
             f"({framings_grupo}) num take só")
-        if len(grupo) > 5:
-            log(f"    aviso: take de {len(grupo)} planos -- só validado até 3 segmentos "
-                "(MEMORIAL 3.119), acompanhe tempo/estabilidade de perto.")
+        if len(grupo) > 6:
+            log(f"    aviso: take de {len(grupo)} planos -- só validado até 6 segmentos "
+                "(MEMORIAL 3.126), acompanhe tempo/estabilidade de perto.")
         segments = []
         for j, p in enumerate(grupo):
             duration_frames = max(1, round(p["duration_seconds"] * fps))
             p["duration_frames"] = duration_frames
+            prompt_ancorado = _anchor_appearance(p["prompt"], p.get("subject"), cast_descriptors)
             segments.append({
-                "prompt": p["prompt"], "duration_frames": duration_frames,
+                "prompt": prompt_ancorado, "duration_frames": duration_frames,
                 "continuity_mode": "shot" if j == 0 else "context",
                 "ref_images": p["ref_images"] if j == 0 else [],
             })
