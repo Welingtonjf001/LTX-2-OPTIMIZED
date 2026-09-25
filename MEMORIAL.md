@@ -8511,9 +8511,20 @@ os wavs e limpa no `finally`, mesmo padrão das imagens. 2 testes sem GPU novos.
    mecanismo novo (slot embedding em posições temporais negativas, arquitetura diferente do
    pseudo-vídeo do 2.3) repete o problema -- **decisão deliberada de não portar `MSR_SEM_
    ENQUADRAMENTO_ABERTO`/`MSR_MAX_FRACAO` do `ic_references.py` sem evidência**, já que são números
-   calibrados pra um mecanismo diferente.
+   calibrados pra um mecanismo diferente. Fechou em 1075,2s, sem erro. **Veredito do usuário: "wide,
+   todos os personagens principais lado a lado na cena, com consistência"** -- SEM o vazamento do MSR
+   2.3: nenhum sinal de still largado no quadro 1 nem de plano médio de retrato indevido. **Primeira
+   evidência de que o mecanismo de slot embedding do 2.5 não herda essa limitação específica do
+   pseudo-vídeo do 2.3** -- uma amostra só, seed única; não é uma prova estatística, mas contraindica
+   portar a restrição de enquadramento sem necessidade.
 
-**Ainda sem produção real**: `ic_references.py` continua sem ramo pro 2.5 -- estes testes chamam
-`ltx25_backend.generate(msr=...)` direto, fora do `render_shots`/decupagem. Portar pra lá (escolha de
-engine por plano, geração de `msr["images"]` a partir do `cast.json`) é trabalho novo, não testado
-aqui. `ltx_loras.py` segue sem entrada de catálogo pra `ltx-2.5-licon-msr-v2.safetensors` (cosmético).
+**Resultado da bateria completa (§3.128 + §3.129): TODAS as 5 pendências do MSR 2.5 fechadas com GPU
+real nesta sessão** -- 2 referências, 3+ referências, background, áudio de referência (AVref),
+variante quantizada, e I2V+wide, todas testadas e aprovadas pelo usuário, zero erro técnico em 5
+tentativas. Ainda em aberto, mas sem risco identificado: `ic_references.py` continua sem ramo pro 2.5
+-- estes testes chamam `ltx25_backend.generate(msr=...)` direto, fora do `render_shots`/decupagem.
+Portar pra lá (escolha de engine por plano, geração de `msr["images"]` a partir do `cast.json`,
+possivelmente reaproveitando `assign_takes`/`_anchor_appearance` do `minimax-longtake` como padrão de
+design) é trabalho novo, não testado aqui -- é a integração de produto que falta pra isso virar um
+motor de imagem usável na decupagem, não mais uma questão de o mecanismo funcionar. `ltx_loras.py`
+segue sem entrada de catálogo pra `ltx-2.5-licon-msr-v2.safetensors` (cosmético).

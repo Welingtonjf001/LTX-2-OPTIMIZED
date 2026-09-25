@@ -10,7 +10,14 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-25 (Licon MSR V2 LIGADO ao pipeline 2.5 --
+Última verificação: 2026-09-25 (Licon MSR V2 -- as 5 pendências da §3.128
+fechadas: 3+ referências, background, `audio_ref1`/2 (AVref) implementado e
+validado com lip-sync em coreano sobre `w4a8-v10`, e I2V+wide testado sem
+reproduzir o vazamento de guia do MSR 2.3 -- 5/5 corridas de GPU aprovadas
+pelo usuário, zero erro técnico; falta só a integração de produto no
+`render_shots`/decupagem, o mecanismo em si já funciona; detalhes em
+`MEMORIAL.md` §3.129).
+Verificação anterior: 2026-09-25 (Licon MSR V2 LIGADO ao pipeline 2.5 --
 `ltx25_backend.generate(msr=...)` -- e VALIDADO com GPU real na primeira
 tentativa: 2 personagens nomeados (HA-EUN + JI-HO), usuário confirmou
 "manteve os dois personagens consistentes"; ainda faltam enquadramentos
@@ -501,18 +508,23 @@ Catálogo em `ltx_loras.py`: tipo, força, gatilho e compatibilidade de cada um.
   referências + 2 áudios nativos), clonado em `ComfyUI/custom_nodes/
   ComfyUI-LTX2.5-MSR`; LoRA V2 em `models/2.5/loras/
   ltx-2.5-licon-msr-v2.safetensors` (2,22 GB). **LIGADO e VALIDADO com GPU
-  real em 2026-09-25** -- `ltx25_backend.generate(msr={"lora", "strength",
-  "images": {"pic1".."pic4", "background"}, "guide_strength",
+  real em 2026-09-25, 5/5 corridas aprovadas pelo usuário** --
+  `ltx25_backend.generate(msr={"lora", "strength", "images": {"pic1".."pic4",
+  "background"}, "audio": {"audio_ref1", "audio_ref2"}, "guide_strength",
   "reference_frames", "describe"})`, mutuamente exclusivo com `ic_lora`
   (mesmo ponto do grafo, antes do `LTXVConcatAVLatent`) e incompatível com
-  `two_stage`. 2 personagens nomeados testados (HA-EUN + JI-HO,
-  `variant="distilled"`), usuário confirmou identidade consistente. **Ainda
-  não testado**: `background`, áudio de referência, 3+ referências,
-  variantes quantizadas, enquadramentos abertos -- `ic_references.py` NÃO
-  tem ramo pro 2.5, as restrições do MSR 2.3 (sem wide/full/insert, guia
-  ≤⅓) não foram portadas; se o vazamento em I2V do MSR 2.3 (linha abaixo)
-  se repetir aqui, só vai aparecer em produção real, não neste teste T2V
-  isolado. Ver MEMORIAL 3.127/3.128.
+  `two_stage`. Testado e aprovado: 2 e 3+ personagens nomeados, `background`
+  como cenário, `audio_ref1` (AVref) com lip-sync coerente em coreano sobre
+  `variant="w4a8-v10"` (180s, bem mais rápido que `distilled`), e I2V +
+  enquadramento wide **sem reproduzir** o vazamento de guia do MSR 2.3
+  (linha abaixo) -- uma amostra só, não é prova estatística, mas
+  contraindica portar `MSR_SEM_ENQUADRAMENTO_ABERTO`/`MSR_MAX_FRACAO` sem
+  necessidade (mecanismo é arquiteturalmente diferente: slot embedding em
+  posições temporais negativas, não pseudo-vídeo). **Falta só a integração
+  de produto**: `ic_references.py` não tem ramo pro 2.5 -- estes testes
+  chamam `generate(msr=...)` direto, fora do `render_shots`/decupagem.
+  `ltx_loras.py` sem entrada de catálogo pro V2 (cosmético). Ver MEMORIAL
+  3.127/3.128/3.129.
 - ⚠️ **MSR em I2V vaza a guia** (MEDIDO 2026-09-13, bf16 e w4a8, força 1,0 e 0,5): com
   still aberto o vídeo larga o still no quadro 1 e vira o plano médio dos retratos; com
   guia de 65 quadros num clipe de 73 corta seco no 57. O oficial é T2V puro. Por isso
