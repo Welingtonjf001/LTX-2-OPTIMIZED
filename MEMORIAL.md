@@ -8448,14 +8448,45 @@ negativas). Até 5 referências (`pic1`-`pic4` + `background`), 2 referências d
 (já usado pelo backend 2.5 -- `ltx25_backend.py` já insere esse nó, ver seção "LoRAs e IC-LoRAs de
 vídeo no 2.5" do CLAUDE.md). Batch size 1 obrigatório. `reference_frames`: 25 ou 33.
 
-**NÃO implementado ainda -- pendência real, não concluída nesta sessão:**
-1. Capturar o grafo API do workflow de amostra via `window.app.graphToPrompt()` no navegador (mesma
-   lição do long take do MiniMax H3, §3.117: `comfy_workflow_tool.convert()` erra em nós não-padrão).
-2. Estender `ic_references.py` (ou criar módulo irmão) com um ramo pro 2.5, decidindo se reaproveita
-   as restrições já validadas do MSR 2.3 (`MSR_SEM_ENQUADRAMENTO_ABERTO`, `MSR_MAX_FRACAO`) ou se
-   revalida do zero -- o mecanismo é outro node, o vazamento de guia em I2V (§3.82) pode não existir
-   aqui ou pode ser diferente.
-3. Testar com GPU real numa cena com 2+ personagens nomeados.
+### 3.128 — Licon MSR V2 (2.5) LIGADO ao pipeline e VALIDADO com GPU real, 2 personagens
 
-Sem isso, os dois LoRAs MSR 2.5 (V1 e V2) continuam em disco sem uso -- não confundir "baixado" com
-"funcionando".
+Continuação da §3.127 na mesma sessão (usuário: "vamos nessa, ligue e teste"). Implementação NÃO
+seguiu o plano original (capturar grafo via navegador) -- desnecessário: os dois nós do
+`ComfyUI-LTX2.5-MSR` são `io.ComfyNode` da API v3 (`comfy_api.latest.io`), com `define_schema()`
+legível direto no `nodes.py` do node (inputs/outputs nomeados, sem widget dinâmico nem subgrafo) --
+dava pra montar o grafo API à mão, sem precisar do `comfy_workflow_tool.convert()` nem do navegador.
+
+**`ltx25_backend.py`**: `_apply_model_patches()` ganhou um terceiro ramo (`msr`, depois dos `loras`
+comuns) que carrega `ComfyUILTX25MSRICLoRALoader` e guarda `msr_parameters` (saída 1) em
+`N_MSR_LOADER` (nó `9650`). `_apply_msr_guide()` (nova) injeta `ComfyUILTX25MSRMultiReferenceGuide`
+no MESMO ponto que `_apply_ic_guide` usa pro MSR 2.3 -- antes do `LTXVConcatAVLatent`, no latente de
+vídeo puro (o node de guia não aceita o latente AV aninhado). `build_workflow()`/`generate()` ganham
+parâmetro `msr: dict` -- `{"lora", "strength", "images": {"pic1"..."pic4", "background"}, "guide_
+strength", "reference_frames", "describe"}` -- mutuamente exclusivo com `ic_lora` (mesmo ponto do
+grafo) e incompatível com `two_stage` (mesma razão já documentada pro IC-LoRA: o refino x2
+precisaria reaplicar a guia na resolução dobrada). `generate()` estagia `pic1..pic4`/`background`
+em `ComfyUI/input` como as demais entradas e limpa no `finally`.
+
+**Bug pego no próprio desenvolvimento, antes de qualquer GPU**: a primeira versão de `_apply_msr_lora`
+sempre lia `[n_unet, 0]` como fonte do modelo, ignorando `loras` comuns já aplicados antes -- se
+alguém combinasse `loras=[...]` com `msr=...`, os LoRAs comuns silenciosamente NUNCA seriam
+carregados (o MSR loader os pulava por cima). Achado pelo teste `test_msr_encadeia_depois_de_loras_
+comuns` (que eu escrevi companion ao código, não depois) e corrigido incorporando o carregamento do
+MSR dentro de `_apply_model_patches()`, na mesma cadeia sequencial que já existia. 5 testes sem GPU
+em `tests/test_ltx_loras.py`.
+
+**VALIDADO com GPU real na primeira tentativa** (2026-09-25): 2 referências nomeadas (HA-EUN + JI-HO,
+fotos reais do CERCO EM SEUL), `variant="distilled"` (bf16, deliberadamente sem quantização pra
+isolar o MSR de qualquer efeito de fusão/requantização de LoRA -- problema já documentado à parte
+pra outros LoRAs sobre `w4a8-v10`), 49 frames a 768x512, `reference_frames="25"`. Fechou em 1044,6s
+sem erro, node carregado, LoRA aplicado, guia com 2 referências injetada, crop dos quadros de guia
+funcionando (mesmo `LTXVCropGuides` do IC-LoRA). **Veredito do usuário: "manteve os dois personagens
+consistentes."**
+
+**Não testado ainda**: `background` (3º slot), áudio de referência (`audio_ref1`/`audio_ref2`), 3+
+referências, variantes quantizadas (`w4a8-v10`/`gguf-q6k`), enquadramentos abertos (o MSR 2.3 restringe
+`wide`/`full`/`insert`/`establishing` e fração máxima de guia -- `ic_references.py` ainda não tem
+ramo pro 2.5, essas restrições NÃO foram portadas; se o padrão de vazamento do MSR 2.3 em I2V (§3.82)
+se repetir aqui, vai aparecer em produção, não em teste isolado T2V como este). `ltx_loras.py` ainda
+não tem entrada de catálogo pra `ltx-2.5-licon-msr-v2.safetensors` (só a V1 está catalogada) --
+pendência cosmética, não bloqueia uso (`_require_lora` verifica o arquivo em disco, não o catálogo).

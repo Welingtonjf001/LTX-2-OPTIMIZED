@@ -10,7 +10,13 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-25 (ancoragem textual de figurino/cabelo em todo
+Última verificação: 2026-09-25 (Licon MSR V2 LIGADO ao pipeline 2.5 --
+`ltx25_backend.generate(msr=...)` -- e VALIDADO com GPU real na primeira
+tentativa: 2 personagens nomeados (HA-EUN + JI-HO), usuário confirmou
+"manteve os dois personagens consistentes"; ainda faltam enquadramentos
+abertos/áudio de referência/variantes quantizadas; detalhes em
+`MEMORIAL.md` §3.128).
+Verificação anterior: 2026-09-25 (ancoragem textual de figurino/cabelo em todo
 segmento do `minimax-longtake` -- `_anchor_appearance()` -- VALIDADA com GPU
 real: usuário confirmou "manteve a consistência, cabelo preso e molhado,
 roupa" num take de 3 planos, resolvendo a deriva de estado do teste
@@ -490,14 +496,23 @@ Catálogo em `ltx_loras.py`: tipo, força, gatilho e compatibilidade de cada um.
   LoRA e requantiza o peso a 4 bits. Antes de concluir que um LoRA "não faz nada",
   compare com `gguf-q6k` ou `distilled`.
 - MSR: a 2.3 V2 roda com nós nativos (sequência montada em
-  `script_pipeline/ic_references.py`). **A 2.5 exige o custom node
+  `script_pipeline/ic_references.py`). **A 2.5 usa o custom node
   ComfyUI-LTX2.5-MSR** (slot embedding real, não pseudo-vídeo -- até 5
-  referências + 2 áudios nativos). 2026-09-25: node CLONADO em
-  `ComfyUI/custom_nodes/ComfyUI-LTX2.5-MSR` e LoRA V2 (2,22 GB) BAIXADO em
-  `models/2.5/loras/ltx-2.5-licon-msr-v2.safetensors` (V1, 1,31 GB, já
-  estava lá desde 09-12). **Ainda NÃO ligado no pipeline** -- falta capturar
-  o grafo API do workflow de amostra e estender `ic_references.py` com um
-  ramo pro 2.5. Ver MEMORIAL 3.127.
+  referências + 2 áudios nativos), clonado em `ComfyUI/custom_nodes/
+  ComfyUI-LTX2.5-MSR`; LoRA V2 em `models/2.5/loras/
+  ltx-2.5-licon-msr-v2.safetensors` (2,22 GB). **LIGADO e VALIDADO com GPU
+  real em 2026-09-25** -- `ltx25_backend.generate(msr={"lora", "strength",
+  "images": {"pic1".."pic4", "background"}, "guide_strength",
+  "reference_frames", "describe"})`, mutuamente exclusivo com `ic_lora`
+  (mesmo ponto do grafo, antes do `LTXVConcatAVLatent`) e incompatível com
+  `two_stage`. 2 personagens nomeados testados (HA-EUN + JI-HO,
+  `variant="distilled"`), usuário confirmou identidade consistente. **Ainda
+  não testado**: `background`, áudio de referência, 3+ referências,
+  variantes quantizadas, enquadramentos abertos -- `ic_references.py` NÃO
+  tem ramo pro 2.5, as restrições do MSR 2.3 (sem wide/full/insert, guia
+  ≤⅓) não foram portadas; se o vazamento em I2V do MSR 2.3 (linha abaixo)
+  se repetir aqui, só vai aparecer em produção real, não neste teste T2V
+  isolado. Ver MEMORIAL 3.127/3.128.
 - ⚠️ **MSR em I2V vaza a guia** (MEDIDO 2026-09-13, bf16 e w4a8, força 1,0 e 0,5): com
   still aberto o vídeo larga o still no quadro 1 e vira o plano médio dos retratos; com
   guia de 65 quadros num clipe de 73 corta seco no 57. O oficial é T2V puro. Por isso
