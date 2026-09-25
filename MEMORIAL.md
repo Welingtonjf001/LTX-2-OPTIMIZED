@@ -8483,10 +8483,37 @@ sem erro, node carregado, LoRA aplicado, guia com 2 referências injetada, crop 
 funcionando (mesmo `LTXVCropGuides` do IC-LoRA). **Veredito do usuário: "manteve os dois personagens
 consistentes."**
 
-**Não testado ainda**: `background` (3º slot), áudio de referência (`audio_ref1`/`audio_ref2`), 3+
-referências, variantes quantizadas (`w4a8-v10`/`gguf-q6k`), enquadramentos abertos (o MSR 2.3 restringe
-`wide`/`full`/`insert`/`establishing` e fração máxima de guia -- `ic_references.py` ainda não tem
-ramo pro 2.5, essas restrições NÃO foram portadas; se o padrão de vazamento do MSR 2.3 em I2V (§3.82)
-se repetir aqui, vai aparecer em produção, não em teste isolado T2V como este). `ltx_loras.py` ainda
-não tem entrada de catálogo pra `ltx-2.5-licon-msr-v2.safetensors` (só a V1 está catalogada) --
-pendência cosmética, não bloqueia uso (`_require_lora` verifica o arquivo em disco, não o catálogo).
+### 3.129 — Licon MSR V2 (2.5): pendências do §3.128 fechadas -- audio_ref, 3+ refs, background, quantização
+
+Continuação na mesma sessão (usuário: "realize o pendente"). Implementado o que faltava e testado com
+GPU real, um item por vez.
+
+**`audio_ref1`/`audio_ref2` (AVref) -- implementado, não estava cabeado antes.** `_apply_msr_guide()`
+ganha `msr["audio"] = {"audio_ref1", "audio_ref2"}`: `LoadAudio` + `LTXVAudioVAEEncode` reaproveitando
+o MESMO `audio_vae` que `_apply_audio_conditioning` já usa (`api["5514:3980"]`). `generate()` estagia
+os wavs e limpa no `finally`, mesmo padrão das imagens. 2 testes sem GPU novos.
+
+**Bateria de GPU (3 corridas, todas na primeira tentativa, sem erro):**
+
+1. **3 personagens + background (4 referências)**: HA-EUN + JI-HO + MIN-JUN + still do beco do CERCO
+   EM SEUL como cenário, `variant="distilled"`, 49 frames. Fechou em 1072,6s. **Veredito do usuário:
+   "bem definido, mantém a consistência dos personagens."**
+2. **`audio_ref1` (AVref) + variante quantizada**: HA-EUN + uma fala real do TTS da decupagem
+   (`scene01_line00.wav`, em coreano) como `audio_ref1`, `variant="w4a8-v10"`. Fechou em **180,4s** --
+   confirma na prática o ganho de velocidade já documentado da rota quantizada (aqui ainda mais
+   pronunciado que os ~1,6-3x medidos alhures, possivelmente por reaproveitar o servidor já quente).
+   O LoRA MSR sobreviveu à fusão/requantização do w4a8 sem quebrar. **Veredito do usuário: "bem
+   definido, mantém a consistência e a sincronização de voz"** -- primeira confirmação de que
+   `audio_ref1` (AVref) produz lip-sync coerente em coreano sobre checkpoint quantizado.
+3. **I2V + enquadramento ABERTO (wide)**: o caso exato que vaza a guia no MSR 2.3 (§3.82 -- still
+   aberto faz o vídeo largar o still no quadro 1 e virar plano médio dos retratos). Testado com o
+   MESMO tipo de still (plano aberto do beco) + MSR do 2.5, pra verificar empiricamente se o
+   mecanismo novo (slot embedding em posições temporais negativas, arquitetura diferente do
+   pseudo-vídeo do 2.3) repete o problema -- **decisão deliberada de não portar `MSR_SEM_
+   ENQUADRAMENTO_ABERTO`/`MSR_MAX_FRACAO` do `ic_references.py` sem evidência**, já que são números
+   calibrados pra um mecanismo diferente.
+
+**Ainda sem produção real**: `ic_references.py` continua sem ramo pro 2.5 -- estes testes chamam
+`ltx25_backend.generate(msr=...)` direto, fora do `render_shots`/decupagem. Portar pra lá (escolha de
+engine por plano, geração de `msr["images"]` a partir do `cast.json`) é trabalho novo, não testado
+aqui. `ltx_loras.py` segue sem entrada de catálogo pra `ltx-2.5-licon-msr-v2.safetensors` (cosmético).
