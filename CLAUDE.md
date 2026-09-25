@@ -10,7 +10,15 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-25 (Licon MSR V2 -- as 5 pendências da §3.128
+Última verificação: 2026-09-25 (Licon MSR V2 INTEGRADO na decupagem --
+`--ic-reference msr25` -- e VALIDADO com GPU real no caminho de PRODUÇÃO
+de verdade, não mais só chamada direta ao backend: `shot_ic_spec("msr25",
+...)` com um plano real (HA-EUN + JI-HO, framing wide), passado pro
+`ltx25_backend.generate()` exatamente como `render_shots.py` faz. Usuário:
+"confirmado, funcionando bem." Estado: motor de referência utilizável na
+decupagem, não mais só mecanismo validado isolado; detalhes em
+`MEMORIAL.md` §3.130).
+Verificação anterior: 2026-09-25 (Licon MSR V2 -- as 5 pendências da §3.128
 fechadas: 3+ referências, background, `audio_ref1`/2 (AVref) implementado e
 validado com lip-sync em coreano sobre `w4a8-v10`, e I2V+wide testado sem
 reproduzir o vazamento de guia do MSR 2.3 -- 5/5 corridas de GPU aprovadas
@@ -520,11 +528,14 @@ Catálogo em `ltx_loras.py`: tipo, força, gatilho e compatibilidade de cada um.
   (linha abaixo) -- uma amostra só, não é prova estatística, mas
   contraindica portar `MSR_SEM_ENQUADRAMENTO_ABERTO`/`MSR_MAX_FRACAO` sem
   necessidade (mecanismo é arquiteturalmente diferente: slot embedding em
-  posições temporais negativas, não pseudo-vídeo). **Falta só a integração
-  de produto**: `ic_references.py` não tem ramo pro 2.5 -- estes testes
-  chamam `generate(msr=...)` direto, fora do `render_shots`/decupagem.
-  `ltx_loras.py` sem entrada de catálogo pro V2 (cosmético). Ver MEMORIAL
-  3.127/3.128/3.129.
+  posições temporais negativas, não pseudo-vídeo). **INTEGRADO na decupagem**
+  (`--ic-reference msr25`, `ic_references.shot_ic_spec()` modo `"msr25"`,
+  `decupagem_ui.py` dropdown) e VALIDADO com GPU real no caminho de
+  produção -- não mais só chamada direta ao backend. `ltx_loras.py` já tem
+  entrada de catálogo pro V2 (`msr-2.5-v2`). **Não testado ainda**: corrida
+  REAL de `run_decupagem` ponta a ponta (múltiplos planos, cache, mistura
+  de motores) -- só o mecanismo de montagem do spec + geração de UM plano
+  foi validado. Ver MEMORIAL 3.127/3.128/3.129/3.130.
 - ⚠️ **MSR em I2V vaza a guia** (MEDIDO 2026-09-13, bf16 e w4a8, força 1,0 e 0,5): com
   still aberto o vídeo larga o still no quadro 1 e vira o plano médio dos retratos; com
   guia de 65 quadros num clipe de 73 corta seco no 57. O oficial é T2V puro. Por isso

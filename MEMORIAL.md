@@ -8521,10 +8521,38 @@ os wavs e limpa no `finally`, mesmo padrão das imagens. 2 testes sem GPU novos.
 **Resultado da bateria completa (§3.128 + §3.129): TODAS as 5 pendências do MSR 2.5 fechadas com GPU
 real nesta sessão** -- 2 referências, 3+ referências, background, áudio de referência (AVref),
 variante quantizada, e I2V+wide, todas testadas e aprovadas pelo usuário, zero erro técnico em 5
-tentativas. Ainda em aberto, mas sem risco identificado: `ic_references.py` continua sem ramo pro 2.5
--- estes testes chamam `ltx25_backend.generate(msr=...)` direto, fora do `render_shots`/decupagem.
-Portar pra lá (escolha de engine por plano, geração de `msr["images"]` a partir do `cast.json`,
-possivelmente reaproveitando `assign_takes`/`_anchor_appearance` do `minimax-longtake` como padrão de
-design) é trabalho novo, não testado aqui -- é a integração de produto que falta pra isso virar um
-motor de imagem usável na decupagem, não mais uma questão de o mecanismo funcionar. `ltx_loras.py`
-segue sem entrada de catálogo pra `ltx-2.5-licon-msr-v2.safetensors` (cosmético).
+tentativas.
+
+### 3.130 — Licon MSR V2 (2.5) INTEGRADO na decupagem: `--ic-reference msr25`, validado ponta a ponta
+
+Última etapa da mesma sessão (usuário: "pode integrar"). `script_pipeline/ic_references.py` ganha o
+modo `"msr25"` em `shot_ic_spec()`: monta `{"images": {"pic1".."pic4", "background"}, "lora",
+"reference_frames", "guide_strength", "strength", "describe"}` -- o formato que
+`ltx25_backend.generate(msr=...)` espera, diferente do `"frames"` (pseudo-vídeo) que o modo `"msr"`
+(2.3) monta. Sujeitos do plano (`subject`/`co_subject`) viram `pic1`/`pic2`; o still do PRÓPRIO plano
+vira `background` (mesma lógica que o `"msr"` 2.3 já usava pro cenário). **Deliberadamente NÃO
+aplica `MSR_SEM_ENQUADRAMENTO_ABERTO`** -- decisão já justificada em §3.129 (mecanismo diferente,
+testado sem reproduzir o vazamento do 2.3).
+
+`render_shots.py`: os dois call sites de `ltx25_backend.generate()` (clipe único e a cadeia por
+segmentos) roteiam pra `msr=ic_spec` ou `ic_lora=ic_spec` dependendo de `ic_mode == "msr25"`. CLIs
+(`run_decupagem.py`, `render_shots_stage.py`) e `decupagem_ui.py` ganham `"msr25"` como opção de
+`--ic-reference`/dropdown. `ltx_loras.py` ganha a entrada de catálogo `msr-2.5-v2` (antes só a V1
+estava catalogada) e corrige `kind`/nota das duas (`"plugin"` -- "backend recusa" -- estava
+desatualizado: o node JÁ está instalado). 6 testes sem GPU novos em `tests/test_ltx_loras.py`.
+
+**VALIDADO com GPU real no CAMINHO DE PRODUÇÃO de verdade** (não mais uma chamada direta ao backend):
+`ic_references.shot_ic_spec("msr25", ...)` chamado com um `shot` real (HA-EUN + JI-HO, framing
+`"wide"` -- de propósito, pra confirmar que não é bloqueado), still real do CERCO EM SEUL como
+background, descritores reais. O spec resultante foi passado pro `ltx25_backend.generate()` EXATAMENTE
+como o call site de `render_shots.py` faz. Fechou em 350,3s (`variant="w4a8-v10"`), sem erro. **Veredito
+do usuário: "confirmado, funcionando bem."**
+
+**Estado final: o MSR 2.5 é um motor de referência utilizável na decupagem**, não mais só um mecanismo
+validado isoladamente. `python -m script_pipeline.run_decupagem ... --ic-reference msr25` (ou o
+dropdown da WebUI) já monta os specs a partir do `cast.json` e do still de cada plano sozinho.
+**Ainda não testado**: uma corrida REAL de `run_decupagem`/`render_shots_stage` ponta a ponta
+(múltiplos planos, cache, mistura com outros motores de vídeo na mesma cena) -- este teste validou o
+mecanismo de montagem do spec e a geração, não a orquestração completa da decupagem. `ltx_loras.py`
+segue sem `sets=("core",)` conferido contra `download --set core` (não testado se o download
+automático pega a V2 certa).
