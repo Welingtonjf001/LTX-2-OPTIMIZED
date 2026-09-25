@@ -89,8 +89,18 @@ def _reference_bytes(path: Path) -> bytes:
 
 def generate(prompt: str, out_path: Path, *, width: int = 1024, height: int = 1024,
              steps: int = 30, seed: int = 42, reference_images: list[str] | None = None,
+             reference_roles: list[str] | None = None,
              timeout: int = DEFAULT_TIMEOUT, log=print) -> bool:
+    """`reference_roles`: mesmo papel nomeado do backend ComfyUI
+    (`qwen_image21_comfy_backend.roles_prefix`) -- aqui não há workflow com
+    campo de imagem dedicado por referência, então o papel entra como texto
+    no PRÓPRIO prompt (`<image1> is X.`), na esperança de que o servidor
+    HTTP local trate a ordem das referências do mesmo jeito. Não testado
+    contra este backend especificamente -- só contra o ComfyUI."""
     ensure_server(log)
+    if reference_roles:
+        prompt = " ".join(f"<image{i}> is {r.rstrip('. ')}." for i, r in enumerate(reference_roles, 1) if r) \
+            + " " + prompt
     refs = [Path(p) for p in (reference_images or []) if p]
     if len(refs) > MAX_REFERENCES:
         log(f"[qwen-image-2.1] AVISO: {len(refs)} referencias; usando as {MAX_REFERENCES} primeiras "

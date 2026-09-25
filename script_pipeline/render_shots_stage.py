@@ -283,6 +283,16 @@ def main() -> int:
     # nao baixado para a corrida com a mensagem certa, em vez de falhar plano a plano
     # dentro do ComfyUI com "value_not_in_list".
     video_loras, ic_lora_nome, descritores = [], None, {}
+    # Descritores do cast: usados pelo IC-LoRA (so LTX) e, desde 2026-09-24,
+    # pelo papel nomeado de referencia do Qwen-Image-2.1 nos STILLS (`_still_
+    # for_shot`/`cast_descriptors`) -- por isso carrega sempre que o cast
+    # existir, nao so no motor/estagio de video antigo.
+    if cast_path.exists():
+        try:
+            descritores = {nome: info.get("descriptor", "") for nome, info in
+                           json.loads(cast_path.read_text(encoding="utf-8")).items()}
+        except (OSError, json.JSONDecodeError):
+            descritores = {}
     if not args.stills_only and args.engine == "ltx":
         import ltx_loras
         from script_pipeline import ic_references
@@ -307,12 +317,6 @@ def main() -> int:
             print(f"[5-D] IC-LoRA de referencia: {args.ic_reference} -> {ic_lora_nome}")
         if video_loras:
             print("[5-D] LoRAs de video: " + ", ".join(f"{n} ({s:g})" for n, s in video_loras))
-        if cast_path.exists():
-            try:
-                descritores = {nome: info.get("descriptor", "") for nome, info in
-                               json.loads(cast_path.read_text(encoding="utf-8")).items()}
-            except (OSError, json.JSONDecodeError):
-                descritores = {}
 
     feitos = rs.render(plan, shots_dir, width=args.width, height=args.height,
                        video_loras=video_loras, ic_mode=args.ic_reference, ic_lora=ic_lora_nome,

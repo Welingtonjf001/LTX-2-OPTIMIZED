@@ -730,11 +730,24 @@ def generate_scene_storyboard(
     steps: int, cfg: float, seed: int, out_path: Path, log=print,
     clip: str = "", vae: str = "", guidance: float = 3.5, prompt_override: str | None = None,
     reference_image: str | None = None, reference_image_2: str | None = None,
+    reference_image_role: str | None = None, reference_image_2_role: str | None = None,
+    extra_references: list[tuple[str, str]] | None = None,
     art_directed: bool = False,
     weight_dtype: str = "default", lora_name: str = "", lora_strength: float = 0.8,
     control_bundle: dict | None = None, spatial_denoise: float = 0.65,
     spatial_mode: str = 'img2img',
 ) -> bool:
+    """`reference_image_role`/`reference_image_2_role`/`extra_references`: SÓ o
+    motor `qwenimage21` usa -- o backend já suporta até 10 referências com
+    papel nomeado (`<image1> is X.`, ver `qwen_image21_comfy_backend.
+    roles_prefix`/`MAX_REFERENCES`), mas nada aqui alimentava isso: a
+    decupagem sempre mandava no máximo 2 referências SEM papel. `extra_
+    references` é uma lista de `(caminho, papel)` além das duas principais --
+    por exemplo, a referência de LOCAÇÃO da cena, que hoje só ancora FLUX
+    (`location_refs`/`_still_for_shot`), nunca chega ao Qwen. Sem papel
+    nomeado (nenhum dos três parâmetros novos), o comportamento é IDÊNTICO
+    ao de antes -- isto é aditivo, não muda nenhuma chamada existente.
+    Outros motores (flux/hidream/zimage/sd35/sdxl) ignoram os três."""
     architecture = detect_architecture(checkpoint)
     if control_bundle and architecture != "flux":
         raise ValueError("Spatial conditioning currently requires FLUX.2 Klein")
@@ -754,10 +767,20 @@ def generate_scene_storyboard(
     if architecture == "qwenimage21":
         import qwen_image21_engine as qwen_image21_backend
         prompt = prompt_override if prompt_override else build_prompt(scene, cast)
-        refs = [path for path in (reference_image, reference_image_2) if path]
+        # (caminho, papel) na ordem em que devem virar <image1>, <image2>... --
+        # papel vazio/None é permitido (fica sem prefixo pra aquela referência,
+        # igual sempre foi quando reference_image_role não é passado).
+        pares = [
+            (reference_image, reference_image_role),
+            (reference_image_2, reference_image_2_role),
+            *(extra_references or []),
+        ]
+        pares = [(p, r) for p, r in pares if p]
+        refs = [p for p, _ in pares]
+        roles = [r or "" for _, r in pares]
         ok = qwen_image21_backend.generate(
             prompt, out_path, width=width, height=height, steps=steps, seed=seed,
-            reference_images=refs, log=log)
+            reference_images=refs, reference_roles=roles if any(roles) else None, log=log)
         if ok:
             log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
         return ok

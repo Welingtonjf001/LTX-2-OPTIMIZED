@@ -340,7 +340,8 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
                     weight_dtype: str = "default",
                     consistency_threshold: float | None = None,
                     consistency_max_retries: int = 2,
-                    lora_name: str = "", lora_strength: float = 0.8) -> Path | None:
+                    lora_name: str = "", lora_strength: float = 0.8,
+                    cast_descriptors: dict[str, str] | None = None) -> Path | None:
     import script_pipeline.generate_storyboards as sb
 
     spatial = shot.get("spatial")
@@ -361,6 +362,23 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
         # rosto sozinha vaza a roupa da foto -- camisa bordo, blazer verde).
         reference_2 = _turnaround_for(shot, out_dir) or reference_2
 
+    # Papel nomeado por referencia (2026-09-24, pedido do usuario apos o CERCO
+    # EM SEUL confundir sujeitos em planos de 2+ personagens): so o Qwen-
+    # Image-2.1 aceita ("<image1> is X.", ate 10 referencias -- ver
+    # generate_scene_storyboard). Nome do personagem + comeco do descritor,
+    # curto de proposito -- o papel serve pra amarrar QUAL rosto e qual, nao
+    # pra repetir o descritor inteiro que ja vai no prompt principal.
+    reference_role = reference_2_role = None
+    if is_qwen:
+        def _papel(nome: str | None) -> str | None:
+            if not nome:
+                return None
+            desc = (cast_descriptors or {}).get(nome, "")
+            trecho = desc.split(",")[0].strip() if desc else ""
+            return f"{nome}{', ' + trecho if trecho else ''}"
+        reference_role = _papel(shot.get("subject"))
+        reference_2_role = _papel(shot.get("co_subject"))
+
     out = out_dir / f"shot{idx:03d}_{shot['framing']}.png"
     # A chave de cache tem de incluir a 2a referencia -- sem isso, um plano
     # gerado ANTES do fix (so uma referencia) seria reaproveitado como se
@@ -371,6 +389,11 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
     if reference_2:
         # Conteúdo, não nome -- mesmo raciocínio do BUGFIX A03 acima.
         chave = f"{chave}|ref2={_audio_key(reference_2)}"
+    if reference_role or reference_2_role:
+        # Trocar o papel nomeado muda o PROMPT (o texto "<image1> is X." entra
+        # antes do resto) -- sem isso na chave, mudar a descricao do papel
+        # reaproveitaria o still antigo em silencio.
+        chave = f"{chave}|roles={reference_role or ''}|{reference_2_role or ''}"
     emotion_instruction = _qwen_emotion_instruction(shot) if is_qwen else None
     if emotion_instruction:
         chave = f"{chave}|qwen_emotion={hashlib.sha1(emotion_instruction.encode('utf-8')).hexdigest()[:10]}"
@@ -419,6 +442,7 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
             weight_dtype=weight_dtype,
             prompt_override=shot["storyboard_prompt"], reference_image=reference,
             reference_image_2=reference_2,
+            reference_image_role=reference_role, reference_image_2_role=reference_2_role,
             art_directed=bool(shot.get("art_direction")), log=log,
             **({"control_bundle": bundle,
                 "spatial_denoise": spatial.get("denoise", .65),
@@ -813,7 +837,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                                     weight_dtype=escala_weight_dtype,
                                     consistency_threshold=gate_consistencia,
                                     consistency_max_retries=consistency_max_retries,
-                                    lora_name=lora_name, lora_strength=lora_strength)
+                                    lora_name=lora_name, lora_strength=lora_strength,
+                                    cast_descriptors=cast_descriptors)
         if still is None:
             log(f"  still falhou; pulando o plano {i}")
             # BUGFIX auditoria 2026-09-16 (A08): ver comentario equivalente no

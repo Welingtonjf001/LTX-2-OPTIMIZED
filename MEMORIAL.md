@@ -8251,3 +8251,56 @@ isolada; (3) o `build_12shot_plan.py` é um script pontual no scratchpad, não u
 reutilizável do repo — se "decupagem a partir de storyboard pronto" virar um caso de uso recorrente,
 vale promovê-lo a um módulo de verdade (`script_pipeline/storyboard_import.py` ou similar) em vez de
 recriar essa lógica à mão na próxima vez.
+
+### 3.125 — Item 1 do plano de qualidade: papel nomeado por referência no Qwen-Image-2.1
+
+Usuário aprovou o filme do CERCO EM SEUL (continuidade, definição, som melhores) mas apontou um
+problema real: personagens "se transformam em outras pessoas" ao longo do take -- fluido, não um
+corte abrupto, mas identidade deriva mesmo assim (esperado: `continuity_mode=context` herda só o
+LATENTE do segmento anterior, sem re-ancorar identidade a cada segmento -- ver
+[[feedback_longtake_quality_20260924]]). Pediu pra aplicar agora o item 1 do plano de próxima etapa
+que eu tinha proposto (avaliação das duas auditorias externas, sessão anterior), sem gastar GPU
+hoje -- "amanhã a gente roda mais".
+
+**Achado antes de implementar**: o backend `qwen_image21_comfy_backend.py` **já suporta** até 10
+referências com papel nomeado (`MAX_REFERENCES=10`, `roles_prefix()` monta `<image1> is X. <image2>
+is Y.` na frente do prompt) -- capacidade que já existia, sem uso. O gap real era só em
+`generate_storyboards.py`/`render_shots.py`: `generate_scene_storyboard()` só passava 2 referências
+SEM papel (`reference_image`/`reference_image_2`), e `_still_for_shot()` nunca sabia o nome de quem
+estava em cada referência.
+
+**Implementado** (aditivo -- nada muda pra quem não usa Qwen-Image-2.1nem passa papel):
+- `generate_scene_storyboard()`: 3 parâmetros novos (`reference_image_role`, `reference_image_2_role`,
+  `extra_references: list[tuple[caminho, papel]]`), só consumidos no ramo `qwenimage21` -- monta
+  `reference_images`/`reference_roles` na ordem certa e repassa pro backend.
+- `qwen_image21_backend.py` (o backend "bridge", servidor HTTP separado -- alternativa ao ComfyUI):
+  ganhou o MESMO parâmetro `reference_roles`, sem tê-lo antes -- sem isso, a chamada quebraria com
+  `TypeError` se esse backend (em vez do ComfyUI) fosse o ativo no momento. Como esse backend não
+  tem um workflow com campo de imagem dedicado, o papel entra como texto no PRÓPRIO prompt (mesmo
+  formato `<imageN> is X.`) -- **não testado contra ESTE backend especificamente**, só contra o
+  ComfyUI (que é o mais usado hoje).
+- `_still_for_shot()` (`render_shots.py`): novo parâmetro `cast_descriptors`; quando o motor é
+  `qwenimage21`, monta o papel de cada referência como `"{NOME}, {início do descritor}"` (ex.:
+  `"SEO-YEON, Dark-brown hair"`) a partir de `shot["subject"]`/`shot["co_subject"]` + o dicionário de
+  descritores do cast. Sem `cast_descriptors` (None), cai pro nome sozinho -- nunca quebra por falta
+  do dado. Chave de cache (`_still_key`) ganhou o papel como componente extra, senão trocar o texto
+  do papel reaproveitaria o still antigo em silêncio.
+- `render_shots_stage.py`: **bug achado nessa integração** -- `cast_descriptors` só era carregado
+  quando `engine == "ltx" and not stills_only` (pro IC-LoRA, que é só-LTX). Pra STILLS (onde o papel
+  do Qwen precisa dele) isso nunca rodava, pra NENHUM motor de vídeo. Corrigido: carrega sempre que
+  `cast.json` existir, independente de engine/estágio.
+
+Testes sem GPU: `tests/test_qwen_reference_roles.py` (5 casos) -- `generate_scene_storyboard()` sem
+papel mantém o comportamento antigo exato (regressão), com papel monta `reference_roles` na ordem
+certa incluindo `extra_references`; `_still_for_shot()` monta o papel certo a partir do cast, cai pro
+nome sozinho sem `cast_descriptors`, e NUNCA gera papel fora do Qwen-Image-2.1. Suíte relacionada
+(long-take + qwen roles + ltx_loras): 36/36 passed.
+
+**NÃO testado com GPU real ainda** -- é código novo, "amanhã a gente roda mais" foi explícito sobre
+não gastar GPU hoje. Validar numa cena real de 2+ personagens (a receita do plano, item 2) antes de
+generalizar. **Não implementado ainda** (itens 2-4 do plano, ficam pra depois): testar em cena
+multi-personagem de verdade; token budgeting por enquadramento; LoRA/PuLID (exige várias fotos por
+ângulo aprovadas, que não temos hoje pra nenhum personagem). Também não implementado: reinjetar
+referência de identidade a CADA segmento do `minimax-longtake` (mitigação mais direta pro drift que
+o usuário relatou, mas fora do escopo do que foi pedido agora -- ver nota em
+[[feedback_longtake_quality_20260924]]).
