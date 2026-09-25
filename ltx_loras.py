@@ -107,12 +107,24 @@ SPECS = (
     # --- nucleo pedido (sem licenca a aceitar) ----------------------------------
     LoraSpec("msr-2.5", "LiconStudio/LTX-2.5-Multiple-Subject-Reference",
              "LTX-2.5-Licon-MSR-V1.safetensors", "ltx-2.5-licon-msr-v1.safetensors",
-             "2.5", "plugin", 1.0, sets=("core",),
+             "2.5", "ic_refs", 1.0, sets=("core",),
              extras=("LTX2.5-MSR-sample-workflow.json",),
-             requires="custom node ComfyUI-LTX2.5-MSR (github liconstudio) -- traz "
-                      "reference_slot_embedding que o LoraLoader nativo ignora",
-             nota="Ate 5 referencias (personagens, roupa, objeto, fundo) viram tokens no mesmo "
-                  "espaco do video, cada uma com slot proprio. Nomeie 'Image 1', 'Image 2' no prompt."),
+             requires="custom node ComfyUI-LTX2.5-MSR (github liconstudio) -- INSTALADO "
+                      "2026-09-25 em ComfyUI/custom_nodes/. Prefira a V2 (msr-2.5-v2).",
+             nota="V1. Ate 5 referencias (personagens, roupa, objeto, fundo) viram tokens no mesmo "
+                  "espaco do video, cada uma com slot proprio. Nao testada com GPU real -- so a V2 foi."),
+    LoraSpec("msr-2.5-v2", "LiconStudio/LTX-2.5-Multiple-Subject-Reference",
+             "LTX-2.5-Licon-MSR-V2.safetensors", "ltx-2.5-licon-msr-v2.safetensors",
+             "2.5", "ic_refs", 1.0, sets=("core",),
+             extras=("LTX2.5-MSR-sample-workflow-V2.json",),
+             requires="custom node ComfyUI-LTX2.5-MSR (github liconstudio) -- INSTALADO "
+                      "2026-09-25 em ComfyUI/custom_nodes/",
+             validado_25=True,
+             nota="V2 (2,22 GB). LIGADO e VALIDADO com GPU real 2026-09-25 -- ltx25_backend."
+                  "generate(msr={...}), script_pipeline/ic_references.py modo 'msr25'. Ate 4 "
+                  "sujeitos (pic1..pic4) + background (cenario); audio_ref1/2 (AVref) com "
+                  "lip-sync testado sobre w4a8-v10. Mecanismo DIFERENTE do msr-2.3-v2 (slot "
+                  "embedding real, nao pseudo-video) -- ver MEMORIAL 3.127-3.129."),
     LoraSpec("msr-2.3-v2", "LiconStudio/LTX-2.3-Multiple-Subject-Reference",
              "LTX-2.3-Licon-MSR-V2.safetensors", "ltx-2.3-licon-msr-v2.safetensors",
              "2.3", "ic_refs", 1.0, sets=("core",),

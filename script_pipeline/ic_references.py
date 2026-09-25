@@ -207,7 +207,8 @@ def ingredients_prompt(panels: list[str], video_prompt: str) -> str:
 
 # Preferencia por modo: o retreino 2.5 quando a licenca ja foi aceita e o arquivo
 # existe; senao o 2.3, que os workflows oficiais 2.5 carregam.
-IC_MODE_LORAS = {"ingredients": ("ingredients-2.5", "ingredients-2.3"), "msr": ("msr-2.3-v2",)}
+IC_MODE_LORAS = {"ingredients": ("ingredients-2.5", "ingredients-2.3"), "msr": ("msr-2.3-v2",),
+                 "msr25": ("msr-2.5-v2", "msr-2.5")}
 
 
 def resolve_ic_lora(mode: str, override: str | None = None) -> str | None:
@@ -255,6 +256,22 @@ def shot_ic_spec(mode: str, shot: dict, still: str, refs: dict, location_ref: st
         corridas, quadros = r
         ic = {"frames": corridas, "crop": "center",
               "describe": f"MSR: {len(imagens)} sujeito(s) + cenario em {quadros} quadros"}
+        prompt = msr_prompt(descs, video_prompt)
+    elif mode == "msr25":
+        # MSR do 2.5 (custom node ComfyUI-LTX2.5-MSR, slot embedding real -- NAO e
+        # pseudo-video, entao nao usa build_msr_guide/MSR_FRAME_COUNTS acima, so os
+        # sujeitos entram como pic1..pic4 e o still do proprio plano como "background".
+        # Mecanismo diferente do MSR 2.3 -- ver MEMORIAL 3.127/3.128/3.129: TESTADO com
+        # GPU real ate 4 referencias, audio_ref1 (AVref) e I2V+wide SEM reproduzir o
+        # vazamento que o MSR 2.3 tem nessa combinacao -- por isso NAO aplicamos
+        # MSR_SEM_ENQUADRAMENTO_ABERTO aqui (seria portar uma restricao sem evidencia
+        # pra um mecanismo que ja mostrou nao precisar dela numa amostra). Se em
+        # producao real aparecer o mesmo padrao de vazamento, reveja esta decisao.
+        pic_slots = ("pic1", "pic2", "pic3", "pic4")
+        images = {pic_slots[k]: imagens[k] for k in range(min(len(imagens), 4))}
+        images["background"] = still
+        ic = {"images": images, "reference_frames": "33",
+              "describe": f"MSR 2.5: {len(imagens)} sujeito(s) + cenario (still do plano)"}
         prompt = msr_prompt(descs, video_prompt)
     elif mode == "ingredients":
         locacao = location_ref if include_location else None

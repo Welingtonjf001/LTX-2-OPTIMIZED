@@ -178,6 +178,67 @@ def test_shot_ic_spec_sem_referencia_nao_liga(tmp_path):
     assert ic is None and prompt == "p" and chave == ""
 
 
+def test_shot_ic_spec_msr25_monta_pic_slots_e_background(tmp_path):
+    """MSR 2.5 (slot embedding real, ComfyUI-LTX2.5-MSR) -- MEMORIAL 3.127-3.129: mecanismo
+    diferente do 'msr' 2.3 (pseudo-video), devolve um dict no formato que ltx25_backend.
+    generate(msr=...) espera, nao o formato 'frames' do ic_lora."""
+    ana = tmp_path / "ANA.png"
+    Image.new("RGB", (512, 768), (90, 60, 40)).save(ana)
+    bea = tmp_path / "BEA.png"
+    Image.new("RGB", (512, 768), (40, 90, 60)).save(bea)
+    still = tmp_path / "still.png"
+    Image.new("RGB", (960, 544), (10, 10, 60)).save(still)
+    shot = {"video_prompt": "Ana and Bea walk.", "subject": "ANA", "co_subject": "BEA"}
+    refs = {"ANA": str(ana), "BEA": str(bea)}
+
+    ic, prompt, chave = icr.shot_ic_spec("msr25", shot, str(still), refs, None,
+                                         {"ANA": "tall", "BEA": "short"},
+                                         width=960, height=544, num_frames=81,
+                                         work_dir=tmp_path / "msr25", lora="msr25.safetensors")
+    assert ic["images"]["pic1"] == str(ana)
+    assert ic["images"]["pic2"] == str(bea)
+    assert ic["images"]["background"] == str(still)
+    assert ic["lora"] == "msr25.safetensors"
+    assert ic["reference_frames"] == "33"
+    assert "frames" not in ic  # nao e o formato pseudo-video do ic_lora
+    assert prompt == "Image 1: ANA, tall. Image 2: BEA, short. Image 3: the location and background. Ana and Bea walk."
+    assert chave.startswith("|ic=msr25:msr25.safetensors:1:1:ANA.png:BEA.png")
+
+
+def test_shot_ic_spec_msr25_ate_4_sujeitos(tmp_path):
+    imgs = []
+    for nome in ("A", "B", "C", "D", "E"):
+        p = tmp_path / f"{nome}.png"
+        Image.new("RGB", (64, 64), (1, 2, 3)).save(p)
+        imgs.append(p)
+    still = tmp_path / "still.png"
+    Image.new("RGB", (64, 64), (0, 0, 0)).save(still)
+    # shot_ic_spec so le subject/co_subject (no maximo 2 nomes) -- o teste cobre o
+    # truncamento em 4 pics MESMO com menos de 4 refs (nao tem como este pipeline
+    # pedir 5 hoje, mas _MSR_SLOTS do backend aceita ate 4 + background).
+    shot = {"video_prompt": "p", "subject": "A", "co_subject": "B"}
+    ic, _, _ = icr.shot_ic_spec("msr25", shot, str(still), {"A": str(imgs[0]), "B": str(imgs[1])}, None, {},
+                                width=64, height=64, num_frames=81,
+                                work_dir=tmp_path / "msr25b", lora="m.safetensors")
+    assert set(ic["images"].keys()) == {"pic1", "pic2", "background"}
+
+
+def test_msr25_NAO_bloqueia_enquadramento_aberto(tmp_path):
+    """Ao contrario do MSR 2.3 (test_msr_nao_liga_em_plano_aberto acima), o msr25 NAO
+    aplica MSR_SEM_ENQUADRAMENTO_ABERTO -- decisao deliberada (mecanismo diferente,
+    testado com GPU real em I2V+wide sem reproduzir o vazamento do 2.3, MEMORIAL 3.129)."""
+    ana = tmp_path / "ANA.png"
+    Image.new("RGB", (512, 768), (90, 60, 40)).save(ana)
+    still = tmp_path / "still.png"
+    Image.new("RGB", (960, 544), (10, 10, 60)).save(still)
+    for enquadramento in ("wide", "full", "insert", "establishing"):
+        shot = {"video_prompt": "p", "subject": "ANA", "co_subject": "", "framing": enquadramento}
+        ic, prompt, chave = icr.shot_ic_spec("msr25", shot, str(still), {"ANA": str(ana)}, None, {},
+                                             width=960, height=544, num_frames=81,
+                                             work_dir=tmp_path / enquadramento, lora="m.safetensors")
+        assert ic is not None, f"msr25 nao deveria bloquear enquadramento {enquadramento!r}"
+
+
 # ---------------------------------------------------------------------------
 # enxertos no grafo 2.5
 # ---------------------------------------------------------------------------

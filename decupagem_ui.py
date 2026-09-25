@@ -1783,10 +1783,13 @@ def build() -> None:
                                                         step=0.05, scale=2, label=f"força ({_spec.strength:g} padrão)"))
                     with gr.Row():
                         ic_reference = gr.Dropdown(
-                            choices=["off", "ingredients", "msr"], value="off", scale=1,
+                            choices=["off", "ingredients", "msr", "msr25"], value="off", scale=1,
                             label="IC-LoRA de referência de personagem",
-                            info="msr = sujeitos + cenário (melhor no teste de 2026-09-12); ingredients = "
-                                 "folha da character sheet. O still continua sendo o 1º quadro.")
+                            info="msr = sujeitos + cenário, pseudo-vídeo (2.3, melhor no teste de "
+                                 "2026-09-12); msr25 = MSR V2 do 2.5 (slot embedding real, custom "
+                                 "node, validado com GPU real 2026-09-25 mas ainda não em produção "
+                                 "real da decupagem -- MEMORIAL 3.127-3.129); ingredients = folha "
+                                 "da character sheet. O still continua sendo o 1º quadro.")
                         ic_strength = gr.Slider(minimum=0.0, maximum=1.5, value=1.0, step=0.05, scale=1,
                                                 label="força do IC-LoRA (1.0 padrão)")
                         ic_guide_strength = gr.Slider(minimum=0.0, maximum=1.0, value=1.0, step=0.05, scale=1,

@@ -1145,7 +1145,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                     width=width, height=height, num_frames=seg_frames[j],
                     frame_rate=fps, seed=seed_shot + i + j * 101,
                     image_path=imagem_atual, image_strength=1.0,
-                    loras=video_loras or None, ic_lora=ic_spec,
+                    loras=video_loras or None,
+                    **({"msr": ic_spec} if ic_mode == "msr25" else {"ic_lora": ic_spec}),
                     audio_conditioning=wavs_seg[j],
                     log_cb=lambda m, j=j: log(f"    [ltx25-chain sub{j}] {m}"), timeout=2400)
                 partes.append(str(sub_path))
@@ -1285,7 +1286,8 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                         width=width, height=height, num_frames=shot["frames"],
                         frame_rate=fps, seed=seed_shot + i,
                         image_path=imagem_ltx, image_strength=1.0,
-                        loras=video_loras or None, ic_lora=ic_spec,
+                        loras=video_loras or None,
+                        **({"msr": ic_spec} if ic_mode == "msr25" else {"ic_lora": ic_spec}),
                         # Sem isto o LTX 2.5 inventa a trilha sozinho e gera VOZ
                         # propria, que depois briga com o TTS por baixo da mixagem.
                         # Com isto ele constroi o som em volta da fala real, que e o

@@ -307,10 +307,13 @@ def main() -> int:
     ap.add_argument("--video-lora", action="append", default=[], metavar="CHAVE[:FORCA]",
                     help="LoRA comum na passada de VIDEO (repita para empilhar), ex.: "
                          "better-human-motion:0.6. Nao confundir com --lora, que e dos stills.")
-    ap.add_argument("--ic-reference", default="off", choices=["off", "ingredients", "msr"],
+    ap.add_argument("--ic-reference", default="off",
+                    choices=["off", "ingredients", "msr", "msr25"],
                     help="IC-LoRA de referencia no video: ingredients = folha com a character "
-                         "sheet + locacao; msr = sequencia MSR V2 (sujeitos + cenario). Opt-in; "
-                         "custo de tokens maior (a guia entra no contexto do clipe).")
+                         "sheet + locacao; msr = sequencia MSR V2 pseudo-video (2.3); msr25 = "
+                         "MSR V2 do 2.5 (custom node, slot embedding real -- MEMORIAL 3.127-3.129, "
+                         "validado com GPU real, ainda nao em producao real). Opt-in; custo de "
+                         "tokens maior (a guia entra no contexto do clipe).")
     ap.add_argument("--ic-lora", default=None, help="troca o IC-LoRA padrao do modo")
     ap.add_argument("--ic-strength", type=float, default=1.0)
     ap.add_argument("--ic-guide-strength", type=float, default=1.0)

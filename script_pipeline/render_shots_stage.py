@@ -216,10 +216,14 @@ def main() -> int:
     ap.add_argument("--video-lora", action="append", default=[], metavar="CHAVE[:FORCA]",
                     help="LoRA comum na passada de video (repita para empilhar). Chave do "
                          "catalogo (ex.: better-human-motion:0.6) ou nome do arquivo.")
-    ap.add_argument("--ic-reference", default="off", choices=["off", "ingredients", "msr"],
+    ap.add_argument("--ic-reference", default="off",
+                    choices=["off", "ingredients", "msr", "msr25"],
                     help="IC-LoRA de referencia no video: 'ingredients' = folha com a character "
-                         "sheet do(s) personagem(ns) + locacao; 'msr' = sequencia MSR V2 "
-                         "(sujeitos + cenario). O still segue como primeiro quadro. So LTX.")
+                         "sheet do(s) personagem(ns) + locacao; 'msr' = sequencia MSR V2 pseudo-"
+                         "video (2.3); 'msr25' = MSR V2 do 2.5 (custom node ComfyUI-LTX2.5-MSR, "
+                         "slot embedding real, ate 4 sujeitos + still como cenario -- TESTADO com "
+                         "GPU real ate 4 refs, MEMORIAL 3.127-3.129, mas ainda NAO em producao "
+                         "real da decupagem). O still segue como primeiro quadro. So LTX.")
     ap.add_argument("--ic-lora", default=None,
                     help="troca o IC-LoRA padrao do modo (chave do catalogo ou arquivo)")
     ap.add_argument("--ic-strength", type=float, default=1.0)
