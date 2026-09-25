@@ -484,7 +484,13 @@ Catálogo em `ltx_loras.py`: tipo, força, gatilho e compatibilidade de cada um.
   compare com `gguf-q6k` ou `distilled`.
 - MSR: a 2.3 V2 roda com nós nativos (sequência montada em
   `script_pipeline/ic_references.py`). **A 2.5 exige o custom node
-  ComfyUI-LTX2.5-MSR** (slot embedding): baixada, NÃO ligada.
+  ComfyUI-LTX2.5-MSR** (slot embedding real, não pseudo-vídeo -- até 5
+  referências + 2 áudios nativos). 2026-09-25: node CLONADO em
+  `ComfyUI/custom_nodes/ComfyUI-LTX2.5-MSR` e LoRA V2 (2,22 GB) BAIXADO em
+  `models/2.5/loras/ltx-2.5-licon-msr-v2.safetensors` (V1, 1,31 GB, já
+  estava lá desde 09-12). **Ainda NÃO ligado no pipeline** -- falta capturar
+  o grafo API do workflow de amostra e estender `ic_references.py` com um
+  ramo pro 2.5. Ver MEMORIAL 3.127.
 - ⚠️ **MSR em I2V vaza a guia** (MEDIDO 2026-09-13, bf16 e w4a8, força 1,0 e 0,5): com
   still aberto o vídeo larga o still no quadro 1 e vira o plano médio dos retratos; com
   guia de 65 quadros num clipe de 73 corta seco no 57. O oficial é T2V puro. Por isso

@@ -8408,3 +8408,44 @@ transformer LTX nem nos caminhos de produção; diferença conhecida e não-bug 
 Auditoria completa (construído/pendente/precisa-teste/débito técnico) não reproduzida aqui por
 brevidade -- rodada por subagente no início da sessão, cobrindo o estado do repositório até
 2026-09-24/25.
+
+### 3.127 — Licon MSR V2 (2.5): LoRA e custom node BAIXADOS, NÃO ligados no pipeline
+
+Usuário pediu pra planejar e depois baixar o modelo `LiconStudio/LTX-2.5-Multiple-Subject-Reference`
+(V2). Achado antes de baixar: o **V1** já estava em disco desde 09-12
+(`models/2.5/loras/ltx-2.5-licon-msr-v1.safetensors`, 1,31 GB), mas o `ComfyUI-LTX2.5-MSR` (o custom
+node que dá SIGNIFICADO ao LoRA -- sem ele, o arquivo sozinho não faz nada) nunca tinha sido instalado
+-- confirma o que o CLAUDE.md já registrava ("baixada, NÃO ligada"). `ic_references.py` só implementa
+MSR pro **2.3** (nós nativos, pseudo-vídeo montado à mão); não tem ramo pro 2.5 nenhum.
+
+**Baixados nesta sessão:**
+- `models/2.5/loras/ltx-2.5-licon-msr-v2.safetensors` (2,22 GB, via `huggingface_hub.hf_hub_download`).
+- `ComfyUI/custom_nodes/ComfyUI-LTX2.5-MSR/` (clonado de `github.com/liconstudio/ComfyUI-LTX2.5-MSR`,
+  v1.2.2) -- NO ComfyUI principal (porta 8188), não no do MiniMax H3. Sem dependência Python extra
+  (README do node confirma).
+- `models/2.5/loras/_workflows/msr-2.5-v2/LTX2.5-MSR-sample-workflow-V2.json` (workflow de amostra do
+  próprio node).
+
+Ambos ignorados pelo git (`models/` e `ComfyUI/` já são padrão `.gitignore`) -- nada pra commitar além
+deste registro.
+
+**Como o mecanismo funciona (lido o README do node), bem diferente do MSR 2.3:** é slot-embedding de
+verdade, não pseudo-vídeo. Dois nós: `ComfyUI-LTX2.5-MSR IC-LoRA Loader` (carrega o LoRA num `MODEL`
+nativo, extrai `reference_slot_embedding.*` do checkpoint) e `ComfyUI-LTX2.5-MSR Multi-Reference Guide`
+(codifica cada referência independente, soma o slot embedding aprendido, injeta em posições temporais
+negativas). Até 5 referências (`pic1`-`pic4` + `background`), 2 referências de ÁUDIO nativas
+(`audio_ref1`/`audio_ref2`, via `LTXVAudioVAEEncode`). Requer `LTXVCropGuides` depois da amostragem
+(já usado pelo backend 2.5 -- `ltx25_backend.py` já insere esse nó, ver seção "LoRAs e IC-LoRAs de
+vídeo no 2.5" do CLAUDE.md). Batch size 1 obrigatório. `reference_frames`: 25 ou 33.
+
+**NÃO implementado ainda -- pendência real, não concluída nesta sessão:**
+1. Capturar o grafo API do workflow de amostra via `window.app.graphToPrompt()` no navegador (mesma
+   lição do long take do MiniMax H3, §3.117: `comfy_workflow_tool.convert()` erra em nós não-padrão).
+2. Estender `ic_references.py` (ou criar módulo irmão) com um ramo pro 2.5, decidindo se reaproveita
+   as restrições já validadas do MSR 2.3 (`MSR_SEM_ENQUADRAMENTO_ABERTO`, `MSR_MAX_FRACAO`) ou se
+   revalida do zero -- o mecanismo é outro node, o vazamento de guia em I2V (§3.82) pode não existir
+   aqui ou pode ser diferente.
+3. Testar com GPU real numa cena com 2+ personagens nomeados.
+
+Sem isso, os dois LoRAs MSR 2.5 (V1 e V2) continuam em disco sem uso -- não confundir "baixado" com
+"funcionando".
