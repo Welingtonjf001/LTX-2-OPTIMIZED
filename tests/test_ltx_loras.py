@@ -283,6 +283,30 @@ def test_msr_two_stage_e_recusado(grafo):
                              msr={"lora": "m.safetensors", "images": {"pic1": "x.png"}})
 
 
+def test_msr_audio_ref_usa_o_mesmo_audio_vae_do_grafo(grafo):
+    msr = {"lora": "m.safetensors",
+           "images": {"pic1": "sujeito1.png", "pic2": "sujeito2.png"},
+           "audio": {"audio_ref1": "voz1.wav", "audio_ref2": "voz2.wav"}}
+    api = grafo.build_workflow("p", num_frames=81, msr=msr)
+    guia = api[grafo.N_MSR_GUIDE]["inputs"]
+    audio_vae = api["5514:3980"]["inputs"]["audio_vae"]
+    enc1_id = guia["audio_ref1"][0]
+    enc2_id = guia["audio_ref2"][0]
+    assert api[enc1_id]["class_type"] == "LTXVAudioVAEEncode"
+    assert api[enc1_id]["inputs"]["audio_vae"] == audio_vae
+    load1_id = api[enc1_id]["inputs"]["audio"][0]
+    assert api[load1_id]["inputs"]["audio"] == "voz1.wav"
+    load2_id = api[api[enc2_id]["inputs"]["audio"][0]]["inputs"]["audio"]
+    assert load2_id == "voz2.wav"
+
+
+def test_msr_sem_audio_nao_adiciona_inputs_de_audio(grafo):
+    msr = {"lora": "m.safetensors", "images": {"pic1": "x.png"}}
+    api = grafo.build_workflow("p", num_frames=81, msr=msr)
+    guia = api[grafo.N_MSR_GUIDE]["inputs"]
+    assert "audio_ref1" not in guia and "audio_ref2" not in guia
+
+
 def test_msr_encadeia_depois_de_loras_comuns(grafo):
     """msr nao pode sobrescrever loras comuns aplicados antes dele (bug do primeiro
     rascunho desta integracao: _apply_msr_lora usava sempre [n_unet, 0] direto)."""

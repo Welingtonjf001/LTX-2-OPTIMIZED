@@ -720,13 +720,17 @@ def _apply_msr_guide(api: dict, msr: dict, *, log_cb=None) -> None:
     2.3) ja foi carregado por `_apply_model_patches` antes desta funcao rodar.
 
     `msr`: {"lora", "strength" (do LoRA), "images": {"pic1": caminho, "pic2":
-    ..., "pic3", "pic4", "background"}, "guide_strength", "reference_frames"
-    ("25"|"33"), "describe"}. So `pic1` e obrigatorio -- o resto e opcional,
-    na ordem que o node espera (pic1..pic4, background por ultimo). Le
-    `msr_parameters` de N_MSR_LOADER se ele estiver no grafo; sem LoRA
-    carregado o node ainda aceita rodar como guia "burra", sem slot embedding
-    (ver docstring do node). NAO TESTADO com GPU real ainda -- MEMORIAL
-    3.127/3.128."""
+    ..., "pic3", "pic4", "background"}, "audio": {"audio_ref1": caminho,
+    "audio_ref2": caminho}, "guide_strength", "reference_frames" ("25"|"33"),
+    "describe"}. So `pic1` e obrigatorio -- o resto e opcional, na ordem que
+    o node espera (pic1..pic4, background por ultimo). `audio_ref1` exige
+    `pic1`, `audio_ref2` exige `pic2` (o node casa audio com a imagem do
+    MESMO numero -- nao revalidado aqui, erro sai do proprio ComfyUI se
+    descasado). Le `msr_parameters` de N_MSR_LOADER se ele estiver no grafo;
+    sem LoRA carregado o node ainda aceita rodar como guia "burra", sem slot
+    embedding (ver docstring do node). VALIDADO com GPU real 2026-09-25 (2
+    referencias de imagem, sem audio -- MEMORIAL 3.128); audio_ref/3+
+    referencias/background/variantes quantizadas NAO testados ainda."""
     guider = api.get(N_CFG_GUIDER) or api.get("9103")
     if guider is None:
         raise RuntimeError("Nenhum guider encontrado para a guia do MSR.")
@@ -749,12 +753,30 @@ def _apply_msr_guide(api: dict, msr: dict, *, log_cb=None) -> None:
         inputs[slot] = [nid, 0]
     if N_MSR_LOADER in api:
         inputs["msr_parameters"] = [N_MSR_LOADER, 1]
+    # audio_ref1/2 (AVref): reaproveita o MESMO audio_vae que _apply_audio_conditioning
+    # usa (LTXVEmptyLatentAudio, ja no grafo base). audio_ref1 exige pic1 presente;
+    # audio_ref2 exige pic2 -- checado no README do node ("each audio_refN requires
+    # the same numbered picture"), nao revalidado aqui: erro sai do proprio ComfyUI.
+    audio = msr.get("audio") or {}
+    audio_vae = api["5514:3980"]["inputs"]["audio_vae"]
+    for i, chave in enumerate(("audio_ref1", "audio_ref2")):
+        path = audio.get(chave)
+        if not path:
+            continue
+        nid_load = f"{N_MSR_GUIDE}a{i}"
+        nid_enc = f"{N_MSR_GUIDE}b{i}"
+        api[nid_load] = {"class_type": "LoadAudio", "inputs": {"audio": os.path.basename(path)}}
+        api[nid_enc] = {"class_type": "LTXVAudioVAEEncode",
+                        "inputs": {"audio": [nid_load, 0], "audio_vae": audio_vae}}
+        inputs[chave] = [nid_enc, 0]
     api[N_MSR_GUIDE] = {"class_type": "ComfyUILTX25MSRMultiReferenceGuide", "inputs": inputs}
     guider["inputs"]["positive"] = [N_MSR_GUIDE, 0]
     guider["inputs"]["negative"] = [N_MSR_GUIDE, 1]
     concat["video_latent"] = [N_MSR_GUIDE, 2]
     n_refs = sum(1 for s in _MSR_SLOTS if images.get(s))
-    _log(f"[ltx25] MSR guide: {n_refs} referência(s) -- "
+    n_audio = sum(1 for k in ("audio_ref1", "audio_ref2") if audio.get(k))
+    _log(f"[ltx25] MSR guide: {n_refs} referência(s) de imagem"
+         f"{f' + {n_audio} de áudio' if n_audio else ''} -- "
          f"{msr.get('describe', 'múltiplos sujeitos/cenário')}", log_cb)
 
 
@@ -1212,6 +1234,9 @@ def generate(
         staged_msr = dict(msr)
         staged_msr["images"] = {slot: stage_input_image(p)
                                 for slot, p in (msr.get("images") or {}).items() if p}
+        if msr.get("audio"):
+            staged_msr["audio"] = {chave: stage_input_audio(p)
+                                   for chave, p in msr["audio"].items() if p}
     # Tudo que _stage_input copiou para ComfyUI/input, para apagar no finally.
     # Nenhuma UI aqui limpava isso: em uso continuo a pasta so cresce, e um
     # nome tipo "a1b2c3d4_shot002.wav" nao diz de qual run veio quando alguem
@@ -1223,6 +1248,7 @@ def generate(
             _staged_paths.append(staged_ic["video"])
     if staged_msr:
         _staged_paths += list(staged_msr["images"].values())
+        _staged_paths += list(staged_msr.get("audio", {}).values())
     nomes_lora = ([n for n, _ in (loras or [])] + ([ic_lora["lora"]] if ic_lora else [])
                   + ([msr["lora"]] if msr else []))
     if nomes_lora:
