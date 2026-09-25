@@ -8357,6 +8357,35 @@ contínua). Ainda não dá pra separar quanto disso é limite do mecanismo de co
 segmentos 2-6. Próximo passo, se for atacar isso: fixar o estado do cabelo explicitamente em CADA
 prompt de segmento (mitigação textual, sem mexer no grafo) antes de tentar de novo qualquer reforço
 via imagem.
+
+**INVESTIGAÇÃO DE CAUSA RAIZ (2026-09-25, depois do veredito acima): `reinforce_identity` era
+redundante -- a reinjeção já acontece sozinha via `shared_reference`.** Lido o código do
+`comfyui-easy-media` (`E:\Users\home\Documents\MiniMax-H3\ComfyUI\custom_nodes\ComfyUI-Easy-Media`)
+depois da trava documentada acima. Achado: `shared_reference: true` -- que `build_longtake_workflow()`
+JÁ marca em toda imagem de todo segmento, independente deste parâmetro -- é resolvido em nível de
+PROJETO, não de segmento:
+
+- `_load_multitrack_project_media()` (`utils/h3_project.py:1401-1583`) varre TODAS as task tracks,
+  extrai toda imagem `shared_reference=true` da lista PRIVADA do seu próprio segmento e devolve como
+  uma lista única `shared_images` no nível do projeto.
+- `prepare_multitrack_project_task_info()` (`h3_project.py:1623`) anexa essa lista inteira a
+  `_preloaded_media["images"]` de CADA task, sem checar `task_mode` nem `continuity_mode` do segmento.
+- `MultiTrackTaskOutput` (`nodes/basic.py:2847-2896`) consome `_preloaded_media` direto, também sem
+  gate por `task_mode`.
+
+Ou seja: a imagem do segmento 0 (com `shared_reference: true`, já o padrão de todo caminho
+`minimax-longtake` desde §3.117) **já chega em todos os segmentos seguintes automaticamente**,
+qualquer que seja o `continuity_mode` deles -- sem precisar duplicar `ref_images` nem tocar
+`task_mode`. `reinforce_identity=True` não reforçava nada que já não estivesse acontecendo por baixo;
+só forçava o grafo por um caminho que o node não suporta (`task_mode="ref"` explícito num segmento
+`context`), daí a trava. **Conclusão prática**: não há necessidade de reforço de identidade adicional
+via imagem no caminho atual -- a deriva residual que o usuário relatou (cabelo molhado->seco) já
+acontece COM a referência compartilhada ativa, então a causa mais provável é mesmo falta de âncora
+textual por segmento (hipótese já registrada acima), não ausência de referência visual. `reinforce_
+identity` fica no código como parâmetro documentado e testado-e-rejeitado (útil como registro de
+"já tentamos isso, não funciona assim"), mas a investigação futura deveria ir direto pro texto do
+prompt, não por outro mecanismo de imagem.
+
 **Checkpoint turbo LightX2V (§3.116) -- CONFIRMADO como LoRA, e já em produção.** Inspecionado o
 `.safetensors`: `metadata.source_format = "Diffusers PEFT LoRA"`, rank 128, alpha 8, base
 `minimax_h3_fl2va_bf16.safetensors`. Só o `4step_v0.1` existe em disco (o `8step_v1.0_768p` citado

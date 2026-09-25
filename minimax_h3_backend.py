@@ -835,22 +835,34 @@ def generate_longtake(segments: list[dict], output_path: str, *,
     as MESMAS imagens em todo segmento seguinte que não tiver `ref_images`
     próprio (mantendo `continuity_mode="context"`).
 
-    ⚠️ TESTADO COM GPU REAL 2026-09-25 E REJEITADO -- NÃO USAR AINDA. A
-    combinação `task_mode="ref"` + `continuity_mode="context"` no mesmo
-    segmento (é o que `reinforce_identity=True` produz a partir do segmento 1
-    em diante) TRAVA o `comfyui-easy-media`: num take de 6 segmentos, o
-    segmento 0 (sem reforço) fechou em ~140s normalmente, mas o segmento 1
-    (primeiro com a reinjeção) ficou rodando com a GPU em 100% por mais de
-    3400s sem terminar -- não é lentidão, é loop/trava real (watchdog matou
-    aos 3604s). O grafo ACEITA a combinação sem erro de validação
-    (`build_longtake_workflow` não bloqueia), mas o node por trás não sabe
-    combinar herança de latente com reinjeção de imagem na mesma tarefa.
-    Suspeita não confirmada: o node pode esperar decodificar/recodificar a
-    imagem de referência contra um latente que ainda não existe nesse ponto
-    do grafo (a herança de contexto só populou o latente DEPOIS do segmento
-    0). Ficou default=False e deve continuar assim até alguém investigar o
-    código do `comfyui-easy-media` ou achar outro mecanismo de reforço de
-    identidade que não misture os dois task_mode. Ver MEMORIAL 3.126."""
+    ⚠️ TESTADO COM GPU REAL 2026-09-25 E REJEITADO -- NÃO USAR, E PROVAVELMENTE
+    DESNECESSÁRIO. A combinação `task_mode="ref"` + `continuity_mode="context"`
+    no mesmo segmento (é o que `reinforce_identity=True` produz a partir do
+    segmento 1 em diante) TRAVA o `comfyui-easy-media`: num take de 6
+    segmentos, o segmento 0 fechou em ~140s normalmente, mas o segmento 1
+    (primeiro com a reinjeção) ficou com a GPU em 100% por mais de 3400s sem
+    terminar -- loop/trava real, não lentidão (watchdog matou aos 3604s).
+
+    INVESTIGADO o código do `comfyui-easy-media` (`utils/h3_project.py`,
+    `nodes/basic.py`) depois da trava: `shared_reference: true` -- que
+    `build_longtake_workflow()` JÁ marca em TODA imagem de TODO segmento,
+    sem depender deste parâmetro -- é resolvido em nível de PROJETO, não de
+    segmento. `_load_multitrack_project_media()` (h3_project.py:1401-1583)
+    extrai toda imagem `shared_reference` da lista privada do seu segmento e
+    devolve como `shared_images`, uma lista única que `prepare_multitrack_
+    project_task_info()` (h3_project.py:1623) anexa a `_preloaded_media` de
+    CADA task, e `MultiTrackTaskOutput` (nodes/basic.py:2847) consome sem
+    checar `task_mode`. Ou seja: a imagem do segmento 0 já chega em TODOS os
+    segmentos seguintes automaticamente, independente de `continuity_mode`,
+    SEM precisar duplicar `ref_images` nem tocar `task_mode`. `reinforce_
+    identity=True` não reforçava nada que já não estivesse acontecendo --
+    só forçava o grafo por um caminho (`task_mode="ref"` explícito num
+    segmento `context`) que o node não suporta. Ficou default=False e não
+    deve ser ligado. Se a deriva de identidade persistir apesar do
+    `shared_reference` já ativo, o problema está em outro lugar (ex.: o
+    próprio mecanismo de herança de contexto em latente, ou falta de âncora
+    TEXTUAL pro estado de figurino/cabelo em cada prompt de segmento -- ver
+    MEMORIAL 3.126, veredito do usuário sobre o cabelo "molhado -> seco")."""
     if not segments:
         raise ValueError("generate_longtake precisa de pelo menos 1 segmento.")
     if reinforce_identity and segments and segments[0].get("ref_images"):
