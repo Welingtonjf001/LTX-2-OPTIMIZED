@@ -652,11 +652,14 @@ def _apply_dev_variant(api: dict, *, steps: int, video_cfg: float, audio_cfg: fl
 # audio. Tipos, forcas, gatilhos e a verificacao 2.3 -> 2.5 moram em ltx_loras.py.
 #
 # Ids fora da faixa do grafo oficial e dos outros enxertos deste modulo (dev 91xx,
-# keyframes 92xx/93xx, audio 94xx).
+# keyframes 92xx/93xx, audio 94xx, MSR 96xx -- ver _apply_msr_lora/_apply_msr_guide).
 N_LORA_BASE = 9500
 N_IC_LOADER = "9600"
 N_IC_GUIDE = "9601"
 N_CROP_GUIDES = "9602"
+N_MSR_LOADER = "9650"
+N_MSR_GUIDE = "9651"
+_MSR_SLOTS = ("pic1", "pic2", "pic3", "pic4", "background")
 
 
 def _consumers(api: dict, link: list) -> list[tuple[str, str]]:
@@ -677,9 +680,11 @@ def _require_lora(name: str) -> str:
     return name
 
 
-def _apply_model_patches(api: dict, source: list, loras, ic_lora, *, log_cb=None) -> None:
-    """Encadeia LoraLoaderModelOnly (e o loader do IC-LoRA por ultimo) entre o
-    carregador do transformer e TODO no que o lia."""
+def _apply_model_patches(api: dict, source: list, loras, ic_lora, msr=None, *, log_cb=None) -> None:
+    """Encadeia LoraLoaderModelOnly (e o loader do IC-LoRA/MSR por ultimo) entre o
+    carregador do transformer e TODO no que o lia. `ic_lora` e `msr` sao mutuamente
+    exclusivos (checado em build_workflow) -- o parametro extra existe so pra `msr`
+    poder chegar DEPOIS dos `loras` comuns, em vez de sobrescreve-los."""
     consumidores = _consumers(api, source)
     atual = source
     for i, (nome, forca) in enumerate(loras or []):
@@ -688,6 +693,12 @@ def _apply_model_patches(api: dict, source: list, loras, ic_lora, *, log_cb=None
             "model": atual, "lora_name": _require_lora(nome), "strength_model": float(forca)}}
         atual = [nid, 0]
         _log(f"[ltx25] LoRA {i + 1}: {nome} (força {forca})", log_cb)
+    if msr:
+        api[N_MSR_LOADER] = {"class_type": "ComfyUILTX25MSRICLoRALoader", "inputs": {
+            "model": atual, "lora_name": _require_lora(msr["lora"]),
+            "strength_model": float(msr.get("strength", 1.0))}}
+        atual = [N_MSR_LOADER, 0]
+        _log(f"[ltx25] MSR LoRA {msr['lora']} (força {msr.get('strength', 1.0)})", log_cb)
     if ic_lora:
         # LTXICLoRALoaderModelOnly e o LoraLoader mais a leitura do
         # `reference_downscale_factor` do metadata -- a guia usa esse fator (saida 1)
@@ -698,6 +709,53 @@ def _apply_model_patches(api: dict, source: list, loras, ic_lora, *, log_cb=None
         atual = [N_IC_LOADER, 0]
     for nid, nome in consumidores:
         api[nid]["inputs"][nome] = atual
+
+
+def _apply_msr_guide(api: dict, msr: dict, *, log_cb=None) -> None:
+    """Injeta ComfyUILTX25MSRMultiReferenceGuide antes do LTXVConcatAVLatent, no
+    latente de VIDEO -- mesmo ponto e mesmo motivo de _apply_ic_guide
+    (LTXVAddGuide/os nos de guia nao aceitam o latente AV aninhado). O LoRA MSR
+    (`ComfyUILTX25MSRICLoRALoader`, custom node -- extrai `reference_slot_
+    embedding.*` do checkpoint; nao existe fallback nativo, ao contrario do MSR
+    2.3) ja foi carregado por `_apply_model_patches` antes desta funcao rodar.
+
+    `msr`: {"lora", "strength" (do LoRA), "images": {"pic1": caminho, "pic2":
+    ..., "pic3", "pic4", "background"}, "guide_strength", "reference_frames"
+    ("25"|"33"), "describe"}. So `pic1` e obrigatorio -- o resto e opcional,
+    na ordem que o node espera (pic1..pic4, background por ultimo). Le
+    `msr_parameters` de N_MSR_LOADER se ele estiver no grafo; sem LoRA
+    carregado o node ainda aceita rodar como guia "burra", sem slot embedding
+    (ver docstring do node). NAO TESTADO com GPU real ainda -- MEMORIAL
+    3.127/3.128."""
+    guider = api.get(N_CFG_GUIDER) or api.get("9103")
+    if guider is None:
+        raise RuntimeError("Nenhum guider encontrado para a guia do MSR.")
+    concat = api[N_CONCAT]["inputs"]
+    images = msr.get("images") or {}
+    if "pic1" not in images:
+        raise ValueError("msr precisa de pelo menos 'images[\"pic1\"]'.")
+    inputs = {
+        "positive": guider["inputs"]["positive"], "negative": guider["inputs"]["negative"],
+        "vae": api[N_IMG2VID]["inputs"]["vae"], "latent": concat["video_latent"],
+        "strength": float(msr.get("guide_strength", 1.0)),
+        "reference_frames": str(msr.get("reference_frames", 33)),
+        "use_tiled_encode": False, "tile_size": 256, "tile_overlap": 64}
+    for i, slot in enumerate(_MSR_SLOTS):
+        path = images.get(slot)
+        if not path:
+            continue
+        nid = f"{N_MSR_GUIDE}{i}"
+        api[nid] = {"class_type": "LoadImage", "inputs": {"image": os.path.basename(path)}}
+        inputs[slot] = [nid, 0]
+    if N_MSR_LOADER in api:
+        inputs["msr_parameters"] = [N_MSR_LOADER, 1]
+    api[N_MSR_GUIDE] = {"class_type": "ComfyUILTX25MSRMultiReferenceGuide", "inputs": inputs}
+    guider["inputs"]["positive"] = [N_MSR_GUIDE, 0]
+    guider["inputs"]["negative"] = [N_MSR_GUIDE, 1]
+    concat["video_latent"] = [N_MSR_GUIDE, 2]
+    n_refs = sum(1 for s in _MSR_SLOTS if images.get(s))
+    _log(f"[ltx25] MSR guide: {n_refs} referência(s) -- "
+         f"{msr.get('describe', 'múltiplos sujeitos/cenário')}", log_cb)
 
 
 def _ic_guide_images(api: dict, ic: dict, *, width: int, height: int, num_frames: int) -> list:
@@ -802,18 +860,34 @@ def build_workflow(
     two_stage: bool = TWO_STAGE_DEFAULT,
     loras: list[tuple[str, float]] | None = None,
     ic_lora: dict | None = None,
+    msr: dict | None = None,
     log_cb=None,
 ) -> dict:
     """loras: [(nome do arquivo, forca)], encadeados na ordem dada.
 
     ic_lora: um IC-LoRA com a sua guia -- {"lora", "strength", "guide_strength",
     "crop", "describe"} mais UMA fonte de guia: "frames" [(imagem, quadros)] (folha de
-    ingredientes, pseudo-video do MSR), "video" (controle: canny/pose/camera) ou
-    "tracks" (JSON do LTXVDrawTracks). Montagem em script_pipeline/ic_references.py."""
+    ingredientes, pseudo-video do MSR PRA 2.3), "video" (controle: canny/pose/camera)
+    ou "tracks" (JSON do LTXVDrawTracks). Montagem em script_pipeline/ic_references.py.
+
+    msr: MSR PRA 2.5 -- mecanismo DIFERENTE do `ic_lora` acima (slot embedding real
+    via custom node ComfyUI-LTX2.5-MSR, nao pseudo-video) -- {"lora", "strength",
+    "images": {"pic1": caminho, "pic2"/"pic3"/"pic4"/"background": opcionais},
+    "guide_strength", "reference_frames" ("25"|"33"), "describe"}. So `pic1` e
+    obrigatorio. NAO testado com GPU real ainda (MEMORIAL 3.127/3.128) -- LoRA e
+    node baixados/clonados em 2026-09-25, integracao nova."""
     if variant not in VARIANTS and variant not in GGUF_VARIANTS:
         raise ValueError(
             f"variant deve ser um de {sorted(VARIANTS) + sorted(GGUF_VARIANTS)}; "
             f"recebi {variant!r}")
+    if ic_lora and msr:
+        raise ValueError(
+            "ic_lora e msr injetam guia no MESMO ponto do grafo (video_latent, antes do "
+            "LTXVConcatAVLatent) -- nao ha suporte a combinar os dois numa chamada.")
+    if msr and two_stage:
+        raise ValueError(
+            "MSR no two-stage nao esta ligado: como o ic_lora, o refino x2 precisaria "
+            "receber a guia de novo na resolucao dobrada. Rode com two_stage=False.")
     if ic_lora:
         if two_stage:
             raise ValueError(
@@ -862,8 +936,8 @@ def build_workflow(
     # LoRAs e IC-LoRA entram entre o carregador e quem le o modelo, ANTES do dev e dos
     # demais enxertos: _apply_dev_variant e _apply_audio_conditioning leem o modelo do
     # guider, e ele ja tem de apontar para o modelo com LoRA.
-    if loras or ic_lora:
-        _apply_model_patches(api, [n_unet, 0], loras, ic_lora, log_cb=log_cb)
+    if loras or ic_lora or msr:
+        _apply_model_patches(api, [n_unet, 0], loras, ic_lora, msr, log_cb=log_cb)
         if variant in ("w4a8-v10", "redgraft", "distilled-int8"):
             _log("[ltx25] LoRA sobre checkpoint quantizado: com o modelo inteiro na placa o "
                  "ComfyUI funde o LoRA e REQUANTIZA o peso (ModelPatcher.patch_weight_to_device "
@@ -976,11 +1050,14 @@ def build_workflow(
     if keyframes:
         _apply_keyframes(api, keyframes, log_cb=log_cb)
 
-    # A guia do IC-LoRA vai no mesmo latente de video, depois dos keyframes e antes do
-    # audio: a mascara de audio embrulha a saida do concat e tem de encontrar a guia la.
+    # A guia do IC-LoRA/MSR vai no mesmo latente de video, depois dos keyframes e antes
+    # do audio: a mascara de audio embrulha a saida do concat e tem de encontrar a guia
+    # la. ic_lora e msr sao mutuamente exclusivos (checado no topo da funcao).
     if ic_lora:
         _apply_ic_guide(api, ic_lora, width=width, height=height, num_frames=num_frames,
                         log_cb=log_cb)
+    if msr:
+        _apply_msr_guide(api, msr, log_cb=log_cb)
 
     # After the guides: those work on the plain VIDEO latent, before the AV
     # concat, while audio conditioning wraps the concat's output. Reversing the
@@ -995,10 +1072,10 @@ def build_workflow(
                  "a batida.", log_cb)
 
     # Por ultimo: o crop le o positive FINAL (depois da mascara de audio) para contar
-    # quantos quadros de guia tirar. Com keyframes e IC-LoRA juntos sai tudo que foi
-    # anexado, inclusive o quadro extra de cada keyframe -- que sem IC-LoRA continua no
+    # quantos quadros de guia tirar. Com keyframes e IC-LoRA/MSR juntos sai tudo que foi
+    # anexado, inclusive o quadro extra de cada keyframe -- que sem guia continua no
     # clipe como sempre ficou (MEMORIAL 3.12).
-    if ic_lora:
+    if ic_lora or msr:
         _apply_crop_guides(api)
 
     return api
@@ -1102,6 +1179,7 @@ def generate(
     two_stage: bool = TWO_STAGE_DEFAULT,
     loras: list[tuple[str, float]] | None = None,
     ic_lora: dict | None = None,
+    msr: dict | None = None,
     log_cb=None,
     timeout: int = 5400,
 ) -> str:
@@ -1115,9 +1193,10 @@ def generate(
     replacing the audio the model would otherwise invent. This is the 2.5
     equivalent of 2.3's `--audio-input-path`; see _apply_audio_conditioning.
 
-    loras / ic_lora: ver build_workflow. As imagens e o video da guia do IC-LoRA vao
-    para ComfyUI/input como as demais entradas, e os gatilhos que o catalogo
-    (ltx_loras.py) exige entram no prompt aqui, com log."""
+    loras / ic_lora / msr: ver build_workflow. As imagens (e o video da guia do
+    IC-LoRA, ou os "pic*"/"background" do msr) vao para ComfyUI/input como as
+    demais entradas, e os gatilhos que o catalogo (ltx_loras.py) exige entram
+    no prompt aqui, com log."""
     staged = stage_input_image(image_path) if image_path else None
     staged_keys = [(stage_input_image(p), i, s) for p, i, s in (keyframes or [])]
     staged_audio = stage_input_audio(audio_conditioning) if audio_conditioning else None
@@ -1128,6 +1207,11 @@ def generate(
             staged_ic["frames"] = [(stage_input_image(p), n) for p, n in ic_lora["frames"]]
         if ic_lora.get("video"):
             staged_ic["video"] = _stage_input(ic_lora["video"])
+    staged_msr = None
+    if msr:
+        staged_msr = dict(msr)
+        staged_msr["images"] = {slot: stage_input_image(p)
+                                for slot, p in (msr.get("images") or {}).items() if p}
     # Tudo que _stage_input copiou para ComfyUI/input, para apagar no finally.
     # Nenhuma UI aqui limpava isso: em uso continuo a pasta so cresce, e um
     # nome tipo "a1b2c3d4_shot002.wav" nao diz de qual run veio quando alguem
@@ -1137,7 +1221,10 @@ def generate(
         _staged_paths += [p for p, _ in staged_ic.get("frames") or []]
         if staged_ic.get("video"):
             _staged_paths.append(staged_ic["video"])
-    nomes_lora = [n for n, _ in (loras or [])] + ([ic_lora["lora"]] if ic_lora else [])
+    if staged_msr:
+        _staged_paths += list(staged_msr["images"].values())
+    nomes_lora = ([n for n, _ in (loras or [])] + ([ic_lora["lora"]] if ic_lora else [])
+                  + ([msr["lora"]] if msr else []))
     if nomes_lora:
         import ltx_loras
         gatilhos = [ltx_loras.BY_LOCAL[n].trigger for n in nomes_lora
@@ -1150,6 +1237,7 @@ def generate(
         prompt,
         loras=loras,
         ic_lora=staged_ic,
+        msr=staged_msr,
         negative=negative,
         width=width,
         height=height,

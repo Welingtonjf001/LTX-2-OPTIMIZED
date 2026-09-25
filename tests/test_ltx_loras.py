@@ -231,3 +231,64 @@ def test_ic_lora_two_stage_e_recusado(grafo):
     with pytest.raises(ValueError, match="two-stage"):
         grafo.build_workflow("p", num_frames=81, two_stage=True,
                              ic_lora={"lora": "ing.safetensors", "frames": [("f.png", 81)]})
+
+
+# ---------------------------------------------------------------------------
+# MSR 2.5 (ComfyUI-LTX2.5-MSR) -- MEMORIAL 3.127/3.128, integracao nova
+# ---------------------------------------------------------------------------
+
+def test_msr_lora_carrega_e_guia_le_msr_parameters(grafo):
+    msr = {"lora": "ltx-2.5-licon-msr-v2.safetensors", "strength": 1.0,
+           "images": {"pic1": "C:/x/sujeito1.png", "background": "C:/x/cenario.png"},
+           "guide_strength": 0.9, "reference_frames": "33"}
+    api = grafo.build_workflow("p", num_frames=81, msr=msr)
+    guider = api[grafo.N_CFG_GUIDER]["inputs"]
+    assert guider["model"] == [grafo.N_MSR_LOADER, 0]
+    assert api[grafo.N_MSR_LOADER]["inputs"]["lora_name"] == "ltx-2.5-licon-msr-v2.safetensors"
+    assert api[grafo.N_MSR_LOADER]["inputs"]["strength_model"] == 1.0
+    guia = api[grafo.N_MSR_GUIDE]["inputs"]
+    assert guia["msr_parameters"] == [grafo.N_MSR_LOADER, 1]
+    assert guia["strength"] == 0.9
+    assert guia["reference_frames"] == "33"
+    # pic1 e background viram LoadImage, pic2/pic3/pic4 ficam de fora (nao pedidos)
+    pic1_id = guia["pic1"][0]
+    bg_id = guia["background"][0]
+    assert api[pic1_id]["inputs"]["image"] == "sujeito1.png"
+    assert api[bg_id]["inputs"]["image"] == "cenario.png"
+    assert "pic2" not in guia and "pic3" not in guia and "pic4" not in guia
+    assert api[grafo.N_CONCAT]["inputs"]["video_latent"] == [grafo.N_MSR_GUIDE, 2]
+    assert guider["positive"] == [grafo.N_MSR_GUIDE, 0]
+    # crop antes do decode, mesmo padrao do ic_lora
+    assert api[grafo.N_CROP_GUIDES]["inputs"]["latent"] == [SEP, 0]
+    assert api[DECODE]["inputs"]["samples"] == [grafo.N_CROP_GUIDES, 2]
+
+
+def test_msr_sem_pic1_e_recusado(grafo):
+    with pytest.raises(ValueError, match="pic1"):
+        grafo.build_workflow("p", num_frames=81,
+                             msr={"lora": "m.safetensors", "images": {"background": "x.png"}})
+
+
+def test_msr_e_ic_lora_juntos_e_recusado(grafo):
+    with pytest.raises(ValueError, match="MESMO ponto"):
+        grafo.build_workflow(
+            "p", num_frames=81,
+            ic_lora={"lora": "ing.safetensors", "frames": [("f.png", 81)]},
+            msr={"lora": "m.safetensors", "images": {"pic1": "x.png"}})
+
+
+def test_msr_two_stage_e_recusado(grafo):
+    with pytest.raises(ValueError, match="two-stage"):
+        grafo.build_workflow("p", num_frames=81, two_stage=True,
+                             msr={"lora": "m.safetensors", "images": {"pic1": "x.png"}})
+
+
+def test_msr_encadeia_depois_de_loras_comuns(grafo):
+    """msr nao pode sobrescrever loras comuns aplicados antes dele (bug do primeiro
+    rascunho desta integracao: _apply_msr_lora usava sempre [n_unet, 0] direto)."""
+    api = grafo.build_workflow(
+        "p", num_frames=81, loras=[("a.safetensors", 0.6)],
+        msr={"lora": "m.safetensors", "images": {"pic1": "x.png"}})
+    assert api["9500"]["inputs"]["model"] == [grafo.N_UNET, 0]
+    assert api[grafo.N_MSR_LOADER]["inputs"]["model"] == ["9500", 0]
+    assert api[grafo.N_CFG_GUIDER]["inputs"]["model"] == [grafo.N_MSR_LOADER, 0]
