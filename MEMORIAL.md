@@ -8304,3 +8304,66 @@ multi-personagem de verdade; token budgeting por enquadramento; LoRA/PuLID (exig
 referência de identidade a CADA segmento do `minimax-longtake` (mitigação mais direta pro drift que
 o usuário relatou, mas fora do escopo do que foi pedido agora -- ver nota em
 [[feedback_longtake_quality_20260924]]).
+
+### 3.126 — Auditoria geral + reforço de identidade no long-take: TESTADO E REJEITADO, take de 6 planos VALIDADO
+
+Sessão de auditoria (2026-09-25): revisão do estado do projeto (construído/pendente/precisa-teste/
+débito técnico), seguida de três frentes que o usuário priorizou -- deriva de identidade no
+`minimax-longtake`, take maior que os 4 planos já validados, e os checkpoints turbo LightX2V do
+MiniMax H3 (§3.116).
+
+**Reforço de identidade por segmento -- implementado, testado com GPU real, REJEITADO.**
+`minimax_h3_backend.generate_longtake()` ganhou o parâmetro `reinforce_identity` (default `False`):
+quando ligado, reinjeta a `ref_images` do segmento 0 em todo segmento seguinte que não tiver
+referência própria, mantendo `continuity_mode="context"` -- a mitigação mais direta pro drift que o
+usuário apontou no CERCO EM SEUL ([[feedback_longtake_quality_20260924]]). `build_longtake_workflow()`
+não restringe a combinação `task_mode="ref"` + `continuity_mode="context"` no mesmo segmento, mas
+**o `comfyui-easy-media` não sabe executá-la**: num take de teste com 6 segmentos (referência real de
+HA-EUN do CERCO EM SEUL), o segmento 0 (sem reforço) fechou em ~140s normalmente, e o segmento 1
+(primeiro com a reinjeção) ficou com a GPU em 100% por mais de 3400s sem terminar -- não é lentidão,
+é trava/loop real. Confirmado que não foi timeout prematuro: o watchdog (ver abaixo) só matou aos
+3604s, bem depois do padrão de qualquer segmento saudável. `reinforce_identity` fica implementado e
+testável (`MINIMAX_H3_LONGTAKE_REINFORCE_IDENTITY=1` em `render_shots.py`), mas **não usar** até
+alguém investigar o node por dentro ou achar outro mecanismo. Testes sem GPU cobrindo o parâmetro:
+`tests/test_minimax_h3_longtake.py` (2 casos novos, reinjeta corretamente / desligado não muda nada).
+
+**Bug achado no processo: watchdog do MiniMax H3 matava take grande saudável.** A primeira tentativa
+do teste acima (também 6 segmentos, mesma trava no segmento 1) morreu aos ~1824s -- não pela trava em
+si, mas porque `_start_stall_watch_once()` ainda usava `stall_seconds=1800` (calibrado em 2026-09-06
+só pra clipe único, pior caso 12-15 min). Sem traceback, log do ComfyUI cortando no meio do
+carregamento normal de modelo -- o MESMO padrão silencioso que a seção §3.6x já descrevia pro caminho
+LTX principal, agora reproduzido no caminho do long-take. Subido pra `stall_seconds=3600` em
+`minimax_h3_backend.py`. Isso foi o que permitiu diagnosticar a trava real do segmento 1 na segunda
+tentativa (matou aos 3604s, tempo suficiente pra confirmar que não era só lento).
+
+**Take de 6 planos SEM reforço -- VALIDADO com GPU real, além do máximo anterior (4, §3.124).**
+Terceira rodada: os mesmos 6 segmentos, `reinforce_identity=False` (comportamento já existente,
+inalterado). Fechou em **1445s (~24 min), sem erro**. Saída: 336 frames a 24fps (14,0s) contra
+288 frames pedidos (6×48) -- 48 frames a mais que o solicitado, confirma a nota já registrada em
+`_minimax_longtake_flush`: a grade exata de `duration_frames` que este caminho aceita não está
+caracterizada. Ainda não chegou aos 8-9 planos que um roteiro real sem wides produziria, mas é o
+maior take medido até agora (anterior: 4). Vídeo enviado ao usuário pra conferência visual de deriva
+de identidade nesse tamanho.
+
+**Checkpoint turbo LightX2V (§3.116) -- CONFIRMADO como LoRA, e já em produção.** Inspecionado o
+`.safetensors`: `metadata.source_format = "Diffusers PEFT LoRA"`, rank 128, alpha 8, base
+`minimax_h3_fl2va_bf16.safetensors`. Só o `4step_v0.1` existe em disco (o `8step_v1.0_768p` citado
+em §3.116 nunca foi baixado ou foi removido -- não achado). Achado maior: **o 4-step já é
+`LONGTAKE_LORA_FILENAME`, o padrão do caminho `minimax-longtake`** desde que ele foi implementado --
+§3.116 registrava "não testado" mas ficou desatualizado sem nota, porque a integração seguinte
+(§3.117+) já o usava por baixo. Validado indiretamente por toda a bateria do long-take, incluindo o
+filme do CERCO EM SEUL. CLAUDE.md corrigido.
+
+**`tensorxx_ge` (módulo não documentado no CLAUDE.md até agora) -- é do LTX 2.3, engine real existe.**
+Usuário perguntou se o script `start_webui_tensorrt.bat` (`tensorxx_ge.webui`) já acessa uma engine de
+verdade. Resposta: sim -- dois `.engine` TensorRT construídos e validados existem em
+`tensorxx_ge/engines/` (`gemma_hidden_states_bf16_ws.engine` e `_v2_bf16_ws.engine`, ~23,5 GB cada,
+de 2026-08-05/06), documentados no próprio `webui.py` com cosine ≥ 0,9995 contra a referência PyTorch.
+O `README.md` do módulo (datado 22/ago) dizia "no engine is fabricated", desatualizado em relação ao
+`webui.py` (01/set) -- corrigido. É TensorRT só pro **prefill do Gemma** (RTX 4070), não mexe no
+transformer LTX nem nos caminhos de produção; diferença conhecida e não-bug contra a rota padrão
+(SSIM 0,85) vem do `accelerate` offload da rota padrão, não da engine. Escopo: **LTX 2.3, não 2.5**.
+
+Auditoria completa (construído/pendente/precisa-teste/débito técnico) não reproduzida aqui por
+brevidade -- rodada por subagente no início da sessão, cobrindo o estado do repositório até
+2026-09-24/25.

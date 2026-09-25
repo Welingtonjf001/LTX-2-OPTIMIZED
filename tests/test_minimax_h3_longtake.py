@@ -148,3 +148,79 @@ def test_generate_longtake_estagia_referencias_e_limpa(monkeypatch, grafo, tmp_p
     # arquivos estagiados foram limpos no finally
     for p in staged:
         assert not Path(p).exists()
+
+
+def test_reinforce_identity_reinjeta_referencia_em_todo_segmento(monkeypatch, grafo, tmp_path):
+    """reinforce_identity=True reinjeta a ref_images do segmento 0 nos
+    segmentos seguintes que nao tem ref_images propria, mantendo
+    continuity_mode="context" (nao volta pra "shot"). MEMORIAL 3.126."""
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n")
+    out = tmp_path / "out.mp4"
+    src_output = tmp_path / "comfy_output"
+    src_output.mkdir()
+    saved_file = src_output / "video_saida.mp4"
+    saved_file.write_bytes(b"fake mp4")
+
+    monkeypatch.setattr(b, "COMFY_OUTPUT", str(src_output))
+    monkeypatch.setattr(b, "_stage_input", lambda path: path)
+    monkeypatch.setattr(b, "submit_and_wait", lambda api, **kw: [saved_file.name])
+
+    captured = {}
+    orig_build = b.build_longtake_workflow
+
+    def spy_build(segments, **kw):
+        captured["segments"] = segments
+        return orig_build(segments, **kw)
+
+    monkeypatch.setattr(b, "build_longtake_workflow", spy_build)
+
+    b.generate_longtake(
+        [{"prompt": "abre a cena", "duration_frames": 48, "ref_images": [str(ref)]},
+         {"prompt": "continua", "duration_frames": 48, "continuity_mode": "context"},
+         {"prompt": "segue com ref propria", "duration_frames": 48,
+          "ref_images": [str(ref)], "continuity_mode": "context"}],
+        str(out), reinforce_identity=True)
+
+    segs = captured["segments"]
+    assert segs[0]["ref_images"] == [str(ref)]
+    assert segs[1]["ref_images"] == [str(ref)]  # reinjetada
+    assert segs[1]["continuity_mode"] == "context"  # nao virou "shot"
+    assert segs[2]["ref_images"] == [str(ref)]  # ja tinha a propria, preservada
+
+    api = orig_build(segs)
+    track_data = json.loads(api[b.N_LT_EDITOR]["inputs"]["track_data"])
+    modos = [s["content"]["continuity_mode"] for s in track_data["tracks"][0]["segments"]]
+    task_modes = [s["content"]["task_mode"] for s in track_data["tracks"][0]["segments"]]
+    assert modos == ["shot", "context", "context"]
+    assert task_modes == ["ref", "ref", "ref"]
+
+
+def test_reinforce_identity_desligado_nao_muda_comportamento(monkeypatch, grafo, tmp_path):
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n")
+    out = tmp_path / "out.mp4"
+    src_output = tmp_path / "comfy_output"
+    src_output.mkdir()
+    saved_file = src_output / "video_saida.mp4"
+    saved_file.write_bytes(b"fake mp4")
+
+    monkeypatch.setattr(b, "COMFY_OUTPUT", str(src_output))
+    monkeypatch.setattr(b, "_stage_input", lambda path: path)
+    monkeypatch.setattr(b, "submit_and_wait", lambda api, **kw: [saved_file.name])
+
+    captured = {}
+    orig_build = b.build_longtake_workflow
+
+    def spy_build(segments, **kw):
+        captured["segments"] = segments
+        return orig_build(segments, **kw)
+
+    monkeypatch.setattr(b, "build_longtake_workflow", spy_build)
+
+    b.generate_longtake(
+        [{"prompt": "abre a cena", "duration_frames": 48, "ref_images": [str(ref)]},
+         {"prompt": "continua", "duration_frames": 48}],
+        str(out))  # reinforce_identity default False
+
+    assert captured["segments"][1]["ref_images"] == []

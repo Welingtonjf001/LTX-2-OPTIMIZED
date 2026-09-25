@@ -1445,12 +1445,20 @@ def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
                 "ref_images": p["ref_images"] if j == 0 else [],
             })
         combined_path = grupo[0]["clip_path"].parent / f"scene{cena:02d}_take{take_id:02d}_combined.mp4"
+        # Reforco de identidade por segmento -- opt-in, ver
+        # generate_longtake(reinforce_identity=...) e MEMORIAL 3.126.
+        # TESTADO E REJEITADO 2026-09-25: trava o comfyui-easy-media (GPU
+        # 100% por 3400s+ sem terminar o segmento 1). NAO ligar via env var
+        # ate o node ser corrigido/entendido -- o default "0" abaixo e
+        # deliberado, nao um placeholder.
+        reinforce = os.environ.get("MINIMAX_H3_LONGTAKE_REINFORCE_IDENTITY", "0").strip() not in ("0", "false", "False")
         try:
             minimax_h3_backend.generate_longtake(
                 segments, str(combined_path), frame_rate=int(fps),
                 aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
                 megapixels=minimax_megapixels if minimax_megapixels is not None else 0.5,
                 seed=seed + cena * 1000 + take_id, project_name=f"scene{cena:02d}_take{take_id:02d}",
+                reinforce_identity=reinforce,
                 log_cb=lambda m: log(f"    [minimax_h3_longtake] {m}"),
                 timeout=3600 * max(1, len(grupo)))
         except Exception as e:

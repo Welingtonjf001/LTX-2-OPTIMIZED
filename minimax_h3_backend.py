@@ -349,16 +349,28 @@ def _start_stall_watch_once(*, log=print) -> None:
     (15s em vez de 5s) -- matou de novo aos 943s. O tempo do job varia com
     tamanho do prompt (mais tokens pro encoder) E duracao pedida, entao um
     numero fixo baixo sempre vai ter uma combinacao que estoura. 1800s (30
-    min) da folga de sobra pros casos pesados sem parar de pegar trava real
-    (o pior caso ja medido, com prompt longo + 15s, fechou por volta de
-    12-15 min).
+    min) dava folga de sobra pros casos de CLIPE UNICO (pior caso medido,
+    prompt longo + 15s, fechou por volta de 12-15 min).
+
+    ⚠️ 1800s NAO basta pro caminho `minimax-longtake` (`generate_longtake()`,
+    varios segmentos numa unica chamada) -- MEDIDO 2026-09-25: um take de 6
+    segmentos (48 frames cada) matou o servidor aos ~1824s SEM traceback
+    (mesmo padrao silencioso de sempre), com o log do ComfyUI cortando no
+    meio do carregamento normal de modelo -- nao foi trava real, foi o
+    watchdog interpretando um job legitimamente mais longo como travado. O
+    proprio `_minimax_longtake_flush` ja escala o TIMEOUT da chamada HTTP por
+    `3600 * len(grupo)` (script_pipeline/render_shots.py) -- o stall watch
+    precisa acompanhar essa mesma logica, nao ficar fixo. 3600s (1h) cobre o
+    pior caso ja tentado (6 segmentos, ainda incompleto aos 1824s) com folga;
+    ainda NAO validado pra takes de 8-9 planos (MEMORIAL 3.126) -- se voltar a
+    matar sem traceback num take grande, e o watchdog de novo, nao um crash.
     """
     global _STALL_WATCH
     if _STALL_WATCH is not None:
         return
     from script_pipeline import gpu_watchdog
     _STALL_WATCH = gpu_watchdog.start_stall_watch(
-        COMFY_SERVER, COMFY_PORT, log=log, stall_seconds=1800,
+        COMFY_SERVER, COMFY_PORT, log=log, stall_seconds=3600,
         auto_recover=True, max_auto_recoveries=2)
 
 
@@ -805,19 +817,48 @@ def generate_longtake(segments: list[dict], output_path: str, *,
                       aspect_ratio: str = DEFAULT_ASPECT, megapixels: float = 0.5,
                       frame_rate: int = 24, seed: int = 42, steps: int = 8,
                       project_name: str | None = None, auto_cite_refs: bool = True,
-                      tag_style: str = "picture", log_cb=None,
-                      timeout: int = 3600) -> str:
+                      tag_style: str = "picture", reinforce_identity: bool = False,
+                      log_cb=None, timeout: int = 3600) -> str:
     """Gera um plano "long take" (2+ segmentos costurados por contexto em
     latente, ver `build_longtake_workflow`) e copia o vídeo final combinado
     para *output_path*. Estagia as `ref_images` de cada segmento em
     `MINIMAX_ROOT/ComfyUI/input/` (como `generate()`) e limpa no final.
 
-    VALIDADO com GPU real 2026-09-24: 2 segmentos sem referência (284s) e 2
-    segmentos com referência de identidade via ref2v (214s), ambos sem erro
-    — ver MEMORIAL 3.115-3.117. Não testado ainda: 3+ segmentos,
-    `context_swap`, planos de fala (áudio de referência)."""
+    VALIDADO com GPU real 2026-09-24, quatro corridas: 2 segmentos sem
+    referência (284s), 2 segmentos com referência via ref2v (214s), 4
+    planos/2 takes reais no CERCO EM SEUL (480s) e o filme completo de 12
+    planos em 4 takes (MEMORIAL 3.115-3.124). O usuário aprovou continuidade/
+    definição/som mas apontou DERIVA DE IDENTIDADE ao longo do take (fluida,
+    não abrupta) -- ver `feedback_longtake_quality_20260924`.
+
+    `reinforce_identity`: quando True e o segmento 0 tem `ref_images`, reinjeta
+    as MESMAS imagens em todo segmento seguinte que não tiver `ref_images`
+    próprio (mantendo `continuity_mode="context"`).
+
+    ⚠️ TESTADO COM GPU REAL 2026-09-25 E REJEITADO -- NÃO USAR AINDA. A
+    combinação `task_mode="ref"` + `continuity_mode="context"` no mesmo
+    segmento (é o que `reinforce_identity=True` produz a partir do segmento 1
+    em diante) TRAVA o `comfyui-easy-media`: num take de 6 segmentos, o
+    segmento 0 (sem reforço) fechou em ~140s normalmente, mas o segmento 1
+    (primeiro com a reinjeção) ficou rodando com a GPU em 100% por mais de
+    3400s sem terminar -- não é lentidão, é loop/trava real (watchdog matou
+    aos 3604s). O grafo ACEITA a combinação sem erro de validação
+    (`build_longtake_workflow` não bloqueia), mas o node por trás não sabe
+    combinar herança de latente com reinjeção de imagem na mesma tarefa.
+    Suspeita não confirmada: o node pode esperar decodificar/recodificar a
+    imagem de referência contra um latente que ainda não existe nesse ponto
+    do grafo (a herança de contexto só populou o latente DEPOIS do segmento
+    0). Ficou default=False e deve continuar assim até alguém investigar o
+    código do `comfyui-easy-media` ou achar outro mecanismo de reforço de
+    identidade que não misture os dois task_mode. Ver MEMORIAL 3.126."""
     if not segments:
         raise ValueError("generate_longtake precisa de pelo menos 1 segmento.")
+    if reinforce_identity and segments and segments[0].get("ref_images"):
+        anchor_refs = list(segments[0]["ref_images"])
+        segments = [
+            seg if (i == 0 or seg.get("ref_images")) else {**seg, "ref_images": anchor_refs}
+            for i, seg in enumerate(segments)
+        ]
     staged_paths: list[str] = []
     staged_segments: list[dict] = []
     for seg in segments:

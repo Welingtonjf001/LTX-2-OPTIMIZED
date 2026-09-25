@@ -10,7 +10,16 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-25 (Qwen-Image-2.1 ganhou referência com PAPEL
+Última verificação: 2026-09-25 (auditoria geral + reforço de identidade no
+`minimax-longtake`: TESTADO COM GPU REAL E REJEITADO -- trava o
+comfyui-easy-media, GPU 100% sem terminar o segmento 1; achado e corrigido
+bug do watchdog do MiniMax H3 no processo (1800s matava take grande
+saudável, subiu pra 3600s); take de 6 planos SEM reforço VALIDADO com GPU
+real, 1445s, além do máximo anterior (4); checkpoint turbo LightX2V
+confirmado como LoRA já em produção (não mais "não testado"); `tensorxx_ge`
+(TensorRT do LTX 2.3, engine real validada) documentado pela primeira vez
+aqui; detalhes em `MEMORIAL.md` §3.126).
+Verificação anterior: 2026-09-25 (Qwen-Image-2.1 ganhou referência com PAPEL
 NOMEADO -- `<image1> is X.` -- em `generate_storyboards.py`/`render_shots.
 py`; capacidade já existia no backend ComfyUI (10 refs), só não tinha
 integração; achado e corrigido bug onde `cast_descriptors` nunca carregava
@@ -334,6 +343,22 @@ locale do sistema. Nesta máquina (pt-BR) `-s 0.2` é recusado com
 `invalid timestep, must be 0~1`, e `-s 0,2` funciona. O `video_doctor` tenta os
 dois e memoriza. O mesmo vale para qualquer ncnn-vulkan aqui — o Real-ESRGAN já
 imprimia `75,00%` com vírgula.
+
+## `tensorxx_ge/` — TensorRT para o Gemma do LTX 2.3 (experimento isolado, fora dos caminhos de produção)
+
+Não modifica os caminhos FP8/GGUF/V2/V3/WebUI existentes — único ponto de integração é o cache
+nativo de prompt-embedding. Roda o **prefill do Gemma em TensorRT na RTX 4070** (`cuda:0`), mantendo
+o extrator de features e os conectores do LTX em PyTorch na 3090 (`cuda:1`). `start_webui_tensorrt.bat`
+sobe `tensorxx_ge.webui` na porta 7861.
+
+**Existe engine real, construída e validada** (`tensorxx_ge/engines/gemma_hidden_states_bf16_ws.engine`
+e `_v2_bf16_ws.engine`, ~23,5 GB cada) — cosine ≥ 0,9995 contra a referência PyTorch nas 49 camadas do
+Gemma, 0,999997 na conditioning projetada. O `README.md` do módulo tinha ficado desatualizado dizendo
+"nenhuma engine fabricada"; corrigido em 2026-09-25 (ver `MEMORIAL.md` §3.126). Diferença conhecida
+contra a rota padrão (SSIM 0,85) vem do `accelerate` offload que a rota padrão usa pro Gemma
+(`LTX_TEXT_ENCODER_GPU_MEMORY=2GiB`), não é bug da engine — sem offload, o LTX bate exatamente com ela.
+
+Escopo: **só LTX 2.3**, não tem equivalente para o 2.5.
 
 ## LTX-2.5 — em produção
 
@@ -677,25 +702,30 @@ quando usar long take em vez do encadeamento por imagem dentro de `render_shots`
 — isso é decisão de produto (que planos formam um "take" contíguo) não especificada ainda. Ver
 `MEMORIAL.md` §3.115/§3.117.
 
-### Checkpoints turbo (LightX2V) — baixados para teste de velocidade, NÃO testados
+### Checkpoints turbo (LightX2V) — CONFIRMADO: são LoRAs, e o 4-step JÁ está em produção
 
-Baixados de `huggingface.co/lightx2v/Minimax-h3-Turbo` para
-`E:\Users\home\Documents\MiniMax-H3\ComfyUI\models\diffusion_models\`:
+⚠️ **Esta seção estava desatualizada — corrigida em 2026-09-25.** O "não
+verificado" do parágrafo antigo já tinha sido resolvido em algum commit
+posterior sem a nota ser atualizada: os arquivos ficam em
+`E:\Users\home\Documents\MiniMax-H3\ComfyUI\models\loras\` (não em
+`diffusion_models\`), confirmando a suspeita de que são LoRAs, não
+checkpoint completo. Inspecionado o `.safetensors` (2026-09-25):
+`metadata.source_format = "Diffusers PEFT LoRA"`, rank 128, alpha 8,
+`base_model = "Comfy-Org/MiniMax-H3 minimax_h3_fl2va_bf16.safetensors"`.
 
-```
-minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors   1,96 GB
-minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors        1,96 GB
-```
-
-Família `ref2v` (mais próxima do `ref2va` já instalado) e formato `comfyui_bf16`
-(carrega direto no ComfyUI, sem `diffusers`). ⚠️ **~2 GB é pequeno demais para
-ser o transformer inteiro do H3** (os checkpoints já em produção têm dezenas de
-GB) — quase certo que são LoRAs/adapters de destilação de passos, não checkpoint
-completo, apesar do nome de arquivo não indicar isso. **Não verificado**: se
-entram via `UnetLoader` (substituindo o checkpoint) ou `LoraLoader` (por cima do
-atual) no grafo do `minimax_h3_backend.py`, nem tempo/qualidade — a 3090 estava
-ocupada com outro trabalho no momento do download. Antes de medir, inspecionar
-as chaves do safetensors. Ver `MEMORIAL.md` §3.116.
+**Só o `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` existe em
+disco** (1,96 GB) — o `8step_v1.0_768p` citado abaixo nunca foi baixado, ou
+foi removido; não confiar nessa linha do histórico sem verificar o disco de
+novo. O 4-step **já é `LONGTAKE_LORA_FILENAME`, o padrão do caminho
+`minimax-longtake`** (`minimax_h3_backend.py`, node `LoraLoaderModelOnly`,
+`N_LT_LORA`), carregado por cima do `Minimax-h3_Singularity_ref2va_v1.3_
+Pruned_w4a8.safetensors`. Isso significa que ele está **validado
+indiretamente** por toda a bateria do long-take (§3.117-3.124, filme do
+CERCO EM SEUL entregue) — não foi testado isolado (sem o resto do grafo
+long-take), mas roda em produção real há dias. Há também um teste manual
+avulso do usuário fora desta auditoria: `ComfyUI/output/turbo_test_4step_
+00001_.mp4` (2026-09-24, fora do `run_decupagem`, não documentado até
+agora).
 
 ## LongCat-Video-Avatar 1.5 — motor dos planos de fala (`--video-engine longcat`)
 
