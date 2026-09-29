@@ -10,7 +10,79 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-25 (Licon MSR V2 INTEGRADO na decupagem --
+Última verificação: 2026-09-29 (nova etapa `[V validação de texto]` em `run_decupagem.py`,
+`script_pipeline/text_validation.py`: compara o `shot_plan.json` INTEIRO contra o
+roteiro-fonte, AINDA EM TEXTO, antes de qualquer still -- personagem/fala/local sem base no
+roteiro [relata], descritor divergente entre planos [CORRIGE de verdade contra o canônico do
+`cast.json`, regrava o `shot_plan.json`]. `--text-validation {relatorio,bloquear,off}`. Exige
+`parse/screenplay_original.txt` [novo, run_decupagem agora salva o roteiro-fonte bruto na
+primeira execução -- antes só o texto já reestruturado por LLM ficava salvo]. Testado no
+REENTRY WINDOW: 0 problema, confirma que os fixes de ontem já deixaram os descritores certos.
+Ver `MEMORIAL.md` §3.141. Também avaliado GLM-4.1V-9B-Thinking [venv isolado em
+`W:\vision_models\glm41v_env`, não no `.venv` principal] -- multi-imagem funciona de verdade
+[ao contrário do GLM-4V-9B antigo], 7,7 GB de VRAM, mas mais lento pelo raciocínio longo da
+variante "Thinking". Ver `MEMORIAL.md` §3.140 (adendo).
+Verificação anterior: 2026-09-29 (Ollama migrado pro W: -- achado no processo: `G:\ollama\models`
+[162 GB] NÃO é o catálogo de produção, é outro catálogo não relacionado; o real
+[qwen3-vl:30b, qwen2.5vl:7b, qwen2.5:32b-instruct-q4_K_M etc, 80 GB] vive em
+`C:\Users\user\.ollama\models`, o default do app desktop -- ver seção "Ollama" abaixo. Fidelidade
+de descritor em `cast_characters.py` ganhou checagem por ATRIBUTO [comprimento/cor de cabelo,
+cor de roupa], não só sobreposição geral de palavras. GLM-4V-9B avaliado como candidato pro gate
+visual: ótimo pra percepção SEM referência [mais leve, mais rápido, JSON mais confiável], mas
+esse checkpoint tem limite arquitetural de UMA imagem só por conversa -- não serve pra comparação
+de identidade [a maioria dos closes de personagem]. Ver `MEMORIAL.md` §3.140.
+Verificação anterior: 2026-09-29 (REENTRY WINDOW, roteiro sci-fi no MiniMax: 3 fixes reais e 1
+lacuna estrutural achada -- decupagem por PLANO nunca tinha âncora de fotorrealismo
+[`shot_plan.py::_storyboard_prompt()`, diferente do prompt por CENA que já tinha]; causa raiz do
+estilo ilustrado era um EXEMPLO de sintaxe em `prose_to_screenplay.py` ["ESTILO VISUAL: polished
+hand-drawn cel animation..."] copiado literalmente pelo LLM sem o roteiro pedir estilo nenhum
+-- corrigido + guard em `parse_screenplay.py::extract_art_direction()`; novo
+`--gate-max-regen-fraction` em `run_decupagem.py` (limite de 40% que travava QUALQUER retry
+agora é ajustável); modelo de DECISÃO do gate visual trocado de qwen3-vl:30b para
+qwen2.5:32b-instruct-q4_K_M [não precisa ver imagem, só texto] -- percepção continua no VLM.
+Mesmo com todos os fixes, a produção foi PAUSADA a pedido do usuário: a nave "Kestrel" não tem
+referência visual fixa [só personagens têm via character-sheet], causando alucinações graves
+[nave muda de modelo, vira avião, mão segurando como brinquedo, águia, personagem duplicado].
+Testes novos 9 casos, suíte 399 passando, nada commitado. Ver `MEMORIAL.md` §3.139.
+Verificação anterior: 2026-09-29 (folha de personagem 4-angulos+close numa geracao so via
+`qwen_image21_comfy_backend.generate_character_sheet_convrot()` -- checkpoint dedicado
+`qwen_image_2.1_int8_convrot.safetensors` [NAO GGUF, 7,26 GB] + LoRA Viggle Turbo 4-step,
+workflow do usuario "Qwen Image 2.1 Image Edit Viggle 4-Step"; `build_workflow()` ganhou
+`unet_gguf=False` [troca `UnetLoaderGGUF` por `UNETLoader`], `attention_backend` e
+`model_sampling_flux`. 1-3 referencias reaproveitam o `TextEncodeQwenImage21` ja em producao no
+motor GGUF Q4_K_M. VALIDADO com GPU real: 1 referencia (MIN-JUN, Cerco em Seul), sucesso de
+primeira, 102,7s com servidor ja carregado, identidade e ate um prop da referencia (walkie-talkie)
+preservados nas 5 vistas. Testes sem GPU 8/8, suite inteira 390 passando. Falta decidir se vira
+substituto do `character_sheet.py` atual (GGUF Q4_K_M) -- so testado com 1 referencia ate agora.
+Ver `MEMORIAL.md` §3.138.
+Verificação anterior: 2026-09-28 (`flux-krea`/`flux-kontext` consertados -- `G:/models` nunca
+estava mapeado no `extra_model_paths.yaml`, por isso os dois falhavam com arquivo não
+encontrado apesar de já cadastrados há meses; `flux1-kontext-dev.safetensors` nem existia em
+disco, baixado agora -- e motor novo `--image-engine flux-klein-gguf` (FLUX.2 Klein
+quantizado GGUF Q8_0, `unsloth/FLUX.2-klein-9B-GGUF`). VALIDADO com GPU real os três: Klein
+GGUF ~5,3s/8 passos, Krea ~17,5s/28 passos (ambos carregam inteiros na 3090, sem offload),
+Kontext 253,6s. Achado importante: a lentidão de ~5 min/still vista na avaliação dos 4
+roteiros com Z-Image era contenção de VRAM/RAM (Fish-Speech + Z-Image residentes), não um
+problema do FLUX.2 Klein em si -- com a GPU livre ele roda em segundos. Detalhes em
+`MEMORIAL.md` §3.136.
+Verificação anterior: 2026-09-27 (Prévia 3D automática: `script_pipeline/previs_spec.py` gera o spec
+espacial da decupagem sozinho -- antes exigia escrita manual -- e renderiza manequins/câmera no
+Blender para os planos complexos, `--previs3d {complexas,medias,todos,off}` em `run_decupagem`;
+corrigiu de quebra um bug de lateralidade no manequim antigo (mão "direita" no lado errado).
+VALIDADO com Blender real na corrida CERCO EM SEUL v2 (25 planos, spec + 3 renders complexos) e
+sondado sem erro nas 56 corridas existentes no disco; review adversarial (4 lentes) achou e corrigiu
+6 defeitos reais (cabeça cortada no medium, quem sai de cena reaparecia no quadro final, pessoas
+empilhadas na mesma marca, cena híbrida virando exterior por engano, vínculo velho de still
+sobrevivendo a `--previs3d off`, regex de "mira alta" com falso positivo); detalhes em
+`MEMORIAL.md` §3.135).
+Verificação anterior: 2026-09-27 (CERCO EM SEUL v2: correções gerais de decupagem
+-- insert por exclusão, figurantes sem nome no elenco com `extra`/`aliases`, descritor do
+parceiro sempre presente, close de fala como reação, movimento SEMPRE aplicado (não estava
+no filme entregue), fallback de fala do TTS no lip-sync, voz por gênero/idade com foto --
+filme refeito no LTX 2.5 e no MiniMax long-take (take limitado a 4 planos, fallback avulso);
+gate visual estava quebrado desde 26/09 pelo Ollama 0.34.4, corrigido; detalhes em
+`MEMORIAL.md` §3.131-3.133).
+Verificação anterior: 2026-09-25 (Licon MSR V2 INTEGRADO na decupagem --
 `--ic-reference msr25` -- e VALIDADO com GPU real no caminho de PRODUÇÃO
 de verdade, não mais só chamada direta ao backend: `shot_ic_spec("msr25",
 ...)` com um plano real (HA-EUN + JI-HO, framing wide), passado pro
@@ -187,12 +259,20 @@ falso-positivo no RIFE, que foi corrigido junto).
 
 ## Ollama: qual instância está no ar importa
 
-Os modelos vivem em `G:\ollama\models`. Se quem subir for o **aplicativo
-desktop**, ele lê outro diretório e serve um catálogo diferente — pedir
-`qwen3:8b` devolve **404 em `/api/generate`** mesmo com o servidor respondendo
-em `/api/tags`. Rode `ollama serve` com `OLLAMA_MODELS=G:\ollama\models`, ou
-encerre o app desktop antes. O `choreo/prompt_to_params.py` detecta esse caso e
-diz quais modelos a instância realmente serve.
+⚠️ **CORRIGIDO 2026-09-29 — esta seção estava invertida.** Os modelos de PRODUÇÃO (qwen3-vl:30b,
+qwen2.5vl:7b, qwen2.5:32b-instruct-q4_K_M, qwen3.6-35b-a3b:latest, gemma4:latest,
+mistral-nemo:12b-instruct-2407-q4_K_M — 80 GB) vivem em **`W:\ollama\models`** (migrado de
+`C:\Users\user\.ollama\models`, o default do app desktop quando nenhuma `OLLAMA_MODELS` é
+passada — confirmado lendo `C:\Users\user\AppData\Local\Ollama\server.log`). `G:\ollama\models`
+(162 GB) é um catálogo SEPARADO e NÃO RELACIONADO (qwen3:30b, deepseek-coder-v2, phi4,
+gemma4-32k, qwq:32b — nenhum dos modelos usados por este projeto) — não confundir os dois.
+Suba com `OLLAMA_MODELS=W:\ollama\models` explícito no ambiente do processo (o `setx` que fixa a
+variável no registro do Windows só vale pra sessões/processos NOVOS, não propaga pra shells já
+abertos) — se subir sem essa variável, o app desktop volta a ler `C:\Users\user\.ollama\models`
+(mantido intacto como backup) e serve o catálogo certo do mesmo jeito, só que do lugar antigo.
+`choreo/prompt_to_params.py` detecta o catálogo de uma instância no ar e diz quais modelos ela
+realmente serve — use isso pra checar rápido de qual diretório o servidor atual está lendo. Ver
+`MEMORIAL.md` §3.140.
 
 **O Ollama é o motor padrão da extração de roteiro** desde 2026-08-23
 (`script_pipeline/`, `storyplay25`), medido contra o gemma4-e2b local: 6s
@@ -214,6 +294,13 @@ limpeza ao terminar uma corrida, no botão Parar e via `atexit` quando a WebUI
 fecha. O servidor Ollama continua ativo. Implementação compartilhada em
 `script_pipeline/ollama_runtime.py`; falha de limpeza nunca substitui o código
 de saída real da produção.
+
+⚠️ **O Ollama se atualiza sozinho** (0.34.4 em 2026-09-26) e isso quebrou o gate em silêncio:
+o `qwen3-vl:30b` passou a raciocinar mesmo com `think: false` (nem "/no_think" desliga), e com
+`num_predict` 2000 o JSON saía cortado ou vazio. O relatório mostrava "bloqueado", mas era
+**erro do auditor**. Corrigido com `num_ctx` 16384 / `num_predict` 8192. Se o gate voltar a
+parar em 3 ou 4 planos, confira `ollama --version` e o campo `auditor_errors` do relatório antes
+de acreditar nas reprovações. Ver `MEMORIAL.md` §3.133.
 
 Duas armadilhas ao trocar de modelo:
 - **Modelo de raciocínio falha em silêncio.** O qwen3.6 gastava todo o
@@ -825,9 +912,42 @@ compartilham parse, cast, TTS, lip-sync, mistura e montagem; divergem só na
 | ações sem fala | não viram clipe | viram |
 | estado | **validado** | **até o animatic**; modo espacial validado em 2026-09-20, vídeo final ainda não |
 
-    [1] parse   [2] cast   [E] emoção   [4] TTS   [S] estrutura   [P] decupagem
+    [1] parse   [2] cast   [E] emoção   [4] TTS   [S] estrutura
+      -> [L] lacunas do roteiro   [P] decupagem   [M] movimento + complexidade + previs 3D
       -> [5] render_scenes  OU  [5-D] render_shots_stage
       -> [6] lipsync  [7] mix  [8] assemble  [9] verify
+
+### Roteiro completo, lacunas, complexidade e elenco (desde 2026-09-27)
+
+Auditoria geral em `AUDITORIA_GERAL_2026-09-27.md`; o porquê em `MEMORIAL.md` §3.131-3.134.
+
+- **O roteiro precisa dizer** agente + ação + alvo + resultado, posição, objetos, estado que
+  persiste, e todos que aparecem, inclusive sem fala. Guia com modelo de cena:
+  `script_pipeline/GUIA_ROTEIRO.md`.
+- **[L] `screenplay_gaps.py`** roda antes da decupagem, nos dois caminhos, e grava
+  `parse/lacunas.md`. Só relata; `--lacunas bloquear` para a corrida, `--lacunas-sem-llm`
+  deixa só a parte determinística.
+- **[M] `shot_complexity.py`** grava `shots/complexity_report.json`: simples (still basta),
+  média (revisar `shots/blocking_preview.png`) ou complexa (previs 3D de baixa resolução, ou
+  dividir o plano). As recomendações dependem do motor.
+- **`[3D previs]` `previs_spec.py`** (desde 2026-09-27, MEMORIAL §3.135) gera o spec espacial
+  SOZINHO a partir da decupagem + elenco + movimento + complexidade, e renderiza manequins/câmera
+  no Blender (CPU, sem difusão) para os planos do nível pedido: folha `shots/previs_3d.png` e
+  clipe `shots/previs_3d.mp4`. `--previs3d {complexas,medias,todos,off}` (padrão `complexas`),
+  `--previs3d-stills` liga o quadro inicial como blocking do still (exige `--image-engine flux`;
+  ignorado com `--spatial-spec` manual), `--previs3d-intergen` usa o InterGen no clipe de dupla em
+  contato. Só relata/render diagnóstico; nunca bloqueia.
+- **Movimento é aplicado SEMPRE** que a corrida passa por [M]. Antes, `--ate animatic`
+  regerava o `shot_plan` sem ele, e o filme do CERCO v1 saiu sem movimento.
+- **Figurantes** (quem age sem nome próprio): `cast.json` com `"extra": true` e `"aliases"`
+  nos dois idiomas. O `cast_characters` os cria sozinho (LLM junta sinônimos da mesma pessoa).
+- **Voz**: gênero pela foto > LLM > texto; idade pelo roteiro (a foto só se o texto cala);
+  faixa etária, sem repetir voz. `cast_characters --revoice`, `"voice_locked": true`.
+- **Emoção para vídeo** tem uma regra única, `shot_plan.emocao_para_video`: sem sorriso em
+  cena de ação, e a versão de fala não ocupa a boca. Todos os caminhos usam essa função.
+- **`verify_output`** avisa `GATES_NOT_APPROVED`: arquivo íntegro não significa filme aprovado.
+- **MiniMax long-take**: no máximo 4 planos por take (`MINIMAX_LONGTAKE_MAX_PLANOS`). Um take
+  que falha refaz os planos como clipes avulsos.
 
 ### Continuidade espacial 3D na decupagem
 

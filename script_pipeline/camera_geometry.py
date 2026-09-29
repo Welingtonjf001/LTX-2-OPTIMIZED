@@ -40,10 +40,10 @@ def y_up_to_z_up(points):
 
 
 def socket_position(entity, socket):
-    local = np.array([-.30 if socket == 'left_hand' else .30, -.08, 1.00])
-    angle = math.radians(entity.get('yaw', 0))
-    c, s = math.cos(angle), math.sin(angle)
-    return np.asarray(entity['position']) + np.array([c*local[0]-s*local[1], s*local[0]+c*local[1], local[2]])
+    # O pulso da POSE atual (mannequin_poses): objeto na mao acompanha braco erguido, mira ou
+    # corpo no chao. Lado anatomico: `right_hand` fica em -X local (o antigo usava +X, espelhado).
+    from script_pipeline.mannequin_poses import socket_world
+    return np.asarray(socket_world(entity, socket))
 
 
 def keyframe_indices(editorial_frames):

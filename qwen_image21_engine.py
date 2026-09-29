@@ -40,6 +40,11 @@ def all_ports() -> list[int]:
 
 
 def generate(prompt: str, out_path: Path, **kw) -> bool:
+    if not _use_comfy() and kw.get("lora"):
+        # LoRA (Viggle turbo 4-step) so existe no caminho ComfyUI/GGUF -- o
+        # servidor diffusers antigo nao tem LoraLoaderModelOnly.
+        print("[qwen21] lora pedido mas QWEN21_ENGINE=diffusers nao suporta; ignorando")
+        kw = {k: v for k, v in kw.items() if k != "lora"}
     return _mod().generate(prompt, out_path, **kw)
 
 

@@ -33,6 +33,11 @@ def server_is_up() -> bool:
 def ensure_server(log_cb=None, boot_timeout: int = 60) -> None:
     global _server_proc
     log = log_cb or print
+    # Mesmo achado do zimage_backend/generate_storyboards (2026-09-28): servidores
+    # residentes (Fish Speech, ComfyUI do FLUX, Z-Image) disputam VRAM com qualquer
+    # motor de still -- derruba os outros antes de subir/usar este.
+    from script_pipeline import gpu_watchdog
+    gpu_watchdog.free_other_still_servers(gpu_watchdog.STILL_ENGINE_PORTS["qwen21_diffusers"], log=log)
     if server_is_up():
         return
     python_exe = QWEN_IMAGE21_ROOT / ".venv" / "Scripts" / "python.exe"

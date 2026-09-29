@@ -59,6 +59,15 @@ def ensure_server(log_cb=None, boot_timeout: int = 60) -> None:
     def log(msg):
         (log_cb or print)(msg)
 
+    # ACHADO 2026-09-28: Fish Speech/ComfyUI/Qwen-Image-2.1 residentes disputam a
+    # MESMA 3090 e ninguem os derrubava antes dos stills (so antes do estagio de
+    # VIDEO, achado gemeo 2026-09-22 em render_shots.py) -- medido AO VIVO com o
+    # Fish Speech ainda no ar: planos que uma placa livre gera em ~15s levavam
+    # minutos. Roda sempre, mesmo com o Z-Image ja de pe -- barato quando nao ha
+    # nada para derrubar. Ver `gpu_watchdog.free_other_still_servers`.
+    from script_pipeline import gpu_watchdog
+    gpu_watchdog.free_other_still_servers(ZIMAGE_PORT, log=log)
+
     if server_is_up():
         return
     log("[zimage] servidor nao esta respondendo; iniciando...")

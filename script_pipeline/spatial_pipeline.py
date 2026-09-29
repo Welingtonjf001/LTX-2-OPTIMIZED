@@ -97,6 +97,13 @@ def prepare(project, spec, *, qwen=False):
                 moved = dict(store.get(current), location_id=location_id, location_asset=version)
                 current = store.create(moved)
                 initial = current
+            # `setup` = mudanca de estado FORA de quadro, entre o plano anterior e este (corte de
+            # cena, algo que aconteceu num plano nao renderizado). Aplica antes do quadro inicial;
+            # `event` continua sendo o que muda DURANTE o plano. O previs automatico
+            # (previs_spec.py) usa isto para renderizar so os planos complexos sem perder a
+            # continuidade dos outros.
+            if shot.get('setup'):
+                current = store.apply(current, shot['setup'])
             # Visibility is a rendering view of the semantic state. It does not
             # mutate the continuing world, so a close-up cannot make everybody
             # disappear from later shots or move props between locations.

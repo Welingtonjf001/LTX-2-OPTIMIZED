@@ -564,6 +564,7 @@ ESTAGIOS = [
     ("4 tts", "Voz (TTS)"),
     ("S estrutura", "Estrutura"),
     ("P decupagem", "Decupagem"),
+    ("3D previs", "Prévia 3D"),
     ("C character-sheet", "Ref. personagem"),
     ("5-D stills", "Stills"),
     ("R rascunho", "Animatic"),
@@ -1671,6 +1672,17 @@ def build() -> None:
                              "corrida para no animatic (exige 'Ir até' = animatic ou antes; "
                              "vídeo, lipsync e montagem são recusados). Não aprova stills.")
                     gr.Markdown("Modo opt-in. A aprovação visual continua obrigatória antes do vídeo.")
+                    previs3d = gr.Dropdown(
+                        choices=["complexas", "medias", "todos", "off"], value="complexas",
+                        label="Prévia 3D automática (Blender, sem spec manual)",
+                        info="Gera o spec espacial a partir da decupagem e renderiza manequins e câmera "
+                             "dos planos do nível escolhido (shots/complexity_report.json): folha "
+                             "shots/previs_3d.png e movimento shots/previs_3d.mp4. Só CPU, ~15 s por "
+                             "plano; nunca bloqueia (MEMORIAL 3.135).")
+                    previs3d_stills = gr.Checkbox(
+                        value=False, label="Usar a prévia 3D como blocking do still desses planos",
+                        info="FLUX img2img nos abertos/médios, referência nos closes (exige Motor das "
+                             "imagens = flux). Ignorado se o spec manual acima estiver ligado.")
                 with gr.Row():
                     ltx_variant = gr.Dropdown(
                         choices=["w4a8-v10", "distilled", "dev", "gguf-q6k"], value="w4a8-v10", scale=1,
@@ -1938,7 +1950,8 @@ def build() -> None:
                           motion_conditioning, visual_unresolved, modo_all]
         _entradas_lora = [ic_reference, ic_strength, ic_guide_strength, lipsync_engine,
                           dubit_strength, dubit_guide, dubit_audio,
-                          post_deblur, post_deblur_s, post_upscale, post_upscale_s]
+                          post_deblur, post_deblur_s, post_upscale, post_upscale_s,
+                          previs3d, previs3d_stills]
 
         def _rodar_ui(*valores):
             """Traduz os controles de LoRA/lip-sync/pos-producao em argumentos da cadeia.
@@ -1953,7 +1966,7 @@ def build() -> None:
                 base[-2] = True
                 base[-1] = "continue"
             (ic_ref, ic_s, ic_g, lip, dub_s, dub_g, dub_a,
-             deb, deb_s, up, up_s) = valores[nb:nb + nl]
+             deb, deb_s, up, up_s, pv3d, pv3d_still) = valores[nb:nb + nl]
             ligados = valores[nb + nl:nb + nl + len(lora_chaves)]
             forcas = valores[nb + nl + len(lora_chaves):]
             escolhidos = [f"{k} ({float(f):g})" for k, on, f in zip(lora_chaves, ligados, forcas) if on]
@@ -1969,6 +1982,9 @@ def build() -> None:
                 extras += ["--post-deblur", "--post-deblur-strength", str(deb_s)]
             if up:
                 extras += ["--post-upscale", "--post-upscale-strength", str(up_s)]
+            extras += ["--previs3d", pv3d or "complexas"]
+            if pv3d_still and pv3d != "off":
+                extras.append("--previs3d-stills")
             yield from rodar(*base, video_loras=escolhidos, ic_reference=ic_ref,
                              ic_strength=ic_s, extras=extras)
 

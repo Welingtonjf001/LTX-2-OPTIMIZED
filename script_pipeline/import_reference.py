@@ -158,6 +158,13 @@ def main(argv=None) -> int:
                 print(f"[import_reference] AVISO: '{name}' sem rosto detectável em "
                       f"{image_path} -- confira antes de gerar stills.")
 
+    # A foto chega depois do casting e e a fonte mais confiavel de genero/idade:
+    # reavalia as vozes que nao foram travadas a mao (ver cast_characters.revoice).
+    from script_pipeline.cast_characters import revoice
+    mudou = revoice(cast)
+    if mudou:
+        print(f"[import_reference] voz reavaliada pela foto: {', '.join(mudou)} "
+              "-- o TTS refaz so as falas desses personagens na proxima corrida.")
     cast_path.write_text(json.dumps(cast, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[import_reference] cast.json atualizado ({len(resultado)} personagem(ns)).")
     return 0

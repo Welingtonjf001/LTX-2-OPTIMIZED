@@ -69,6 +69,25 @@ def find_saved_script(run_dir: Path) -> str:
     return str(candidates[0])
 
 
+def run_gaps_report(run_dir, engine: str | None, *, log) -> None:
+    """Auditoria de lacunas do roteiro (MEMORIAL 3.134), a mesma da decupagem, so
+    relatorio: o que o texto nao diz (agente/alvo da acao, pessoa sem cadastro, fala
+    que repete a acao) e o video vai inventar -> parse/lacunas.md. Roda depois do
+    cast (precisa do elenco) e nunca interrompe este caminho. Chamada tambem pela
+    screenplay_ui, que monta as etapas por conta propria."""
+    cmd = [sys.executable, "-u", "-m", "script_pipeline.screenplay_gaps", "--run-dir", str(run_dir)]
+    if engine:
+        cmd += ["--engine", engine]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", cwd=str(ROOT))
+    except OSError as exc:
+        log(f"[lacunas] nao rodou: {exc}")
+        return
+    for linha in ((result.stdout or "") + (result.stderr or "")).splitlines()[-10:]:
+        log(linha)
+
+
 def run_stage(stage: str, run_dir: Path, args: argparse.Namespace, *, log) -> bool:
     argv = [sys.executable, "-u", "-m", STAGE_MODULES[stage], "--run-dir", str(run_dir)]
 
@@ -304,6 +323,8 @@ def main(argv=None) -> int:
         if not ok:
             log(f"Etapa '{stage}' falhou. Corrija e rode de novo com --resume-from {run_dir} --stage {stage}.")
             return 1
+        if stage == "cast":
+            run_gaps_report(run_dir, getattr(args, "cast_engine", None), log=log)
 
     log(f"\nConcluido. Pasta de execucao: {run_dir}")
     final_video = run_dir / "final" / args.output

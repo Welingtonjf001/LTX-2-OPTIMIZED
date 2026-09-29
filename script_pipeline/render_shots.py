@@ -298,9 +298,10 @@ def _qwen_emotion_instruction(shot: dict) -> str | None:
         return None
     if str(shot.get("framing", "")).casefold() not in QWEN_FRAMINGS_WITH_FACE or not shot.get("subject"):
         return None
-    from script_pipeline.shot_plan import emocao_visivel, emocao_visivel_fala
+    from script_pipeline.shot_plan import emocao_para_video
     falando = shot.get("line_index") is not None
-    visual = (emocao_visivel_fala if falando else emocao_visivel)(shot.get("emotion"))
+    visual = emocao_para_video(shot.get("emotion"), falando=falando,
+                               contexto=f"{shot.get('look_base', '')} {shot.get('fallback', '')}")
     if not visual:
         return None
     return ("Keep every person's face, hairstyle, uniform, position, the camera framing and the whole location "
@@ -341,6 +342,7 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
                     consistency_threshold: float | None = None,
                     consistency_max_retries: int = 2,
                     lora_name: str = "", lora_strength: float = 0.8,
+                    qwen_lora_name: str = "", qwen_lora_strength: float = 1.0,
                     cast_descriptors: dict[str, str] | None = None) -> Path | None:
     import script_pipeline.generate_storyboards as sb
 
@@ -394,6 +396,11 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
         # antes do resto) -- sem isso na chave, mudar a descricao do papel
         # reaproveitaria o still antigo em silencio.
         chave = f"{chave}|roles={reference_role or ''}|{reference_2_role or ''}"
+    if is_qwen and qwen_lora_name:
+        # LoRA Viggle turbo (transformer do Qwen-Image-2.1) muda o traco do
+        # mesmo jeito que o lora_name do FLUX muda a chave acima -- ligar/
+        # desligar ou trocar a forca sem isto reaproveitaria o still antigo.
+        chave = f"{chave}|qwen_lora={qwen_lora_name}@{qwen_lora_strength}"
     emotion_instruction = _qwen_emotion_instruction(shot) if is_qwen else None
     if emotion_instruction:
         chave = f"{chave}|qwen_emotion={hashlib.sha1(emotion_instruction.encode('utf-8')).hexdigest()[:10]}"
@@ -447,7 +454,8 @@ def _still_for_shot(shot: dict, idx: int, *, out_dir: Path, width: int, height: 
             **({"control_bundle": bundle,
                 "spatial_denoise": spatial.get("denoise", .65),
                 "spatial_mode": spatial.get("mode", "img2img")} if bundle else {}),
-            lora_name=lora_name, lora_strength=lora_strength)
+            lora_name=lora_name, lora_strength=lora_strength,
+            qwen_lora=(qwen_lora_name, qwen_lora_strength) if (is_qwen and qwen_lora_name) else None)
 
     def _gerar_uma_vez(dest: Path, seed_usado: int) -> bool:
         ok_base = _gerar_base(dest, seed_usado)
@@ -536,6 +544,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
            consistency_threshold: float | None = None, consistency_max_retries: int = 2,
            character_sheets: dict[str, str] | None = None,
            lora_name: str = "", lora_strength: float = 0.8,
+           qwen_lora_name: str = "", qwen_lora_strength: float = 1.0,
            engine: str = "ltx",
            minimax_aspect_ratio: str | None = None, minimax_megapixels: float | None = None,
            minimax_turbo: bool = True, minimax_ref_audio: bool = False,
@@ -838,6 +847,7 @@ def render(plan: dict, out_dir: Path, *, width: int, height: int, fps: float,
                                     consistency_threshold=gate_consistencia,
                                     consistency_max_retries=consistency_max_retries,
                                     lora_name=lora_name, lora_strength=lora_strength,
+                                    qwen_lora_name=qwen_lora_name, qwen_lora_strength=qwen_lora_strength,
                                     cast_descriptors=cast_descriptors)
         if still is None:
             log(f"  still falhou; pulando o plano {i}")
@@ -1363,21 +1373,33 @@ def _extract_subclip(src: str, dest: str, start_seconds: float, duration_seconds
 # os 25 planos de um roteiro inteiro num take só. Ver MEMORIAL 3.120.
 TAKE_BREAK_FRAMINGS = {"wide", "full"}
 
+# Teto de planos por take. MEDIDO 2026-09-27 (CERCO EM SEUL v2): um take de 9
+# planos andava ~6-7 min por segmento e foi morto pelo watchdog (3600 s) no
+# segmento 6 -- nao travado, so longo; e um take perdido derruba TODOS os
+# planos dele. Validado ate 6 segmentos (MEMORIAL 3.126); 4 deixa folga de
+# tempo e limita o prejuizo de uma falha. MINIMAX_LONGTAKE_MAX_PLANOS sobrepoe.
+MAX_PLANOS_POR_TAKE = max(1, int(os.environ.get("MINIMAX_LONGTAKE_MAX_PLANOS", "4")))
+
 
 def _assign_takes(pendentes_ordenados: list[dict]) -> None:
     """Atribui `take_id` (em lugar, muta os dicts) -- toda troca de CENA
     sempre abre um take novo, e dentro da mesma cena todo plano
     `wide`/`full` TAMBÉM abre um take novo. Um wide/full sem framing
     reconhecido (`None`) é tratado como quebra também -- mais seguro
-    juntar de menos que de mais quando a informação está faltando."""
+    juntar de menos que de mais quando a informação está faltando. Um take
+    que chega a MAX_PLANOS_POR_TAKE também fecha."""
     take_id = -1
     cena_anterior = object()
+    no_take = 0
     for p in pendentes_ordenados:
         nova_cena = p["scene"] != cena_anterior
-        se_quebra = nova_cena or p["framing"] in TAKE_BREAK_FRAMINGS or not p["framing"]
+        se_quebra = (nova_cena or p["framing"] in TAKE_BREAK_FRAMINGS or not p["framing"]
+                     or no_take >= MAX_PLANOS_POR_TAKE)
         if se_quebra:
             take_id += 1
+            no_take = 0
         p["take_id"] = take_id
+        no_take += 1
         cena_anterior = p["scene"]
 
 
@@ -1438,27 +1460,34 @@ def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
     feitos_novos = []
     ordenados = sorted(pendentes, key=lambda p: (p["scene"], p["shot"]))
     _assign_takes(ordenados)
+
+    def _gera_avulso(p: dict) -> None:
+        """Clipe unico (caminho r2v validado) -- usado para take de 1 plano e
+        como FALLBACK de um take que falhou: MEDIDO 2026-09-27, um take de 4
+        planos travou no segmento 0 (trava do comfyui-easy-media, MEMORIAL
+        3.126) e os 4 planos saiam sem clipe."""
+        try:
+            minimax_h3_backend.generate(
+                p["prompt"], str(p["clip_path"]), ref_images=p["ref_images"] or None,
+                aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
+                megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
+                duration_seconds=p["duration_seconds"], seed=seed + p["shot"],
+                log_cb=lambda m: log(f"    [minimax_h3_longtake] {m}"), timeout=3600)
+            p["marca"].write_text(
+                json.dumps({"key": p["chave"], "frames": _clip_frames(p["clip_path"])}),
+                encoding="utf-8")
+            feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": str(p["clip_path"])})
+        except Exception as e:
+            log(f"  [minimax-longtake] plano {p['shot']} FALHOU: {type(e).__name__}: {e}")
+            feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": None})
+            import script_pipeline.generate_storyboards as _sb
+            _sb.stop_comfyui(8189, log=log)
+
     for (cena, take_id), grupo_iter in groupby(ordenados, key=lambda p: (p["scene"], p["take_id"])):
         grupo = list(grupo_iter)
         if len(grupo) == 1:
-            p = grupo[0]
             log(f"  [minimax-longtake] cena {cena} take {take_id}: 1 plano só -- gerando como clipe único")
-            try:
-                minimax_h3_backend.generate(
-                    p["prompt"], str(p["clip_path"]), ref_images=p["ref_images"] or None,
-                    aspect_ratio=minimax_aspect_ratio or minimax_h3_backend.DEFAULT_ASPECT,
-                    megapixels=minimax_megapixels if minimax_megapixels is not None else minimax_h3_backend.DEFAULT_MEGAPIXELS,
-                    duration_seconds=p["duration_seconds"], seed=seed + p["shot"],
-                    log_cb=lambda m: log(f"    [minimax_h3_longtake] {m}"), timeout=3600)
-                p["marca"].write_text(
-                    json.dumps({"key": p["chave"], "frames": _clip_frames(p["clip_path"])}),
-                    encoding="utf-8")
-                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": str(p["clip_path"])})
-            except Exception as e:
-                log(f"  [minimax-longtake] plano {p['shot']} FALHOU: {type(e).__name__}: {e}")
-                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": None})
-                import script_pipeline.generate_storyboards as _sb
-                _sb.stop_comfyui(8189, log=log)
+            _gera_avulso(grupo[0])
             continue
 
         framings_grupo = [p["framing"] for p in grupo]
@@ -1495,11 +1524,12 @@ def _minimax_longtake_flush(pendentes: list[dict], *, fps: float, seed: int,
                 log_cb=lambda m: log(f"    [minimax_h3_longtake] {m}"),
                 timeout=3600 * max(1, len(grupo)))
         except Exception as e:
-            log(f"  [minimax-longtake] cena {cena} take {take_id} FALHOU: {type(e).__name__}: {e}")
+            log(f"  [minimax-longtake] cena {cena} take {take_id} FALHOU: {type(e).__name__}: {e}"
+                f" -- refazendo os {len(grupo)} plano(s) como clipes avulsos")
             import script_pipeline.generate_storyboards as _sb
             _sb.stop_comfyui(8189, log=log)
             for p in grupo:
-                feitos_novos.append({"shot": p["shot"], "still": str(p["still"]), "clip": None})
+                _gera_avulso(p)
             continue
 
         cursor = 0
@@ -1829,6 +1859,13 @@ def main() -> int:
                     help="nao passa a fala do TTS ao LTX como trilha de referencia. "
                          "Sem o condicionamento o modelo inventa o som sozinho e "
                          "gera VOZ propria, que depois disputa com o TTS na mixagem.")
+    ap.add_argument("--qwen-lora", default=None,
+                    help="LoRA do TRANSFORMER do Qwen-Image-2.1 (so --image-engine "
+                         "qwen-image-2.1), formato NOME[:FORCA] -- arquivo em "
+                         "Qwen-Image-2.1/ComfyUI/models/loras/. Ex.: "
+                         "Qwen-Image-2.1-viggle-turbo-4step-lora-r64.safetensors:1.0 "
+                         "(testado com GPU real: mantem identidade em 4-8 passos "
+                         "contra 30 do padrao, ~3-8x mais rapido)")
     args = ap.parse_args()
 
     plan_path = Path(args.plan) if args.plan else Path(args.run) / "parse" / "shot_plan.json"
@@ -1875,13 +1912,20 @@ def main() -> int:
     # que precisa pra caber.
     weight_dtype = _motor.get("weight_dtype", "default")
 
+    qwen_lora_name, qwen_lora_strength = "", 1.0
+    if args.qwen_lora:
+        nome, _, forca = args.qwen_lora.partition(":")
+        qwen_lora_name = nome
+        qwen_lora_strength = float(forca) if forca else 1.0
+
     feitos = render(plan, out_dir, width=args.width, height=args.height, fps=args.fps,
                     checkpoint=args.checkpoint, clip=args.clip, vae=args.vae,
                     seed=args.seed, limit=args.limit, stills_only=args.stills_only,
                     videos_only=args.videos_only, steps=args.steps, cfg=args.cfg,
                     only_shots=args.only_shots, dialogue=dialogo,
                     audio_conditioning=not args.no_audio_conditioning,
-                    use_reference=not args.no_reference, weight_dtype=weight_dtype)
+                    use_reference=not args.no_reference, weight_dtype=weight_dtype,
+                    qwen_lora_name=qwen_lora_name, qwen_lora_strength=qwen_lora_strength)
     if not args.stills_only and dialogo:
         print(f"[render_shots] voz: {len(dialogo)} fala(s) para muxar"
               f"{', com lip-sync' if not args.no_lipsync else ''}")

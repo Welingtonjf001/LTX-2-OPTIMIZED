@@ -76,6 +76,35 @@ def free_port(port: int, *, log=print) -> bool:
     return True
 
 
+# Portas dos servidores HTTP de still/video que disputam a MESMA 3090 -- valores
+# fixos aqui de proposito (nao importados dos backends: zimage_backend.py,
+# qwen_image21_backend.py, qwen_image21_comfy_backend.py e dialogue_tts.py TODOS
+# importam gpu_watchdog; importar de volta criaria ciclo). Se um desses arquivos
+# mudar a porta um dia, atualize aqui tambem -- sao constantes estaveis ha meses.
+# MiniMax H3 (8189) e LongCat (8190) ficam de fora de proposito: so entram em jogo
+# no estagio de VIDEO, que ja tem sua propria troca explicita (render_shots.py).
+STILL_ENGINE_PORTS = {"comfyui": 8188, "zimage": 8191, "qwen21_diffusers": 8192,
+                      "qwen21_comfy": 8193, "fish_speech": 8080}
+
+
+def free_other_still_servers(keep_port: int | None = None, *, log=print) -> None:
+    """Derruba todo servidor de `STILL_ENGINE_PORTS` MENOS `keep_port` (o motor que
+    esta prestes a gerar). ACHADO 2026-09-28: nada derrubava o Fish Speech (TTS,
+    estagio 4) antes dos stills -- so antes do estagio de VIDEO (achado gemeo
+    2026-09-22, mesmo sintoma: 81,5s -> 715,6s num plano LTX, 8,8x mais lento,
+    isolado por A/B). Medido AO VIVO com FLUX + Fish Speech residentes ao mesmo
+    tempo: passos que uma placa livre faz em ~5-9s levavam entre 120s e 470s,
+    alternando com passos rapidos -- contencao de VRAM, nao troca de arquitetura.
+    Chamado no INICIO de toda corrida de still (`ensure_comfyui_running`,
+    `zimage_backend.ensure_server`, `qwen_image21*.ensure_server`) -- barato
+    quando nao ha nada para derrubar."""
+    for nome, porta in STILL_ENGINE_PORTS.items():
+        if porta == keep_port:
+            continue
+        if free_port(porta, log=log):
+            log(f"[still] {nome} (porta {porta}) encerrado antes deste still (libera VRAM).")
+
+
 def gpu_status(*, gpu_index: int | None = None) -> list[dict]:
     """[{index, name, used_mib, total_mib, util_pct}, ...] via nvidia-smi.
     Lista vazia se nvidia-smi nao existir/falhar -- nunca levanta excecao,

@@ -50,9 +50,21 @@ MIN_SEPARATION_M = 1.0
 _W = r"(?<![A-Za-z])(?:{})(?![A-Za-z])"
 RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("takedown", re.compile(_W.format(
-        r"tackles?|tackling|knocks? (?:him|her|them) down|takes? (?:him|her|them) down|"
+        r"tackles?|tackling|knocks? (?:him|her|them) down|takes? (?:him|her|them|the \w+) down|"
+        r"takes? down|taking down|brings? down|slams?|"
         r"derruba|imobiliza|joga ao ch[aã]o")),
      "sprint into one controlled tackle, bring the partner safely to the ground, then pin and hold position"),
+    # MEDIDO 2026-09-27 (CERCO EM SEUL): "kicks the weapon away and handcuffs the
+    # terrorist" e "leads the President to safety" caiam em idle -- o video mostrava
+    # gente parada onde o roteiro pedia detencao e escolta.
+    ("restrain", re.compile(_W.format(
+        r"handcuffs?|handcuffing|cuffs?|cuffing|restrains?|restraining|kicks?|kicking|"
+        r"algema|algemando|chuta|chutando|rende")),
+     "kick the dropped weapon clear, kneel on the subdued partner and lock the handcuffs on both wrists"),
+    ("escort", re.compile(_W.format(
+        r"leads?|leading|escorts?|escorting|guides?|guiding|ushers?|helps? (?:him|her|them|the \w+) "
+        r"(?:up|to (?:his|her|their) feet)|conduz|conduzindo|escolta|ajuda")),
+     "keep one hand on the partner's back, move them forward in a crouch toward cover, scanning for threats"),
     ("fire", re.compile(_W.format(
         r"fires?|firing|shoots?|shooting|aims?|aiming|atir(?:a|ar|ando)|dispara|mirando")),
      "raise the weapon, aim toward the stated target, fire controlled shots, then hold aim; never turn toward camera"),
@@ -61,7 +73,8 @@ RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         r"protege|protegendo|cobre o presidente")),
      "move between the partner and the threat, shield the partner, and hold a protective position"),
     ("pursue", re.compile(_W.format(
-        r"chases?|chasing|pursues?|pursuing|runs? after|running after|persegue|perseguindo")),
+        r"chases?|chasing|pursues?|pursuing|pursuit|runs? after|running after|leaps?|leaping|"
+        r"jumps?|jumping|vaults?|vaulting|dodges?|dodging|persegue|perseguindo|salta|pula")),
      "sprint after the fleeing target along the same street axis, weaving past pedestrians without stopping"),
     ("contact", re.compile(_W.format(
         r"hugs?|hugging|embraces?|embracing|kiss(?:es|ing)?|handshakes?|shakes? (?:her|his|their) hand|"
@@ -72,6 +85,7 @@ RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         r"picks? up|picks?|takes?|taking|hands? (?:over|him|her|them)|gives?|giving|opens?|opening|"
         r"pulls?|pulling|drags?|dragging|puxa|puxando|arrasta|arrastando|"
         r"touch(?:es)?|places?|placing|holds?|holding|raises?|raising|lifts?|lifting|grips?|"
+        r"leaves?|leaving|drops?|dropping|plants?|planting|abandons?|deixa|abandona|"
         r"pega|entrega|abre|toca|coloca|segura|ergue")),
      "make one deliberate reach toward the named prop or partner, then return to a stable pose"),
     ("locomote", re.compile(_W.format(
@@ -82,6 +96,8 @@ RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
      "sprint along the established path, accelerate decisively, keep the partner in the same direction of travel, then continue moving"),
     ("turn", re.compile(_W.format(
         r"turns?|turning|looks?|looking|gaz(?:es|ing)|glances?|glancing|faces|facing|stares?|staring|"
+        r"spots?|spotting|examines?|examining|scans?|scanning|surveys?|surveying|notices?|"
+        r"avista|examina|percebe|"
         r"vira|olha|olhando|encara")),
      "turn head and upper body toward the focus, keeping feet planted"),
     ("gesture", re.compile(_W.format(
@@ -207,7 +223,7 @@ def build_motion_score(plan: dict[str, Any]) -> dict[str, Any]:
                 # the pursuit. The adapter continues the established heading.
                 target["mode"] = "short_path"
                 target["destination"] = None
-            elif primitive in {"locomote", "contact", "takedown", "protect"} or (
+            elif primitive in {"locomote", "contact", "takedown", "protect", "restrain", "escort"} or (
                     primitive == "reach" and partner):
                 if partner:
                     target["mode"] = "approach_partner"

@@ -8556,3 +8556,692 @@ dropdown da WebUI) já monta os specs a partir do `cast.json` e do still de cada
 mecanismo de montagem do spec e a geração, não a orquestração completa da decupagem. `ltx_loras.py`
 segue sem `sets=("core",)` conferido contra `download --set core` (não testado se o download
 automático pega a V2 certa).
+
+### 3.131 — Motores de still comparados no CERCO EM SEUL (2026-09-25/27): Viggle 4-step, HiDream-O1, Qwen-Image-base com referência
+
+**Viggle Turbo 4-step (LoRA do Qwen-Image-2.1)**: baixado em
+`Qwen-Image-2.1/ComfyUI/models/loras/Qwen-Image-2.1-viggle-turbo-4step-lora-r64.safetensors` (324 MB).
+`qwen_image21_comfy_backend.generate(lora=(nome, força))` insere `LoraLoaderModelOnly` antes do
+`QwenImage21Cache`; na decupagem, `--qwen-lora NOME[:FORÇA]` (`run_decupagem` → `render_shots_stage` →
+`render_shots`, entra na chave do still). MEDIDO: still solo 87 s (30 passos) → 13 s (4) / 17 s (8);
+duas referências nomeadas 68 s → 23 s (4) / 27 s (8), identidade preservada nos dois casos. Num plano
+de ação real (MIN-JUN + HA-EUN, 8 passos) o nome do papel nomeado **vazou como letreiro** ("MIN-JUN" numa
+loja) -- ainda opt-in, não padrão.
+
+**Qwen-Image-2.1 como motor de TODOS os stills: reprovado na produção.** 21/25 bloqueados no CERCO
+EM SEUL: os planos insert sem sujeito recebiam a referência de grupo (still 0) e o Qwen trata qualquer
+referência como identidade a desenhar -- insert virava grupo de pessoas. FLUX (img2img parcial) não tem
+esse efeito. FLUX segue padrão.
+
+**HiDream-O1** (novo): suporte nativo já existe no ComfyUI local (`comfy/ldm/hidream_o1`, nó
+`HiDreamO1ReferenceImages`, 1-10 referências); faltavam só os pesos -- checkpoint único
+`models/checkpoints/hidream_o1_image_fp8_scaled.safetensors` (7,5 GB, `Comfy-Org/HiDream-O1-Image`).
+Grafo mínimo: CheckpointLoaderSimple → ModelNoiseScale(`noise_scale`=8) → BasicScheduler(normal, 40) +
+KSamplerSelect(dpmpp_2m_sde_gpu) → SamplerCustom(cfg 5), latente `EmptyHiDreamO1LatentImage` na
+resolução de treino (~4 MP; 2560x1440 é 16:9). 341 s por still; identidade alta, mas **nomes dos
+personagens renderizados como letreiros** em todo lugar -- o teste usou negativo vazio, não
+`negative_prompt_for()`, então não é conclusivo. NÃO integrado ao `generate_storyboards`.
+
+**Qwen-Image-base (20B) com referência**: `TextEncodeQwenImageEditPlus` (até 3 imagens) já existe no
+ComfyUI local; o ramo `qwen-image-base` do `generate_storyboards` só usava `CLIPTextEncode` (txt2img
+puro -- daí o míssil e o letreiro inventados no teste sem referência). Ligado: com referência troca
+para EditPlus; sem referência, comportamento idêntico. **NÃO testado com GPU real.** HiDream-I1 continua
+sem referência (img2img de uma foto só).
+
+Achado central: **trocar o motor de imagem não resolve problema de decupagem** -- o gate reprovou ~80%
+nos dois motores pelo mesmo motivo estrutural (§3.132).
+
+### 3.132 — CERCO EM SEUL: auditoria de causalidade e correções gerais de decupagem, elenco e movimento (2026-09-27)
+
+Auditoria externa do filme (25 planos, stills FLUX + LTX 2.5, `.audit_video/seul_20260927/avaliacao.md`):
+aparência de thriller, mas quem protege quem, quem foge e como a ameaça evolui não fica legível. Causas
+CONFERIDAS no código e corrigidas de forma geral (valem para qualquer roteiro e para os dois motores de
+vídeo, porque ficam antes da escolha do motor):
+
+- `shot_plan.py` -- ação sem sujeito CADASTRADO virava `insert` ("tight detail, no face") por
+  exclusão. Agora `_enquadre_sem_sujeito()`: explosão/multidão/comboio/fumaça → `wide`; só detalhe de
+  objeto fica insert.
+- Figurantes sem fala (Presidente, motociclista/terrorista) não existiam no elenco → cada still
+  inventava outra pessoa. `cast.json` aceita `"extra": true` + `"aliases"`; o `shot_plan` os inclui na
+  cena e os reconhece com fronteira de palavra (`_padrao_nome`; sem ela PRESIDENT casava em
+  "presidential"). `cast_characters.detect_extras()` os cria sozinho: via LLM (junta sinônimos, cada
+  apelido validado contra o texto, ≥2 frases) ou, sem LLM, lista de papéis com artigo definido
+  (junta PT/EN, não junta sinônimos).
+- Descritor do `co_subject` omitido depois do primeiro plano próprio (fix de 16/09 contra duplicata) →
+  Ha-eun de cabelo solto e roupa civil, Min-jun de camiseta. Revertido: descritor sempre presente.
+- Close de fala pedia a ação física do beat (proteger, saltar, atirar) sobre um retrato → Ha-eun
+  VESTIU o capacete do fugitivo. Close de fala agora é reação com a ação fora de quadro, sem
+  `co_subject` no quadro.
+- `alegre`/`calma` literais em cena de ação (sorriso durante a derrubada) → em look de
+  ação/suspense viram "focused and determined... no smile".
+- `art_direction` misturava trilha/efeitos sonoros/câmera/montagem e ia para TODO prompt. `_arte_visual()`
+  descarta frase com áudio e trecho de câmera/corte.
+- `motion_conditioner`: algemar, conduzir, chutar, "takes down", saltar/esquivar, deixar a mochila,
+  avistar/examinar caíam em `idle`/`reach`. Primitivas novas `restrain` e `escort` (também em
+  `blocking_preview` e `motion_command_geometry`).
+- **O movimento NÃO estava sendo aplicado no filme entregue**: `run_decupagem` só aplicava com parada
+  ≥ render; a rodada `--ate animatic` regerava o `shot_plan` sem movimento e o vídeo herdava. Agora
+  aplica sempre.
+- `lipsync_scenes`: falha do motor ou rosto não detectado deixava o clipe com o áudio do LTX -- a fala
+  do roteiro sumia (plano 9). `_mux_tts()` põe o WAV do TTS sobre o clipe.
+- Voz: Ha-eun (sem pronome no descritor) recebeu voz masculina por alternância; Seo-yeon (35 anos)
+  recebeu `F01_infantil` por ser a primeira da lista. `assign_voices`: gênero pela foto de referência
+  (insightface genderage) > LLM lendo o roteiro > pista textual; idade pelo roteiro (`_parse_age`) e só
+  depois pela foto (MEDIDO: foto deu 23 para o Min-jun "mid-30s"); voz escolhida por faixa etária,
+  nunca infantil para adulto, sem repetir voz. `import_reference` reavalia as vozes ao importar foto;
+  `cast_characters --revoice` faz só isso; `"voice_locked": true` protege voz escolhida à mão.
+  **Caminho com LLM (sinônimos, gênero lido do roteiro) ainda NÃO testado** (GPU ocupada no dia).
+
+Resultado v2 (mesmo roteiro, LTX 2.5): lip-sync 8/8 (antes 7/8), identidade abaixo de 0,35 em 8/21
+clipes (antes 11/18), 51,1 s contra 53,6 planejados (antes −3,4 s). Stills mostram o Presidente com a
+mesma aparência em planos diferentes, explosão em plano aberto e o terrorista presente na detenção.
+Testes sem GPU: `tests/test_casting_decupagem_20260927.py`.
+
+### 3.133 — MiniMax long-take no CERCO EM SEUL v2 + gate visual quebrado pelo Ollama 0.34.4 (2026-09-27)
+
+**MiniMax long-take (mesma decupagem v2)**: 1ª rodada 12/25 clipes. Take de 9 planos NÃO travou --
+andava 6-7 min por segmento e o watchdog (3600 s fixos) o matou no segmento 6. Take de 4 planos travou
+DE VERDADE no segmento 0, antes do condicionamento (mesma trava do `comfyui-easy-media` de §3.126, não
+determinística: o mesmo take fechou em 1060 s na rodada seguinte). `render_shots`: teto
+`MAX_PLANOS_POR_TAKE=4` (`MINIMAX_LONGTAKE_MAX_PLANOS`) e **take que falha refaz seus planos como
+clipes avulsos** (`_gera_avulso`, r2v validado). 2ª rodada: 25/25. Comparado ao LTX v2: identidade
+abaixo de 0,35 em 19/21 clipes (LTX 8/21), fala nativa com SyncNet OK em 7/8 (conteúdo não verificado),
+56,9 s, ~2h40 de vídeo contra ~1h. A correção de voz (§3.132) só alcança o MiniMax com
+`--minimax-ref-audio`.
+
+⚠️ Um teste de `test_render_shots_longtake.py` que simula falha do take passou a cair no fallback e
+chamou o `generate()` REAL -- subiu o ComfyUI do MiniMax com prompt de teste. Corrigido (mock); ao
+mexer em fallback, conferir que todo teste mocka o caminho novo.
+
+**Gate visual (Qwen3-VL) quebrado desde 26/09**: o Ollama se atualizou sozinho para 0.34.4 e o
+`qwen3-vl:30b` passou a RACIOCINAR mesmo com `think:false` (nem "/no_think" no prompt ou no system
+desliga): ~6000 caracteres de `thinking` antes do JSON. Com `num_predict` 2000 o plano com 2+ imagens
+estourava (`done_reason=length`) → JSON cortado ou vazio → "erro do auditor" 3x seguidas → o gate
+parava em 3-4 de 25 planos. **A v2 do LTX NÃO teve auditoria visual real**; no MiniMax, 12 dos 17
+"bloqueios" eram erro do auditor. Correção: `num_ctx` 16384 e `num_predict` 8192 (retry 12000); o
+modelo cabe inteiro na 3090 (20 GB). MEDIDO nos 3 planos que falhavam: JSON válido em 16-35 s. O
+relatório agora separa `rejected`/`auditor_errors`/`evaluated` (erro do auditor continua bloqueando,
+mas não é contado como reprovação).
+
+### 3.134 — Auditoria geral dos scripts: lacunas do roteiro, complexidade por plano, regras únicas de prompt (2026-09-27)
+
+Pedido do usuário: o roteiro deve vir mais completo? o parse/LLM deve verificar lacunas? cenas
+complexas pedem prévia 3D, e o sistema deve medir a necessidade? como isso afeta os motores?
+Relatório completo, com os 22 achados e status: `AUDITORIA_GERAL_2026-09-27.md`. Guia para o
+roteirista: `script_pipeline/GUIA_ROTEIRO.md`.
+
+**[L] `screenplay_gaps.py`** (antes da decupagem, nos dois caminhos; `parse/lacunas.md`).
+Determinístico: pessoa que age sem cadastro, ação sem agente, contato/tiro sem alvo, fala que
+repete a ação vizinha (Jaccard ≥ 0,45), fala sobre ação física, aparência incompleta, voz por
+palpite e mudanças de estado a carregar. MEDIDO no CERCO: run original 11 críticas (as mesmas
+da auditoria externa); v2 com figurantes, 1 crítica e legítima ("Seo-yeon fires her gun" sem
+direção -- o roteiro dizia "para o alto", o enriquecimento perdeu). Com LLM: sugestões por
+ação marcadas como inferidas. Na 1ª versão do prompt o modelo marcava as 7 categorias como
+faltantes em TODA ação (17 sugestões inúteis); prompt restrito + descarte de lista com ≥ 6
+itens → 3 sugestões úteis (inclui "de quem é o reflexo do último plano"). `run_decupagem
+--lacunas {relatorio,bloquear,off}`, `--lacunas-sem-llm`.
+
+**[M] `shot_complexity.py`** (depois do movimento; `shots/complexity_report.json`). Pontua
+primitiva (environment/speak 0 … restrain/takedown 3) + pessoas + objetos + mudança de estado
+(2) + ação física em < 1,8 s + câmera; simples < 2,5 ≤ média < 4,5 ≤ complexa. Close de FALA
+pontua só o rosto e é marcado quando a ação do texto fica fora do quadro. MEDIDO no CERCO v2:
+14/8/3; as complexas (derrubada, algemação, tiro com portas fechando) coincidem com os
+planos-sentinela da auditoria externa; closes marcados: 4, 10, 15, 18, 20, 22. Recomendações
+por motor: LTX aceita guia de pose (union-control) só em plano sem fala (fator 2 + audio
+conditioning é recusado) e MSR 2.5 disputa o mesmo ponto do grafo; MiniMax só recebe previs
+pelo still e, no long-take, só o 1º plano do take tem referência. **O previs 3D automático não
+foi implementado**: `spatial_pipeline` exige spec manual; gerar um spec-rascunho do
+`shot_plan` para os planos complexos é o próximo projeto (depois do contrato de eventos no
+parse, achado #22).
+
+**Defeitos pré-existentes achados na auditoria** (as correções de decupagem de §3.132 não
+chegavam a estes caminhos):
+- `shot_plan.enrich_camera_style` (`--camera-llm`) reconstruía os prompts sem
+  `co_subject`/`co_descriptor` → o parceiro sumia (desde 16/09). Agora o plano guarda
+  `co_descriptor` para quem reconstrói.
+- `story_editor` reconstruía com `speaking = quote is not None` → no LTX (sem fala citada)
+  todo plano de fala virava ação muda.
+- `prompt_polish` e `render_shots._qwen_emotion_instruction` usavam a emoção de ação muda em
+  plano de fala. Regra única: `shot_plan.emocao_para_video(emoção, falando, contexto)`; a
+  detecção de cena de ação lê direção de arte **e** texto da cena (roteiro sem "suspense" na
+  direção de arte não perde a regra).
+- `render_scenes` (caminho do screenplay): clipe de ação sem aparência de ninguém, fala sobre
+  ação física, emoção literal -- mesmas regras portadas.
+- `build_prompt` (storyplay25 e stills sem prompt próprio): figurantes nunca entravam.
+  Helper compartilhado `cast_characters.personagens_citados` (nome ou apelido, com fronteira de
+  palavra, em ordem de aparição).
+- `verify_output` dizia "0 problemas" com gates bloqueados → aviso `GATES_NOT_APPROVED`.
+- `screenplay_ui` duplica a montagem de etapas do `screenplay_to_video` (a auditoria de
+  lacunas foi ligada nos dois via `screenplay_to_video.run_gaps_report`; a duplicação segue).
+
+**Figurantes com LLM, validado com GPU real**: o modelo juntou "motociclista" e "terrorista"
+(MOTORCYCLIST) e criou PRESIDENT -- mas devolveu os apelidos só em português, enquanto as ações
+enriquecidas estão em inglês ("the President"): o `shot_plan` não reconheceria ninguém. Prompt
+pede os dois idiomas e o código completa com traduções do MESMO papel (`_FAMILIAS`, nunca
+juntando papéis diferentes -- motociclista = terrorista é decisão de enredo, do LLM). A
+descrição do figurante saía genérica porque a auditoria de completude rodava antes dele
+entrar; ordem invertida.
+
+**Gate visual, 1ª auditoria real da v2** (com a correção do Ollama, §3.133): 23 de 25
+avaliados, 21 reprovados, 2 ainda com erro intermitente do auditor (o modelo às vezes raciocina
+até esgotar a saída; isolados, os mesmos planos passam). Parte das reprovações é legítima
+("a mochila ainda está na mão"), parte é literalidade ("broche de bandeira não visível") ou
+contradição (plano 21 lista tudo como compatível e reprova) -- calibrar o contrato do gate está
+aberto (achado #20).
+
+Testes: `tests/test_lacunas_complexidade_20260927.py`, `tests/test_casting_decupagem_20260927.py`;
+suíte inteira 349 passando (sem `test_pipeline_smoke`, que sobe o ComfyUI).
+
+### 3.135 — Previs 3D automático: spec espacial gerado da decupagem, sem escrita manual (2026-09-27)
+
+Pedido do usuário depois da auditoria geral (§3.134, achado da seção "cenas complexas precisam de
+prévia 3D?"): as peças já existiam (`spatial_pipeline` com Blender/manequins/câmera real, InterGen
+para dupla em contato), mas exigiam um spec JSON escrito à mão (`voo702_spatial.py` era o único
+exemplo). Implementado `script_pipeline/previs_spec.py`: gera o spec automaticamente a partir de
+`parse/shot_plan.json` + `characters/cast.json` + `parse/motion_plan.json` +
+`shots/complexity_report.json`, e renderiza os planos do nível pedido em baixa resolução no Blender
+(manequins + câmera, sem difusão).
+
+**O que o gerador faz**: infere um cenário-modelo (rua/interior/interior estreito) com marcos citados
+no texto (carro, entrada, mesas, faixa de pedestres); simula o mundo plano a plano
+(`Choreographer`) — figurino vira cor do manequim, primitiva de movimento vira MUDANÇA DE ESTADO
+entre o quadro inicial e o final (derrubada: alvo de bruços + quem derruba ajoelhado ao lado;
+algemar: algemas passam de mão + `prone_cuffed`; escoltar: os dois andam para a saída ou "ajuda a
+levantar" se o alvo estava no chão; proteger: corpo entre o alvo e a ameaça citada na cena; tiro:
+arma na mão certa + pose de mira, alta se o alvo é alto/distante; perseguição segue quem foge, não
+inverte o eixo); mantém a continuidade ENTRE planos (quem caiu continua caído no plano seguinte,
+mesmo que o plano não seja renderizado — via `setup`, aplicado fora de quadro antes do quadro
+inicial); plano de fala em close aplica a ação do texto ao MUNDO fora de quadro (a reação é o que
+aparece, mas a história segue). Câmera: `fit_camera` enquadra cabeça a cabeça (topo real da malha,
+não só as juntas — ver achado de review abaixo) o início E o fim da ação; em ação a dois fica de
+lado para o eixo dos dois, do lado de tela do plano (regra dos 180°); nunca no eixo do cano de uma
+arma (50° mínimo); detecta oclusão por marco do cenário (carro, mesa) e gira até achar ângulo livre.
+
+**Biblioteca nova, `script_pipeline/mannequin_poses.py`**: esqueleto COCO-18 no referencial LOCAL do
+personagem (Z para cima, rosto em -Y, direita anatômica em -X), 13 poses (standing, walking,
+running, aiming, aiming_high, crouching, kneeling, prone, prone_cuffed, shielding, reaching,
+escorting, seated). **Corrigiu um bug de lateralidade que já existia no manequim antigo**:
+`camera_geometry.socket_position` pendurava objeto na mão "direita" em +X local, que é o lado
+ESQUERDO anatômico de quem olha para -Y — o `pose.png` de referência saía com a configuração
+impossível de rosto visível + membros de costas. Agora `socket_position`, `spatial_planner.
+_entity_point` (mira do close: cabeça de verdade, 15 cm abaixo do topo — igual ao valor fixo antigo
+quando em pé) e a malha do `blender_scene_worker.py` (agora construída a partir do próprio esqueleto,
+não hardcoded) leem a mesma biblioteca.
+
+**Integração**: `spatial_pipeline.prepare()` ganhou um evento `setup` opcional por plano, aplicado
+ANTES do estado inicial (mudança fora de quadro entre o corte anterior e este). `world_store.py`
+ganhou a operação `detach` (largar objeto: sai da mão, fica parado numa posição) e valida `pose`.
+`run_decupagem.py`: novo passo `[3D previs]` depois de `[M] complexidade`
+(`--previs3d {complexas,medias,todos,off}`, `--previs3d-stills` liga o quadro inicial do previs
+como blocking do still via o mesmo adaptador `spatial_conditioning` do modo espacial manual,
+`--previs3d-intergen` usa o InterGen em vez de interpolar as poses). `decupagem_ui.py`: dropdown e
+checkbox no acordeão "Continuidade espacial 3D", chip `Prévia 3D` na trilha de estágios.
+
+**VALIDADO com Blender real** (CPU, sem GPU) na corrida CERCO EM SEUL v2: spec de 25 planos em
+~1s (cache) / render de 3 planos complexos em ~50s (folha `shots/previs_3d.png` + clipe
+`shots/previs_3d.mp4`, Workbench 12 fps), e os 25 planos completos (keyframes, sem clipe) em ~2m20s
+— sem erro em nenhum. `intergen_frames` testado com GPU real (2 prompts, InterGen rodou e o clipe
+de movimento ficou coerente com a coreografia determinística, com aviso de que o InterGen não
+conhece o estado de continuidade — é sugestão de movimento, não a fonte de verdade dos
+quadros-chave). Sondagem em TODAS as 56 corridas existentes no disco (`outputs/`): spec gerado e
+`prepare()` aceito sem erro nas 56.
+
+**Review adversarial (4 lentes independentes, Opus, 444k tokens) achou 6 defeitos reais, todos
+corrigidos e com teste de regressão**:
+- **A — medium/wide cortava o topo da cabeça.** `fit_camera` só recebia as juntas COCO (a mais
+  alta é o centro entre as orelhas); a malha da cabeça vai ~0,18 m acima disso. Medido: 40 de 40
+  casos sintéticos (13 poses × 4 yaws) com o crânio fora do quadro. Corrigido: `_pontos()` inclui
+  um ponto no topo do crânio por personagem.
+- **A — o quadro final "ressuscitava" quem tinha saído de cena.** `state_for_shot` sobrescrevia
+  `present` só pelo enquadramento (`entity_id in active`), ignorando que o evento já tinha marcado
+  `present=False` — no CERCO, o motociclista que "desaparece" (plano 2) continuava visível no
+  quadro final porque o plano aberto lista o resto do elenco como ativo. Corrigido: presença agora
+  é a INTERSEÇÃO (`in active AND already present`); e o `ativos` de plano aberto usa a união
+  início+fim (quem ENTRA no meio do plano também aparece).
+- **B — 5+ pessoas na mesma cena empilhavam no mesmo ponto.** `_anchor()` usava uma contagem como
+  índice de profundidade e não verificava colisão nem com a formação do `motion_plan` (que põe
+  todo mundo no mesmo lado quando não há `screen_sides`). Corrigido: busca em grade (profundidade
+  × os dois lados), com a âncora do motion_plan como primeira candidata, mas só aceita se livre.
+- **B — `interior=""` (cabeçalho híbrido/ausente, ~110 planos nas corridas existentes) virava
+  sempre exterior**, perdendo cabines/cockpits/câmaras estreitas citadas no texto (ex.: Voo 702,
+  DESPERTAR DAS RUNAS). Corrigido: `_resolve_interior()` decide pelo texto quando a flag está
+  vazia — estreito primeiro, depois rua, senão interior comum (mais seguro que exterior).
+- **B — vínculo previs→still de uma corrida anterior sobrevivia** a `--previs3d off`, `--so-spec`,
+  Blender ausente ou "sem planos no nível pedido" — só o caminho "rodou sem `--stills`" no FIM da
+  função limpava. Corrigido: `detach_from_plan` roda no INÍCIO de `run_previs` (antes de qualquer
+  saída antecipada); `--previs3d off` chama `previs_spec --desligar-stills` explicitamente.
+- **C — `_ALTO` casava palavras comuns** ("above the curb", "high-speed chase") e virava tiro
+  para o alto sem alvo elevado no texto. Restrito a termos concretos de posição (window, roof,
+  balcony, sniper, "upper floor/window", "from above").
+
+Testes: `tests/test_previs_spec_20260927.py` (23 casos, incluindo 1 com Blender real atrás de
+`PREVIS_BLENDER_TEST=1`) + os 6 casos de regressão dos achados da review. Suíte inteira: 393
+passando (sem `test_pipeline_smoke`, que sobe o ComfyUI).
+
+**Não incluído**: escolher automaticamente QUANDO usar o previs em vez do still puro (decisão de
+produto, hoje é o operador quem liga `--previs3d`); previs não cobre efeitos (explosão, fogo,
+vidro, fumaça — ficam como nota, "efeitos não representados"); não testado ainda I2V real com o
+still condicionado pelo previs (`--previs3d-stills`) ponta a ponta no LTX/MiniMax — só o mecanismo
+de conexão (mesmo adaptador do modo espacial manual) foi validado.
+
+### 3.136 — `flux-krea`/`flux-kontext` consertados (G:/models nunca estava mapeado) + FLUX.2 Klein em GGUF (2026-09-28)
+
+Pedido do usuário depois de eu levantar, investigando o `.gguf` do FLUX.1-dev, que
+`flux-krea`/`flux-kontext` estavam quebrados: os arquivos que `IMAGE_ENGINES` sempre apontou
+(`flux1-krea-dev_fp8_scaled.safetensors`, `clip_l.safetensors`, `t5xxl_fp8_e4m3fn.safetensors`,
+`ae.safetensors`) existem em `G:/models`, mas **nenhum `extra_model_paths.yaml` mapeava esse
+disco** — o ComfyUI nunca os enxergava. `flux1-kontext-dev.safetensors` nem existia em disco.
+
+**Conserto**: seção nova `g_models` em `ComfyUI/extra_model_paths.yaml`
+(`base_path: G:/models`, `checkpoints`/`diffusion_models`/`unet: .`, `text_encoders: text_encoders`,
+`vae: vae`, `loras: loras`) — resolve `flux-krea` sem baixar nada. `flux1-kontext-dev.safetensors`
+baixado de `black-forest-labs/FLUX.1-Kontext-dev` (gated; a conta já tinha aceito a licença, token
+em `I:/huggingface/token`) para `G:/models/`, mesma convenção.
+
+**FLUX.2 Klein em GGUF** (pedido do usuário, "Klein 2, retificando gguf do klein 2" — o Klein
+2 é o mesmo checkpoint do motor `flux` padrão, `flux-2-klein-9b-fp8.safetensors`, só
+quantizado): baixado `unsloth/FLUX.2-klein-9B-GGUF`, variante `Q8_0` (~10 GB, a mais alta
+qualidade que ainda vale a pena quantizar — fp8 original já é ~9,4 GB, então Q8_0 preserva
+precisão parecida) para `G:/models/flux-2-klein-9b-Q8_0.gguf`.
+
+**Novo motor `--image-engine flux-klein-gguf`** (`generate_storyboards.py`): reaproveita o
+MESMO encoder (`Qwen3-8B-FP8-native-bf16.safetensors`) e a MESMA VAE (`flux2-vae.safetensors`)
+do motor `flux` — só o transformer troca de loader. `detect_architecture` reconhece pelo nome
+(`"klein" in nome and nome.endswith(".gguf")`, checado ANTES do `"flux"` genérico). Grafo novo
+`comfyui_workflows/storyboard_flux_klein_gguf_txt2img.json`: idêntico ao `storyboard_flux_
+txt2img.json`, só o node 1 troca `UNETLoader` (`weight_dtype` fp8) por `UnetLoaderGGUF` (sem
+esse campo — a GGUF já vem quantizada). Os templates de referência de personagem
+(`character_flux_reference.json`/`_dual.json`, compartilhados com o `flux` fp8) recebem o
+mesmo patch de node 1 em runtime, para não duplicar dois arquivos inteiros só por causa de
+um node. `ARCH_MODEL_CONSUMER["flux-klein-gguf"]` = mesmo do `"flux"` (node/slot idênticos);
+condicionamento espacial (`control_bundle`) também liberado para esse motor, mesmo grafo.
+
+Testes (sem GPU): `tests/test_flux_klein_gguf_20260928.py` — detecção pelo nome, template
+idêntico ao `flux` exceto o node 1, LoRA/espacial tratam como `flux`, referência de personagem
+troca o loader corretamente, seção `g_models` existe no `extra_model_paths.yaml`. Suíte
+inteira: 399 passando.
+
+**VALIDADO com GPU real os três motores, um still de cada, 960x544, mesmo prompt (piloto de
+avião, cockpit)**, depois de os downloads terminarem (kontext 23,8 GB, GGUF 9,98 GB — bateu
+com o esperado dos dois):
+
+- `flux-klein-gguf`: carrega inteiro na 3090 sem offload (`full load: True`, ~9,7 GB), **8
+  passos em ~5,3 s** (1,39 it/s) depois do modelo carregado. Imagem coerente com o prompt.
+- `flux-krea`: também carrega inteiro (`full load: True`, ~11,4 GB), **28 passos em ~17,5 s**
+  (1,6 it/s). `g_models` resolveu sozinho `clip_l`/`t5xxl`/`ae.safetensors`/o checkpoint, sem
+  copiar nada manualmente.
+- `flux-kontext`: 253,6 s de ponta a ponta (bf16→fp8 cast em runtime, checkpoint maior, sem
+  medir separado carga vs amostragem) — mais lento que os outros dois, esperado (bf16 grande).
+
+**Achado que explica a lentidão de FLUX.2 Klein na avaliação dos 4 roteiros (28/09, sessão
+anterior)**: os mesmos ~30-70 s/passo vistos ali (contra ~1,4 it/s aqui) batem exatamente com
+GPU/RAM sob pressão -- **não é um problema do motor Klein em si**. Nesta validação a GPU
+estava livre (sem Fish-Speech nem Z-Image residentes); com eles no ar, o mesmo motor Klein já
+tinha caído para 5 minutos por still. Confirma a suspeita já registrada: contenção de
+VRAM/RAM entre motores residentes distorce qualquer medição de velocidade feita com outro
+processo pesado no ar ao mesmo tempo.
+
+### 3.137 — Fish Speech/Z-Image/Qwen-Image-2.1 residentes travavam FLUX antes dos stills (2026-09-28)
+
+Pedido do usuário depois de eu flagrar, rodando o FLUX de verdade nos 4 roteiros de avaliação:
+o mesmo padrão já documentado em §3.132 (render_shots.py, achado 2026-09-22 -- Fish Speech
+residente derrubou um plano LTX de 81,5s para 715,6s, 8,8x mais lento) **também acontecia ANTES
+dos STILLS**, e ninguém cuidava disso. Medido AO VIVO: com o Fish Speech ainda no ar da etapa
+de TTS, passos de FLUX que uma 3090 livre faz em ~5-9s (validado em §3.136) levavam entre 120s
+e 470s, alternando com passos rápidos — contenção de VRAM (Fish Speech ~22 GB + FLUX ~16 GB
+não cabem juntos numa placa de 24,5 GB), não um problema do motor.
+
+**Conserto centralizado**: `gpu_watchdog.STILL_ENGINE_PORTS` (comfyui 8188, zimage 8191,
+qwen21_diffusers 8192, qwen21_comfy 8193, fish_speech 8080 — MiniMax H3/LongCat ficam de fora
+de propósito, só entram no estágio de vídeo) + `free_other_still_servers(keep_port, log=)`,
+que derruba todo mundo da lista MENOS o motor que vai gerar. Chamado no INÍCIO de toda função
+`ensure_server`/`ensure_comfyui_running` que já existia (`generate_storyboards.
+ensure_comfyui_running`, `zimage_backend.ensure_server`, `qwen_image21_backend.ensure_server`,
+`qwen_image21_comfy_backend.ensure_server`) — sem novo ponto de chamada no `run_decupagem`;
+os quatro pontos que já subiam um servidor de still agora limpam os outros primeiro,
+incondicionalmente (não só no boot a frio), barato quando não há nada para derrubar.
+
+Efeito colateral esperado e aceito: como o Fish Speech é derrubado ANTES dos stills (não só
+antes do vídeo), uma corrida que precise de TTS de novo depois dos stills (não é o caso do
+fluxo normal, que faz TTS uma vez só antes da decupagem) precisaria subir o servidor de novo
+— mesmo aviso que já existia para o estágio de vídeo.
+
+Testes: `tests/test_free_other_still_servers_20260928.py` (5 casos: derruba tudo menos o
+guardado, sem `keep_port` derruba tudo, MiniMax/LongCat de fora, os dois pontos de entrada
+chamam a limpeza). Suíte inteira: 404 passando.
+
+### 3.138 — Folha de personagem 4-ângulos+close via checkpoint "convrot" dedicado (2026-09-28, GPU pendente)
+
+Pedido do usuário: planejar a integração de um workflow ComfyUI pronto ("Qwen Image 2.1 Image
+Edit Viggle 4-Step.json", que ele baixou em `Downloads/`) que gera uma folha de personagem
+inteira — 4 ângulos de corpo (frente, 3/4, lado, costas) + 1 close de rosto — numa geração só, a
+partir de 1-3 fotos de referência, usando um checkpoint int8 dedicado
+(`qwen_image_2.1_int8_convrot.safetensors`) + LoRA "Viggle Turbo 4-step" (4 passos, cfg 1,
+euler/simple).
+
+**Verificação de compatibilidade (antes de escrever qualquer código)**: comparado nó a nó contra
+o ComfyUI 0.37.0 já instalado em `Qwen-Image-2.1/ComfyUI` (o mesmo que já roda o motor GGUF
+Q4_K_M em produção, `qwen_image21_comfy_backend.py`). Achado importante: havia DOIS arquivos de
+workflow parecidos nos `Downloads/` do usuário com nomes diferentes — "Qwen+Edit2509多角度分镜
+直出.json" usa nós de terceiro (`TextEncodeQwenImageEditPlusAdvance_lrzjason`, `easy promptLine`,
+NÃO instalados aqui) e não serve; "Qwen Image 2.1 Image Edit Viggle 4-Step.json" é o que usa
+exatamente os nós já confirmados como CORE do ComfyUI 0.37.0
+(`TextEncodeQwenImage21`, `QwenImage21Cache`, `ModelAttentionBackend`, `ResolutionSelector`,
+`ImageScaleToTotalPixels`, `ComfyMathExpression`, `ComfySwitchNode` — lidos direto do
+`define_schema()` de cada um em `comfy_extras/nodes_qwen.py`, `nodes_model_advanced.py`,
+`nodes_resolution.py`, `nodes_math.py`, `nodes_logic.py`). **Esse segundo arquivo é o que foi
+integrado.**
+
+Text encoder (`qwen3vl_8b_int8_convrot.safetensors`), VAE (`qwen_image_2.1_vae_bf16.safetensors`)
+e o LoRA Viggle Turbo já estavam em disco (usados pelo motor GGUF); só faltava o UNET
+`qwen_image_2.1_int8_convrot.safetensors` (7,26 GB, `Comfy-Org/Qwen-Image-2.1`, ungated —
+primeira tentativa de path errou com `split_files/diffusion_models/...`, o caminho real no repo
+é `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` direto).
+
+**Achado de arquitetura**: quase toda a capacidade já existia em
+`qwen_image21_comfy_backend.build_workflow()`/`generate()` (o motor GGUF em produção usa o
+MESMO `TextEncodeQwenImage21` com referências nomeadas e já aceita `lora=(nome, força)`). Só
+faltavam 3 coisas, todas adicionadas com parâmetros opcionais (compatibilidade retroativa
+preservada, testada em `test_unet_gguf_true_e_o_padrao_e_mantem_compatibilidade`):
+
+- `unet_gguf: bool = True` — quando `False`, troca `UnetLoaderGGUF` por `UNETLoader` simples.
+  O checkpoint "convrot" é um safetensors int8 comum, NÃO GGUF — usar o loader errado
+  falharia silenciosamente ou nem carregaria.
+- `attention_backend: str | None` — insere `ModelAttentionBackend` (ex.: "comfy kitchen
+  attention") na cadeia do model, opcional.
+- `model_sampling_flux: tuple[float, float] | None` — insere `ModelSamplingFlux` (max_shift,
+  base_shift, width, height) antes do `QwenImage21Cache`; o workflow original do Viggle Turbo
+  usa isso para casar o shift do sampler com a resolução alvo, importante para a LoRA de 4
+  passos não sair menos nítida.
+
+Nova função de conveniência `generate_character_sheet_convrot(reference_images, out_path,
+outfit=None, ...)`: monta o prompt fixo de 4-ângulos+close (do workflow original), limita a 3
+referências, e chama `generate()` com `unet=CONVROT_UNET`, `unet_gguf=False`,
+`lora=(VIGGLE_TURBO_LORA, 1.0)`, `model_sampling_flux=(0.6935483870967742, 0.5)` (valores do
+workflow original, calibrados para ~1536px), `cfg=1.0`, 4 passos.
+
+**Custo esperado** (segundo o próprio workflow, não medido nesta máquina ainda): ~7,3-7,6 GB de
+VRAM, bem mais leve que o GGUF Q4_K_M já em produção (~18 GB, §3.101) — plausível já que o
+checkpoint int8 "convrot" é dedicado a isso.
+
+**VALIDADO com GPU real em 2026-09-29** assim que o download terminou (achado à parte: o
+`hf_hub_download` com `filename="diffusion_models/..."` e `local_dir=".../diffusion_models"`
+salvou numa subpasta duplicada `diffusion_models/diffusion_models/...` — o `filename` do repo já
+inclui o prefixo da pasta; corrigido movendo o arquivo um nível acima). Chamada real via
+`generate_character_sheet_convrot([ref], out_path)` com UMA referência (MIN-JUN, still de Cerco
+em Seul, o de melhor consistência facial medida naquela corrida, 0,702). **Resultado: sucesso
+de primeira, 102,7s com o servidor já carregado** (boot frio do ComfyUI-Qwen levou mais que os
+180s do `boot_timeout` de `ensure_server` — não é erro, só a 3090 subindo do zero com 24 GB
+livres; a segunda chamada, servidor já de pé, foi rápida). Qualidade: identidade muito
+consistente nas 5 vistas (mesmo rosto, mesmo cabelo em todos os ângulos), e o modelo preservou
+sozinho um prop da referência (walkie-talkie no ombro) em todas as 5 vistas sem estar pedido no
+prompt — sinal de que o mecanismo de referência do `TextEncodeQwenImage21` carrega detalhe fino,
+não só identidade facial. Amostra única (1 personagem, 1 seed); não é prova estatística, mas é
+uma validação de ponta a ponta real, GPU incluída.
+
+Testes sem GPU: `tests/test_qwen21_multiangle_convrot_20260928.py` (8 casos: `UNETLoader` vs
+`UnetLoaderGGUF`, encadeamento LoRA→attention→sampling→cache, referências `image_1..3`, cfg
+customizável, `generate_character_sheet_convrot` limita a 3 refs e monta o prompt certo). Suíte
+inteira: 390 passando, 1 skip (sem regressão).
+
+**Não decidido ainda**: como essa função se encaixa no `character_sheet.py` (substituto direto
+de `generate_turnaround_sheets()`, ou motor alternativo escolhível?) — mais leve que o GGUF
+Q4_K_M já em produção (não medido VRAM exata nesta corrida, mas o checkpoint é dedicado int8, ao
+contrário do GGUF genérico) e mais rápido (4 passos fixos contra os passos do motor atual), mas
+só testado com 1 referência e 1 personagem -- falta testar com 2-3 referências reais (o caso que
+mais importa: parceiro/cenário) e comparar consistência contra o caminho GGUF já validado antes
+de decidir se vira o padrão.
+
+### 3.139 — REENTRY WINDOW (roteiro sci-fi, MiniMax): 3 achados reais + 1 lacuna estrutural, PAUSADO (2026-09-29)
+
+Pedido do usuário: gerar a cena "REENTRY WINDOW" (roteiro em prosa, 3 personagens nomeados —
+ANA, GIANA, MIDORI — com fotos reais de referência) no MiniMax e no LTX 2.5, até o vídeo final.
+Rodada longa de diagnóstico e correção; ao final, achado estrutural novo levou a **pausar** a
+produção (decisão do usuário) em vez de seguir corrigindo às cegas.
+
+**Achado 1 — prompt da decupagem por PLANO nunca tinha âncora de fotorrealismo** (diferente do
+prompt da UI screenplay por CENA, que já tinha desde 2026-08-10). Vocabulário técnico sci-fi
+("amber warning bars", nome da nave, "countdown numerals") empurrou o FLUX pra estética de
+jogo/anime mesmo sem o roteiro pedir estilo nenhum. Corrigido reforçando
+`generate_storyboards.py::build_prompt()` e adicionando a MESMA âncora (câmera/lente real,
+negação explícita de ilustração/anime/concept art/video game render) em
+`shot_plan.py::_storyboard_prompt()` — o caminho realmente usado por `render_shots.py`
+(`shot["storyboard_prompt"]`), que nunca teve essa defesa.
+
+**Achado 2 — causa raiz do estilo contaminado**: `prose_to_screenplay.py` tinha um EXEMPLO de
+sintaxe no prompt do LLM (`ESTILO VISUAL: polished hand-drawn cel animation, sharp ink lines`)
+que o `qwen2.5:32b-instruct-q4_K_M` copiou literalmente para um roteiro que nunca mencionou
+nenhum meio visual — a instrução dizia "se o texto disser o meio, escreva ASSIM" mas o exemplo
+era tentador demais e virou default de fato. Corrigida a instrução (deixa explícito que é só
+sintaxe, nunca copiar por padrão) + guard determinístico em
+`parse_screenplay.py::extract_art_direction()` que descarta o valor extraído se bater
+EXATAMENTE (case-insensitive) com esse texto de exemplo. Medido: com o "cel animation" vazando,
+a consistência ArcFace contra as fotos reais dos atores caiu pra quase zero (0,00-0,15) em
+TODOS os personagens — rosto ilustrado não bate contra foto real, não é bug de identidade, é
+bug de meio.
+
+**Achado 3 — identity_match do Qwen3-VL contra foto real de ator é mais rígido que contra
+referência gerada pelo FLUX**: mesmo depois do fix de estilo (still fotorrealista de verdade,
+ArcFace batendo bem contra as fotos reais), o gate semântico do Qwen3-VL continuou reprovando a
+maioria dos planos por `identity_match`/`subjects_match`. Duas decisões do usuário em resposta:
+
+- `--gate-max-regen-fraction` (novo, `run_decupagem.py`, padrão 0,4 preservado): o limite de 40%
+  de reprovação que trava QUALQUER rodada de retry (`gate_retry.py`, existia hardcoded sem CLI)
+  impedia até a PRIMEIRA tentativa de regenerar com seed nova quando a reprovação inicial já
+  passava de 40% — era exatamente o caso (65/71 = 91%). Subir pra 1,0 libera as rodadas de retry
+  mesmo com reprovação inicial alta; útil quando a causa é reprovação genuína que só precisa de
+  mais tentativas de seed, não gate mal calibrado.
+- Trocar as fotos reais dos 3 atores por character-sheet gerado via FLUX (mesmo mecanismo já
+  usado nos outros roteiros da sessão) — fotos reais preservadas em `actors/*_old.*`. Resultado
+  medido: consistência ArcFace foi de quase zero pra 0,508 médio (26/27 dentro do limiar) — mas
+  o gate Qwen3-VL continuou reprovando a maioria mesmo assim (rodadas 1/2/3: 42→36→37
+  reprovados, estagnado), confirmando que a reprovação NÃO era mais de identidade facial.
+
+**Achado 4 (o que fez pausar) — a nave "Kestrel" nunca teve referência visual fixa, só os
+personagens têm.** Inspeção manual dos stills pelo usuário achou uma lista de alucinações
+graves e recorrentes: a nave muda de modelo plano a plano, vira um avião estacionado num
+hangar, aparece uma mão segurando a espaçonave como brinquedo (perda de escala sem âncora
+visual do objeto), uma águia dentro/fora da nave, cockpit sem ninguém sentado num plano que
+devia ter a Ana pilotando, uma mão segurando uma prancheta do nada, personagem duplicado no
+mesmo still, e a comissária envelhecida num plano de solo. Diagnóstico: o mecanismo de
+consistência deste pipeline (`character_sheet.py`/`import_reference.py`, referência nomeada por
+`<image1> is X.`) existe SÓ para PERSONAGENS nomeados no cast — não há equivalente para
+objetos/veículos que aparecem em múltiplos planos sem serem "personagem". Sem uma imagem-âncora
+da nave, cada still a reinventa do zero a partir só de texto, e retry de seed não resolve
+isso — é falta de mecanismo, não azar de amostragem.
+
+**Decisão do usuário: pausar a produção do REENTRY WINDOW por hoje** em vez de tentar mais um
+fix (as opções discutidas: gerar uma referência de nave via FLUX e estender o mecanismo de
+referência nomeada pra objetos, ou simplificar a descrição da nave no roteiro). Nenhuma das
+duas foi implementada ainda — fica para retomar depois. `outputs/decupagem/
+20260929_REENTRY_MINIMAX` parado no meio da rodada 3/3 de retry do gate; `outputs/decupagem/
+20260929_REENTRY_LTX25` nunca chegou a rodar (dependia do MiniMax terminar primeiro, pipeline
+sequencial por causa da mesma GPU).
+
+**Efeito colateral, também a pedido do usuário — custo do gate reduzido para daqui em diante**:
+a chamada de DECISÃO do gate (`visual_continuity_audit.py`, `_evaluation_prompt`) nunca recebeu
+imagem, só o JSON de percepção + o contrato do plano em texto puro — rodava no mesmo VLM de 30B
+da percepção à toa. `DEFAULT_MODEL` trocado para `qwen2.5:32b-instruct-q4_K_M` (texto rápido,
+já validado nesta máquina); `DEFAULT_PERCEPTION_MODEL` continua `qwen3-vl:30b` (a única chamada
+que precisa ver a imagem). Mesma troca refletida nos defaults de `--visual-audit-model`/
+`--visual-perception-model` em `run_decupagem.py`. Não validado em produção ainda (a corrida do
+REENTRY WINDOW já estava em andamento quando o fix entrou — vale a partir da próxima corrida
+que passar pelo gate).
+
+Testes novos: `tests/test_estilo_visual_exemplo_copiado_20260929.py` (4 casos, guard do exemplo
+literal), `tests/test_gate_decision_model_tier_20260929.py` (5 casos, incluindo trava de que a
+chamada de decisão nunca recebe imagem). Suíte inteira: 399 passando, sem regressão. Nada
+commitado ainda.
+
+### 3.140 — Migração do catálogo Ollama pro W:, fidelidade de descritor por atributo, e avaliação do GLM-4V-9B (2026-09-29)
+
+**Migração do Ollama para W:.** Pedido do usuário para liberar espaço/organizar. Achado
+importante no meio do processo: `G:\ollama\models` (162 GB, documentado no cabeçalho deste
+arquivo como o catálogo de produção) **não é** o catálogo realmente usado pelo app desktop —
+é um catálogo separado e não relacionado (qwen3:30b, deepseek-coder-v2, phi4, gemma4-32k, qwq:32b
+— nada dos modelos citados na seção "Ollama" abaixo). O catálogo de produção de verdade
+(qwen3-vl:30b, qwen2.5vl:7b, qwen2.5:32b-instruct-q4_K_M, qwen3.6-35b-a3b:latest, gemma4:latest,
+mistral-nemo:12b-instruct-2407-q4_K_M — 80 GB) vive em `C:\Users\user\.ollama\models`, o diretório
+DEFAULT do app desktop quando nenhuma variável `OLLAMA_MODELS` é passada — confirmado lendo
+`C:\Users\user\AppData\Local\Ollama\server.log`. Primeira tentativa de migração copiou o
+catálogo ERRADO (de `G:`); corrigido copiando de `C:\Users\user\.ollama\models` para
+`W:\ollama\models` (robocopy, ~80 GB, poucos minutos — discos rápidos). `OLLAMA_MODELS` setado
+via `setx` (persistente) e o servidor validado servindo do W: com o catálogo certo
+(`ollama serve` com `OLLAMA_MODELS=W:\ollama\models` explícito no ambiente do processo, já que
+`setx` não propaga pra sessão já aberta). `G:\ollama\models` mantido intacto (catálogo não
+relacionado, não é backup de nada) e `C:\Users\user\.ollama\models` também mantido como backup
+do catálogo real até confirmação do usuário.
+
+**Fidelidade de descritor por atributo (`cast_characters.py`).** Consertado o limite já
+documentado em `_enforce_descriptor_fidelity`: sobreposição geral de palavras (limiar 20%) pega
+invenção total mas não pega troca PONTUAL de um atributo decisivo (comprimento/cor de cabelo, cor
+de roupa) quando o resto do vocabulário compartilhado (ambos "suit"/"flight"/"chest") já infla a
+taxa acima do limiar — o caso real da ANA teve 30% de sobreposição com "long"→"short" e
+"charcoal"→"dark-blue" simultâneos. Novas funções `_hair_length_bucket`, `_color_near`,
+`_garment_color`, `_attribute_contradiction` comparam CATEGORIA POR CATEGORIA em vez de só
+contar palavras em comum; substring-safe ("brown" dentro de "dark-brown" não conta como
+contradição). BUGFIX no processo: a primeira versão de `_color_near` pegava a cor mais PRÓXIMA
+por ORDEM DA LISTA fixa em vez de por PROXIMIDADE POSICIONAL — "dark-blue jacket" antecedido de
+"black hair" pegava "black" (a cor do substantivo anterior) em vez de "blue"; corrigido pra pegar
+a ocorrência de cor com maior índice na janela (mais perto do substantivo-alvo). Achado pelo
+próprio teste de regressão (`test_paraphrase_sem_contradicao_nao_e_trocada`) antes de virar bug
+de produção. Testes: `tests/test_descriptor_fidelity_attribute_20260929.py` (7 casos).
+
+**Validação end-to-end (`20260929_REENTRY_WINDOW_QA`, --ate plano, sem GPU de imagem).** Rodando
+de novo o MESMO texto do REENTRY WINDOW com os fixes de hoje (fidelidade de atributo +
+reforço de instrução contra empilhar falas de locais diferentes num cabeçalho só, ver §3.139):
+os 3 descritores saíram EXATAMENTE fiéis ao roteiro (ANA "long dark hair... charcoal", GIANA
+"short brown hair... slate-gray", MIDORI "long, straight dark hair... forest-green" — zero
+contradição desta vez). A atribuição de cena melhorou mas não ficou perfeita: em vez do antigo
+`EXT. UPPER ATMOSPHERE` puro (que fazia os 3 closes finais renderizarem contra céu), o LLM desta
+vez criou `INT. GROUND CONTROL, THEN EXTERIOR` — um único cabeçalho combinado que reconhece a
+mistura em vez de errar com confiança; como começa com "INT", `_look_e_interior()` classifica
+corretamente como interior. Ainda não separa de fato a cabine da Ana/Giana do controle da
+Midori, mas não é mais uma regressão visual como antes.
+
+**Achado extra, fora do escopo original**: `shot_plan.json` do plano 41 (medium_2, ANA+GIANA)
+tem `subject: "ANA"` mas `co_subject: None` — a decupagem nunca registrou a Giana como segunda
+pessoa apesar do enquadramento de dois. Consequência encontrada auditando o proprio relatorio do
+gate: `_reference_paths()` só passa a referência do `co_subject` pro gate quando ele existe no
+shot_plan — como não existia aqui, o gate comparou identidade contra UMA referência só (ANA) e
+nunca verificou a Giana, então "aprovar" esse plano não prova que a Giana está certa. Não
+corrigido ainda (fora do escopo desta rodada) — fica registrado para quando `shot_plan.py`'s
+lógica de `co_subject` para "medium_2"/planos de dois for revisada.
+
+**Avaliação do GLM-4V-9B como candidato a substituir/complementar `qwen3-vl:30b` na percepção
+do gate.** Baixado pro W: (27,8 GB, THUDM/glm-4v-9b). Não coube em bf16 na 3090 (pesos sozinhos
+~27 GB, sem sobrar nada pra ativação) — funcionou em 4-bit via `bitsandbytes` (já instalado no
+venv), 11,6 GB de VRAM no pico, ~19-20s por chamada. Duas armadilhas de compatibilidade do
+código customizado (`trust_remote_code`) contornadas: `device_map` não é respeitado de forma
+confiável (precisa `.to(DEVICE)` explícito ou restringir com `CUDA_VISIBLE_DEVICES` em vez de
+depender do mapeamento automático) e falta `tiktoken` (instalado sem dependências, dependência
+leve/segura). Testado com o prompt de percepção REAL do gate (`_perception_prompt`, neutro,
+sem vazar o resultado esperado):
+
+- **Sem referência (plano estabelecedor)**: excelente — JSON perfeitamente válido, identificou
+  "Owls" corretamente no caso da águia/falcão no cockpit (mesmo caso que travou o gate hoje),
+  zero erro de parsing. Comparável ou melhor que o qwen3-vl:30b nesse quesito específico — a
+  produção real teve 18-25% de respostas vazias do qwen3-vl no mesmo tipo de plano.
+- **Com referência (comparação de identidade)**: **limite arquitetural, não contornável.**
+  `tokenization_chatglm.py` tem `assert input_image is None, "Multiple images are not supported"`
+  -- o próprio código do modelo proíbe mais de uma imagem por conversa. Uma tentativa de
+  contornar concatenando still+referência numa imagem só (lado a lado) confundiu o modelo (leu
+  como "2 imagens-alvo" em vez de "1 alvo + 1 referência"), produzindo `identity_matches: [true,
+  true]` sem comparação real nenhuma — não é um resultado válido, é falha do workaround, mas
+  confirma que não há solução limpa para este checkpoint especificamente.
+
+**Veredito**: GLM-4V-9B é um candidato real para a chamada de PERCEPÇÃO em planos SEM referência
+de identidade (metade a menos de VRAM, mais rápido, JSON mais confiável na amostra testada), mas
+não serve para os planos QUE PRECISAM de comparação de identidade (a maioria dos closes de
+personagem) neste checkpoint específico. Trocar exigiria (a) um checkpoint mais novo com
+multi-imagem nativo (ex. GLM-4.1V, não testado) ou (b) uma arquitetura híbrida (GLM-4V só para
+planos sem referência, qwen3-vl continua para os com referência) -- decisão de produto em
+aberto, nada implementado em produção ainda. `W:\vision_models\glm-4v-9b` fica em disco para
+teste futuro. `ollama pull qwen2.5vl:3b` (outro candidato pedido pelo usuário) ainda não
+executado.
+
+**Adendo — GLM-4.1V-9B-Thinking valida multi-imagem de verdade.** Pedido do usuário: buscar
+uma versão mais nova do GLM que resolvesse o limite de imagem única do GLM-4V-9B. Achado:
+`zai-org/GLM-4.1V-9B-Thinking` — arquitetura NOVA, nativa do `transformers` (classe
+`Glm4vForConditionalGeneration`, sem `trust_remote_code`), mensagem no formato moderno de
+lista de conteúdo (`{"type": "image", ...}` repetido por imagem) que os VLMs multi-imagem
+atuais usam. Exige `transformers>=4.57.1` — **não instalado no `.venv` principal** (arriscado
+demais mexer na versão do transformers do venv de produção, 1305 arquivos dependem dele);
+criado um venv ISOLADO em `W:\vision_models\glm41v_env` (via `uv venv`) só para este teste,
+mesmo padrão das outras instalações separadas do projeto (Qwen-Image-2.1, Z-Image etc.).
+Baixada a versão já quantizada em 4-bit pronta (`Rainnighttram/GLM-4.1V-9B-Thinking-bnb-4bit`,
+7,2 GB — bem menor que baixar os 20,6 GB cheios e quantizar depois) pro
+`W:\vision_models\glm-4.1v-9b-thinking-4bit`.
+
+**VALIDADO com GPU real**: testado com o prompt de percepção REAL do gate
+(`_perception_prompt`), 2 imagens de verdade (still-alvo com 2 pessoas + 1 retrato de
+referência) passadas como entradas SEPARADAS na lista de conteúdo — resultado
+`target_images_seen: 1, reference_images_seen: 1` (distinguiu certo, ao contrário do
+GLM-4V-9B antigo, que só aceita 1 imagem por conversa e cujo workaround de concatenar lado a
+lado confundia o modelo) e `identity_matches: [true]` batendo com a realidade (a Ana estava
+mesmo na referência usada). Custo: 7,7 GB de VRAM no pico (menos que o GLM-4V-9B antigo, e um
+terço do qwen3-vl:30b), mas a variante "Thinking" gasta muitos tokens de raciocínio antes de
+responder (precisou de `max_new_tokens=3000` pra não cortar a resposta na primeira tentativa,
+1200 não bastou) — mais lento que o esperado pelo tamanho do modelo. Ainda não testado: uma
+variante SEM "Thinking" (deve existir, mais rápida) nem o caso de identidade que deveria dar
+`false` (só testamos um caso que deveria dar `true`). Nenhuma integração em produção ainda —
+GPU real confirma que o caminho é viável, decisão de arquitetura (substituir ou complementar
+qwen3-vl:30b) continua em aberto.
+
+### 3.141 — Validação pós-parse em texto: shot_plan.json contra o roteiro-fonte, com correção automática de descritor (2026-09-29)
+
+Pedido do usuário depois da sequência de bugs do REENTRY WINDOW (§3.139): "Eu possuo uma
+validação pós parse? Ainda na etapa texto?" — a resposta foi não: as defesas existentes eram
+pontuais e espalhadas (fidelidade de UM descritor contra o roteiro em `cast_characters.py`,
+"dado lido vence palpite" só pra local/estilo em `parse_screenplay.py`, completude do
+roteiro-FONTE em si em `screenplay_gaps.py`) — nenhuma comparava o `shot_plan.json` INTEIRO
+(cenas, personagens, falas, locais) contra o texto original antes de gastar GPU nos stills.
+Os dois bugs reais do REENTRY WINDOW (fala colada em cabeçalho de cena errado; exemplo de
+estilo copiado literalmente) eram ambos detectáveis em texto puro, sem nenhuma imagem — só
+não havia nada olhando.
+
+**Novo módulo `script_pipeline/text_validation.py`**, novo estágio `[V validação de texto]`
+em `run_decupagem.py` (entre `[M movimento]`/previs e o unload do Ollama antes do character-
+sheet — roda com o LLM ainda quente, sem custo de recarregar). Novo `--text-validation
+{relatorio,bloquear,off}` (padrão `relatorio`, mesmo padrão de `--lacunas`) e
+`--text-validation-sem-llm`.
+
+**Checagens determinísticas (sempre, sem modelo):**
+- Todo personagem do `cast.json` aparece literalmente no roteiro-fonte.
+- Toda fala (`quote`) do `shot_plan.json` bate com uma fala do roteiro-fonte (normalizado,
+  janela das 6 primeiras palavras) — pega fala reescrita/alucinada pelo enriquecimento.
+- Todo local do `shot_plan.json` tem sobreposição lexical mínima com o roteiro-fonte — pega
+  local inventado na reestruturação.
+
+**Correção automática, não só relatório (pedido explícito do usuário: "essa etapa deve
+corrigir os erros detectados... os descritores devem estar filtrados/corretos prontos para
+geração")**: `fix_descriptors()` compara o `descriptor`/`co_descriptor` de CADA plano contra
+o canônico em `cast.json` (que já passou por `_enforce_descriptor_fidelity`, fiel ao
+roteiro) — qualquer divergência é SOBRESCRITA pelo canônico, e o texto antigo é trocado
+também dentro de `storyboard_prompt`/`video_prompt` (onde tinha sido colado literalmente ao
+montar o prompt), com o `shot_plan.json` REGRAVADO em disco. Diferente das outras checagens
+(que só relatam), esta é a única com confiança suficiente pra corrigir sozinha: o cast.json
+já é a fonte de verdade fidelidade-checada, então "sincronizar todo plano com ele" não é
+palpite, é aplicar uma correção já decidida em outro lugar.
+
+**Checagem semântica opcional por LLM** (`--engine`, uma chamada por cena via o mesmo
+`_call_ollama` compartilhado de `story_structure.py`): aponta objeto/personagem/local que
+aparece no plano mas não no texto-fonte, ou evento perdido — sempre marcado como sugestão
+inferida, nunca reescreve nada (confiança baixa demais pra corrigir sozinho, ao contrário do
+descritor).
+
+**Pré-requisito também novo**: `run_decupagem.py` agora copia o roteiro-FONTE original
+(`args.script`) para `parse/screenplay_original.txt` na primeira execução — antes disso só o
+texto JÁ reestruturado por LLM (`screenplay_auto.txt`) ficava salvo, que é exatamente onde os
+bugs de reestruturação podem já ter entrado; comparar contra ele mascararia o próprio
+problema que motivou esta etapa. Corridas antigas (sem o arquivo original salvo) caem para
+`screenplay_auto.txt` com aviso explícito (`fonte_confiavel: false`) de que a comparação é
+mais fraca.
+
+Testado contra `20260929_REENTRY_WINDOW_QA` (já com os fixes de hoje aplicados): 0
+crítica/atenção/info, 0 correção necessária — confirma que os descritores já estavam
+corretos, consistente com a checagem manual feita antes. Testes:
+`tests/test_text_validation_20260929.py` (8 casos, incluindo um end-to-end que grava um
+`shot_plan.json` com descritor divergente forçado, roda `audit()`, e confirma que o ARQUIVO
+em disco saiu corrigido, não só o objeto em memória). Suíte inteira: 414 passando, sem
+regressão. Nada commitado ainda.

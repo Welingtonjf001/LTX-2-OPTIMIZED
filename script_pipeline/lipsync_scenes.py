@@ -22,6 +22,26 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+def _mux_tts(video: str, wav: str, out: Path, log) -> str:
+    """Clipe de fala que ficou SEM lip-sync ainda precisa da fala do TTS.
+
+    MEDIDO 2026-09-27 (CERCO EM SEUL, plano 9): LatentSync e Wav2Lip falharam
+    (rosto nao detectado) e o clipe cru do LTX entrou com o audio que o proprio
+    modelo gerou -- a fala do roteiro sumiu sem aviso. Troca so a faixa de audio
+    pelo WAV do TTS; o video fica intacto. Em falha, devolve o clipe original."""
+    import subprocess
+    cmd = ["C:/ffmpeg/bin/ffmpeg.exe", "-y", "-loglevel", "error", "-i", video, "-i", wav,
+           "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-af", "apad",
+           "-shortest", str(out)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        log(f"  fala do TTS muxada sobre o clipe sem lip-sync -> {out.name}")
+        return str(out)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        log(f"  aviso: nao consegui muxar a fala do TTS ({exc}); clipe segue com o audio do modelo")
+        return video
+
+
 def _load_clips(run_dir: Path) -> list[dict]:
     clips_path = run_dir / "scenes" / "clips.json"
     if not clips_path.exists():
@@ -180,7 +200,9 @@ def main(argv=None) -> int:
         if faces == 0:
             log(f"{clip['id']}: nenhum rosto detectavel no clipe (falante fora do quadro); "
                 "lip-sync PULADO -- regenere o plano (cobertura) em vez de sincronizar o vazio.")
-            synced_manifest.append({**clip, "final_video_path": clip["video_path"],
+            muxado = _mux_tts(clip["video_path"], clip["audio_path"],
+                              lipsync_dir / f"{clip['id']}_tts.mp4", log)
+            synced_manifest.append({**clip, "final_video_path": muxado,
                                     "lipsync_applied": False, "lipsync_skipped": "no_face"})
             continue
 
@@ -196,7 +218,9 @@ def main(argv=None) -> int:
                 clip["video_path"], clip["audio_path"], str(output_path),
                 work_dir=str(lipsync_dir), engine=args.engine, log=log,
             )
-        final_video = str(result) if result is not None else clip["video_path"]
+        final_video = (str(result) if result is not None else
+                       _mux_tts(clip["video_path"], clip["audio_path"],
+                                lipsync_dir / f"{clip['id']}_tts.mp4", log))
         if result is not None:
             synced_manifest.append({**clip, "final_video_path": final_video, "lipsync_applied": True})
             log(f"{clip['id']}: lip-sync ok -> {result}")

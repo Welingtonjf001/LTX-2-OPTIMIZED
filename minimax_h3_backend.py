@@ -31,6 +31,18 @@ pronto) -- os nos LoadAudio sao criados por job em `build_workflow()`. Use
 combinado com a fala exata no `--prompt`, nomeando o personagem que fala,
 pra o modelo tentar gerar a fala real em vez de inventar uma voz propria.
 
+Quatro flags novas (2026-09-29, achadas num workflow de terceiro -- NUNCA
+testadas aqui, todas opt-in/desligadas por padrao, grafo identico ao de
+antes sem elas): `MINIMAX_H3_VAE_INT8=1` (VAE int8 convrot, ja em disco --
+DIFERENTE da TRT VAE acima, sem o problema de orcamento de VRAM que a
+rejeitou), `MINIMAX_H3_CHUNK_FF=N`/`MINIMAX_H3_LOWVRAM_ATTN=N` (N>1 liga,
+chunking de feedforward/atencao pra reduzir pico de VRAM sem mudar a
+matematica), `MINIMAX_H3_SHIFT_VIDEO=X`/`MINIMAX_H3_SHIFT_AUDIO=X` (liga
+so se pelo menos uma for setada -- agendamento de ruido separado por
+modalidade), `MINIMAX_H3_BLOCK_SPARSE_ATTN=1` (acelerador de atencao por
+blocos, SLA por padrao -- nota do workflow de origem: "melhor com LoRAs
+LightX2V", que e a turbo ja padrao aqui).
+
 `generate_longtake()` (2026-09-24, MEMORIAL 3.117): segundo caminho de
 geracao, PARALELO ao `generate()` acima -- planos "long take" costurados por
 CONTEXTO EM LATENTE via o custom node `comfyui-easy-media`
@@ -224,6 +236,59 @@ SAGEATTN_ENABLED = os.environ.get("MINIMAX_H3_SAGEATTN", "0").strip() in ("1", "
 CONTROLNET_WEIGHT_FILE = os.environ.get(
     "MINIMAX_H3_CONTROLNET_WEIGHT",
     "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors")
+
+# VAE de video int8 convrot (Kijai) -- alternativa a fp16 oficial do workflow
+# (`minimax_h3_video_vae_fp16.safetensors`), achada num workflow de terceiro
+# (`W:\...\ComfyUI_workflows`, 2026-09-29) com a nota "much faster than
+# default". DIFERENTE da VAE TensorRT (`MINIMAX_H3_TRT_VAE`, acima) -- essa e
+# so quantizacao int8 do peso, sem o problema de orcamento de VRAM reservado
+# pelo tamanho do engine que fez a TRT ser rejeitada. Arquivo ja presente em
+# disco (2,8 GB) mas NUNCA testado aqui -- opt-in, default DESLIGADO. Se
+# `MINIMAX_H3_TRT_VAE=1` tambem estiver ligado, TRT vence (troca o node
+# inteiro, ver abaixo).
+VAE_INT8_CONVROT = os.environ.get("MINIMAX_H3_VAE_INT8", "0").strip() in ("1", "true", "True")
+VAE_INT8_CONVROT_FILE = os.environ.get(
+    "MINIMAX_H3_VAE_INT8_FILE", "minimax_h3_video_vae_int8_convrot.safetensors")
+
+# Chunking de feedforward e de atencao (ComfyUI-KJNodes, `MiniMaxChunkFeedForward`/
+# `MiniMaxLowVRAMAttention`) -- reduz VRAM de PICO sem mudar a matematica
+# (saida identica ao modelo sem patch, por design dos dois nos: feedforward
+# fatiado no eixo de tokens, atencao fatiada por grupo de heads). Achados no
+# mesmo workflow de terceiro citado acima; NUNCA testados aqui -- opt-in,
+# default DESLIGADO (`chunks`/`head_chunks` <= 1 desliga cada um
+# independentemente). Uteis se um plano/take maior que o normal estourar VRAM
+# antes mesmo do offload entrar em acao.
+CHUNK_FF_CHUNKS = int(os.environ.get("MINIMAX_H3_CHUNK_FF", "1"))
+LOWVRAM_ATTN_HEAD_CHUNKS = int(os.environ.get("MINIMAX_H3_LOWVRAM_ATTN", "1"))
+
+# Sigma shift (`MiniMaxH3SigmaShift`, no nativo do ComfyUI core, ver
+# comfy_extras/nodes_minimax_h3.py) -- controla o agendamento de ruido do
+# video e do audio SEPARADAMENTE (o workflow oficial deste checkout nao tem
+# esse no; usa o shift embutido no proprio checkpoint). Opt-in: so entra na
+# cadeia se pelo menos uma das duas env vars for setada explicitamente --
+# sem elas o grafo fica IDENTICO ao de antes desta flag existir. NUNCA
+# testado aqui; valores default abaixo replicam o exemplo do workflow de
+# terceiro (video=12, audio=6) caso so uma das duas seja setada.
+_shift_video_raw = os.environ.get("MINIMAX_H3_SHIFT_VIDEO")
+_shift_audio_raw = os.environ.get("MINIMAX_H3_SHIFT_AUDIO")
+SIGMA_SHIFT_ENABLED = _shift_video_raw is not None or _shift_audio_raw is not None
+SIGMA_SHIFT_VIDEO = float(_shift_video_raw) if _shift_video_raw is not None else 12.0
+SIGMA_SHIFT_AUDIO = float(_shift_audio_raw) if _shift_audio_raw is not None else 6.0
+
+# Block/Sparse Attention (`BlockSparseAttention`, no nativo do ComfyUI core,
+# ver comfy_extras/nodes_sparse_attention.py) -- acelera a atencao pulando
+# blocos de baixa relevancia por uma seletividade aprendida (SLA/VSA/
+# sol-attn). Achado no mesmo workflow de terceiro; NUNCA testado aqui --
+# opt-in, default DESLIGADO. `selection="sla"` e o valor do exemplo (nota do
+# workflow: "SLA - Better for Lightx2v LoRAs", e a LoRA turbo LightX2V ja e
+# padrao deste modulo). Widget e um DynamicCombo (mesma familia de tipo que
+# `comfy_workflow_tool.convert()` erra ao converter workflows com subgrafo --
+# CLAUDE.md 3.16) -- inofensivo aqui porque o dict e escrito a mao, nunca
+# passa pelo conversor.
+BLOCK_SPARSE_ATTN_ENABLED = os.environ.get("MINIMAX_H3_BLOCK_SPARSE_ATTN", "0").strip() in ("1", "true", "True")
+BLOCK_SPARSE_ATTN_SELECTION = os.environ.get("MINIMAX_H3_BLOCK_SPARSE_SELECTION", "sla")
+BLOCK_SPARSE_ATTN_KEEP_PERCENT = float(os.environ.get("MINIMAX_H3_BLOCK_SPARSE_KEEP_PERCENT", "20"))
+BLOCK_SPARSE_ATTN_START_PERCENT = float(os.environ.get("MINIMAX_H3_BLOCK_SPARSE_START_PERCENT", "0.2"))
 
 _server_proc = None
 _server_log_handle = None
@@ -497,6 +562,9 @@ def base_api() -> dict:
                 "class_type": "MiniMaxH3TRTVAELoader",
                 "inputs": {"decoder": TRT_DECODER_ENGINE, "encoder": TRT_ENCODER_ENGINE},
             }
+        elif VAE_INT8_CONVROT:
+            # So troca o NOME do arquivo -- mesmo VAELoader, mesmas conexoes.
+            api[N_VIDEO_VAE]["inputs"]["vae_name"] = VAE_INT8_CONVROT_FILE
         if REALISM_LORA_ENABLED:
             # Empilhada DEPOIS do switch da turbo ("141", ComfySwitchNode entre
             # UNET cru e UNET+turbo) -- e o mesmo ponto usado no teste isolado
@@ -512,6 +580,39 @@ def base_api() -> dict:
             api["9020"] = {"class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
                            "inputs": {"model": api["126"]["inputs"]["model"]}}
             api["126"]["inputs"]["model"] = ["9020", 0]
+        if CHUNK_FF_CHUNKS > 1:
+            api["9030"] = {"class_type": "MiniMaxChunkFeedForward",
+                           "inputs": {"model": api[N_GUIDER]["inputs"]["model"],
+                                      "chunks": CHUNK_FF_CHUNKS, "seq_threshold": 4096}}
+            api[N_GUIDER]["inputs"]["model"] = ["9030", 0]
+        if LOWVRAM_ATTN_HEAD_CHUNKS > 1:
+            api["9031"] = {"class_type": "MiniMaxLowVRAMAttention",
+                           "inputs": {"model": api[N_GUIDER]["inputs"]["model"],
+                                      "head_chunks": LOWVRAM_ATTN_HEAD_CHUNKS}}
+            api[N_GUIDER]["inputs"]["model"] = ["9031", 0]
+        if SIGMA_SHIFT_ENABLED:
+            api["9032"] = {"class_type": "MiniMaxH3SigmaShift",
+                           "inputs": {"model": api[N_GUIDER]["inputs"]["model"],
+                                      "shift_video": SIGMA_SHIFT_VIDEO,
+                                      "shift_audio": SIGMA_SHIFT_AUDIO}}
+            api[N_GUIDER]["inputs"]["model"] = ["9032", 0]
+        if BLOCK_SPARSE_ATTN_ENABLED:
+            api["9033"] = {
+                "class_type": "BlockSparseAttention",
+                "inputs": {
+                    "model": api[N_GUIDER]["inputs"]["model"],
+                    "selection": BLOCK_SPARSE_ATTN_SELECTION,
+                    "selection.keep_percent": BLOCK_SPARSE_ATTN_KEEP_PERCENT,
+                    "start_percent": BLOCK_SPARSE_ATTN_START_PERCENT,
+                    "end_percent": 1.0,
+                    "dense_blocks": "",
+                    "min_tokens": 12288,
+                    "extra_tokens": 256,
+                    "sink_conditioning": "exact_kv_and_rows",
+                    "verbose": False,
+                },
+            }
+            api[N_GUIDER]["inputs"]["model"] = ["9033", 0]
         _base_api_cache = api
     return json.loads(json.dumps(_base_api_cache))  # copia rasa por job
 

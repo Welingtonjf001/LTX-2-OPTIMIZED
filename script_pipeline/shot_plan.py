@@ -368,16 +368,36 @@ def appearance_only(descriptor: str) -> str:
     return resultado
 
 
+# Apelidos por personagem (cast.json "aliases"), ligados por plan_all. Figurante
+# sem fala e sem nome proprio ("the President", "the motorcycle rider") so vira
+# sujeito reconhecivel por aqui -- sem isto a acao dele caia em insert e o
+# still inventava outra pessoa a cada plano (CERCO EM SEUL, auditoria 2026-09-27).
+ALIASES: dict = {}
+
+
+def _norm_nome(x: str) -> str:
+    return "".join(c for c in (x or "").lower() if c.isalnum())
+
+
+def _padrao_nome(forma: str) -> re.Pattern:
+    """"MEI-LI" casa "Mei-Li", "Mei Li" e "MeiLi", com fronteira de palavra --
+    sem ela o figurante PRESIDENT casava dentro de "presidential" (2026-09-27)."""
+    partes = [re.escape(p) for p in re.split(r"[-\s]+", forma.strip().lower()) if p]
+    return re.compile(r"(?<![a-z0-9])" + r"[-\s]?".join(partes) + r"(?![a-z0-9])")
+
+
+def _cita(texto: str, nome: str) -> bool:
+    alvo = (texto or "").lower()
+    return any(_padrao_nome(f).search(alvo) for f in (nome, *ALIASES.get(nome, [])) if f.strip())
+
+
 def _character_in(texto: str, personagens: list) -> str:
     """Primeiro personagem nomeado no texto de ação, se houver.
 
     Compara sem caixa e sem hífen, porque o cue vem em maiúsculas com hífen
     ("MEI-LI") e a ação escreve como nome próprio ("Mei-Li" ou "Mei Li")."""
-    def norm(x: str) -> str:
-        return "".join(c for c in x.lower() if c.isalnum())
-    alvo = norm(texto or "")
     for nome in personagens:
-        if norm(nome) and norm(nome) in alvo:
+        if _cita(texto, nome):
             return nome
     return ""
 
@@ -393,15 +413,25 @@ def _other_character_in(texto: str, personagens: list, excluir: str) -> str:
     referencia. So retorna nome que aparece EXPLICITAMENTE no texto do plano
     (nao qualquer personagem da cena) -- um plano solo nao ganha referencia
     de sobra so porque a cena tem duas pessoas."""
-    def norm(x: str) -> str:
-        return "".join(c for c in x.lower() if c.isalnum())
-    alvo = norm(texto or "")
-    alvo_excluir = norm(excluir or "")
     for nome in personagens:
-        n = norm(nome)
-        if n and n != alvo_excluir and n in alvo:
+        if nome != excluir and _cita(texto, nome):
             return nome
     return ""
+
+
+# Acao sem sujeito cadastrado: o tamanho do plano sai do CONTEUDO, nao da
+# ausencia de nome. MEDIDO 2026-09-27 (CERCO EM SEUL): "o sedan explode" e "a
+# multidao entra em panico" viravam insert ("tight detail, no face") e o still
+# improvisava um grupo inteiro na escala errada. Insert e so para detalhe de
+# objeto; evento de escala (explosao, multidao, comboio) e plano aberto.
+_EVENTO_AMPLO = re.compile(
+    r"(?<![a-z])(crowd|pedestrians|people|agents|guards|convoy|motorcade|traffic|"
+    r"explod\w*|explosion|fireball|blast|shatter\w*|collaps\w*|smoke|"
+    r"multid[aã]o|pedestres|comboio|explos\w*|fuma[cç]a)(?![a-z])")
+
+
+def _enquadre_sem_sujeito(acao: str) -> str:
+    return "wide" if _EVENTO_AMPLO.search((acao or "").casefold()) else "insert"
 
 
 # Velocidade de fala usada como proxy de duração. ~14 caracteres por segundo é
@@ -509,6 +539,22 @@ def _storyboard_prompt(*, framing: str, angle: str, subject: str, location: str,
         partes.append(cenario)
     if look:
         partes.append(look)
+    # ACHADO 2026-09-29 (REENTRY WINDOW, roteiro sci-fi): este prompt (caminho da
+    # DECUPAGEM por plano, `render_shots.py`) nunca teve ancora de fotorrealismo --
+    # ao contrario do prompt da UI screenplay por cena (`generate_storyboards.
+    # build_prompt()`, que ja tinha um reforco desde 2026-08-10). Vocabulario de
+    # painel/HUD sci-fi ("amber warning bars", nome de nave, "countdown numerals")
+    # empurrou o FLUX pra estetica de jogo/anime mesmo sem nenhum pedido de estilo
+    # no roteiro -- derrubou a consistencia ArcFace pra quase zero em TODOS os
+    # personagens (fotos reais de referencia nao batem contra rosto ilustrado).
+    # MEDIDO: reforcar com referencia de camera/lente real + negacao explicita do
+    # meio resolveu de primeira no plano que travava o gate. Roteiros de tom
+    # realista (Cerco em Seul, Voo 702) nunca bateram nisso por sorte de
+    # vocabulario, nao porque houvesse alguma defesa aqui.
+    partes.append("Shot on a DSLR camera with a fast prime lens, shallow depth of field, real skin "
+                  "texture with visible pores, natural film grain, documentary photojournalism style, "
+                  "photorealistic, live-action movie still, NOT an illustration, NOT anime, NOT concept "
+                  "art, NOT a video game render")
     return ". ".join(partes) + "."
 
 
@@ -608,10 +654,40 @@ def emocao_visivel_fala(emocao: str | None) -> str:
     return ""
 
 
+_EMOCAO_LEVE = {"alegre", "espontanea_entusiasmada", "excitada", "apaixonada", "sensual", "calma"}
+# Genero no look (direcao de arte) OU acao fisica de risco no texto da cena: roteiro sem
+# direcao de arte nao pode perder a regra so porque nao escreveu "suspense".
+_ACAO_TENSA = re.compile(
+    r"a[cç][aã]o|suspense|thriller|action|tens[aã]o|perigo|combate|persegui|"
+    r"explo\w*|tiro|dispar\w*|atira\w*|pistola|arma\b|terroris\w*|atirador|sequestr\w*|"
+    r"shoot\w*|gun\w*|fir(?:es|ing) at|sniper|bomb\w*|chase\w*|pursu\w*|fight\w*|attack\w*|"
+    r"tackl\w*|handcuff\w*|takes? (?:him|her|them|the \w+) down",
+    re.IGNORECASE)
+
+
+def _cena_de_acao(texto: str) -> bool:
+    return bool(_ACAO_TENSA.search(texto or ""))
+
+
+def emocao_para_video(emocao: str | None, *, falando: bool, contexto: str = "") -> str:
+    """Emocao traduzida para o que se VE no video -- regra unica para todo caminho que
+    escreve prompt (shot_plan, story_editor, prompt_polish, render_shots, render_scenes).
+
+    `falando`: versao que nao ocupa a boca (lip-sync). `contexto`: look + texto da cena;
+    em cena de acao, rotulo leve ("alegre", "calma") vira urgencia/esforco -- "alegre"
+    virou sorriso de Ha-eun durante a derrubada do terrorista (CERCO EM SEUL, 2026-09-27)."""
+    visivel = emocao_visivel_fala(emocao) if falando else emocao_visivel(emocao)
+    if _cena_de_acao(contexto) and (emocao or "").strip().lower() in _EMOCAO_LEVE:
+        visivel = ("focused and determined, jaw set, breathing hard, no smile"
+                   + (", speaking clearly" if falando else ""))
+    return visivel
+
+
 def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
                   quote: str | None, subject: str = "", fallback: str = "",
                   emotion: str | None = None, framing: str = "",
-                  speaking: bool = False, co_subject: str = "", co_descriptor: str = "") -> str:
+                  speaking: bool = False, co_subject: str = "", co_descriptor: str = "",
+                  contexto: str = "") -> str:
     """Prompt do VÍDEO. Descreve MOVIMENTO e ação -- nunca enquadramento, que
     já está fixado pela imagem de condicionamento.
 
@@ -626,7 +702,15 @@ def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
     # sobre quem está em cena nem o que acontece, o que o LTX não sustenta.
     # Movimento vazio é correto para "câmera travada", mas ação vazia não é.
     corpo = (action or "").strip().rstrip(".") or (fallback or "").strip().rstrip(".")
-    if framing in ("close", "extreme_close"):
+    if framing in ("close", "extreme_close") and speaking and subject:
+        # Close de FALA nao sustenta a acao fisica do beat (proteger, saltar, atirar):
+        # o still e um retrato e o video tentava executar a acao mesmo assim. MEDIDO
+        # 2026-09-27 (CERCO EM SEUL, plano 9): "Ha-eun spots the rider removing his
+        # helmet" fez a PROPRIA Ha-eun vestir o capacete. Aqui o plano e reacao:
+        # a acao acontece fora do quadro e o rosto responde a ela.
+        corpo = (f"{subject} speaks urgently, head and eyes reacting to the action "
+                 f"happening just outside the frame, body steady")
+    elif framing in ("close", "extreme_close"):
         # Close: gesto de corpo sai do quadro ou puxa o modelo a abrir o plano.
         corpo = _sem_gesto_de_corpo(corpo)
     elif speaking:
@@ -638,7 +722,8 @@ def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
                  if subject else "the scene continues, subtle natural movement")
     partes = [corpo]
     # Logo depois da acao e antes do descritor: e desempenho, nao aparencia.
-    visivel = emocao_visivel_fala(emotion) if speaking else emocao_visivel(emotion)
+    visivel = emocao_para_video(emotion, falando=speaking,
+                                contexto=" ".join(p for p in (look, contexto, action) if p))
     if visivel:
         partes.append(visivel)
     if descriptor:
@@ -672,6 +757,32 @@ def _video_prompt(*, action: str, movement: str, descriptor: str, look: str,
     return ". ".join(p for p in partes if p) + "."
 
 
+# A direcao de arte do roteiro mistura canais: meio/luz (visual), trilha e efeitos
+# sonoros, e indicacoes de montagem/camera. So o visual constante vai para o look.
+# MEDIDO 2026-09-27 (CERCO EM SEUL): "Sirenes, vidro quebrando, tiros, gritos da
+# multidao" ia para TODO prompt de video, pondo tiro e vidro em planos que nao
+# tinham nada disso, e "camera nervosa, cortes rapidos" brigava com movement static.
+_ARTE_AUDIO = re.compile(
+    r"trilha|m[uú]sica|\bsom\b|sonor|[aá]udio|sirene|tiros?\b|disparo|grito|di[aá]logo",
+    re.IGNORECASE)
+_ARTE_CAMERA = re.compile(r"c[aâ]mera|camera|cortes?\b|montagem|ritmo", re.IGNORECASE)
+
+
+def _arte_visual(arte: str) -> str:
+    """Frase com audio sai inteira (lista de efeitos sonoros); trecho de camera/
+    montagem sai sozinho, preservando o resto da frase (meio, luz, epoca)."""
+    partes = []
+    for frase in re.split(r"(?<=[.!?])\s+", arte):
+        frase = frase.strip().rstrip(".")
+        if not frase or _ARTE_AUDIO.search(frase):
+            continue
+        for trecho in frase.split(","):
+            trecho = trecho.strip()
+            if trecho and not _ARTE_CAMERA.search(trecho):
+                partes.append(trecho)
+    return ", ".join(partes)
+
+
 def _look_e_interior(scene: dict, style: dict) -> tuple[str, str]:
     """O `look` efetivo do plano e o marcador de interior/exterior.
 
@@ -682,7 +793,7 @@ def _look_e_interior(scene: dict, style: dict) -> tuple[str, str]:
     -- a referencia por personagem (MEMORIAL 3.24) ancora a IDENTIDADE, nao o
     acabamento, entao duas imagens do mesmo filme nao pareciam do mesmo filme.
     Um roteiro que nao diz o meio deixa `art_direction` vazio e nada muda."""
-    arte = (scene.get("art_direction") or "").strip()
+    arte = _arte_visual((scene.get("art_direction") or "").strip())
     look = ", ".join(p for p in (arte, style["look"]) if p)
     # MEDIDO 2026-08-27: `startswith` sozinho le "EXT/INT. PALACE ... IMPERIAL
     # BEDCHAMBER" como EXTERIOR e manda "exterior" para o prompt de uma camara
@@ -868,6 +979,11 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
                 # de audio fora de quadro exige (achado 2026-09-15, VOZ
                 # virando personagem holografico pra caber num close).
                 enquadre = "insert"
+            if enquadre in ("close", "extreme_close"):
+                # Close de fala e reacao com a acao FORA de quadro (ver _video_prompt):
+                # um segundo rosto no retrato disputa o lip-sync e convida o modelo a
+                # transferir a acao do parceiro para o falante (plano 9, 2026-09-27).
+                co_sujeito = ""
             ultimo_falante = sujeito or ultimo_falante
             n_fala += 1
         else:
@@ -894,7 +1010,7 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
             if sujeito:
                 enquadre = cobertura[pos % len(cobertura)]
             else:
-                enquadre = cobertura[0] if pos == 0 else "insert"
+                enquadre = cobertura[0] if pos == 0 else _enquadre_sem_sujeito(acao)
 
         # Um ots sem sujeito nao tem rosto para enquadrar -- so sobra o ombro de
         # costas, que e exatamente a nuca que o SUBJECT_HINTS existe para evitar.
@@ -921,8 +1037,12 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
         movimento = estilo["movements"].get(enquadre, "static")
         lado = lados.get(sujeito)
 
-        co_descriptor_efetivo = ("" if co_sujeito in ja_com_plano_proprio
-                                 else descriptors.get(co_sujeito, ""))
+        # Descritor do parceiro SEMPRE presente. A omissao (fix de 2026-09-16 contra a
+        # mesma pessoa duplicada no quadro) trocou um defeito por outro pior: MEDIDO
+        # 2026-09-27 no CERCO EM SEUL, planos 10/11 -- so com o nome, Ha-eun saiu de
+        # cabelo solto e roupa civil e Min-jun de camiseta. Cada geracao e sem
+        # memoria; o nome nao carrega aparencia de um plano para o outro.
+        co_descriptor_efetivo = descriptors.get(co_sujeito, "")
 
         planos.append({
             "scene": scene.get("index"),
@@ -956,7 +1076,11 @@ def plan_scene(scene: dict, struct: dict | None, style: dict, *, fps: float = 24
                 look=look, quote=fala if (include_quotes and fala) else None,
                 subject=sujeito, fallback=scene.get("action_text", ""),
                 emotion=emocao_da_fala, framing=enquadre, speaking=bool(fala),
-                co_subject=co_sujeito, co_descriptor=co_descriptor_efetivo),
+                co_subject=co_sujeito, co_descriptor=co_descriptor_efetivo,
+                contexto=scene.get("action_text", "")),
+            # Guardado para quem RECONSTROI os prompts depois (enrich_camera_style,
+            # story_editor): sem ele o parceiro perdia a aparencia na reconstrucao.
+            "co_descriptor": co_descriptor_efetivo,
             # Ingredientes crus, guardados so para o enriquecimento de camera
             # opcional (enrich_camera_style) poder RECONSTRUIR os dois prompts
             # acima depois de trocar movement/look -- sem isto ele teria que
@@ -1054,9 +1178,10 @@ def plan_all(scenes: list, structure: dict | None, *, style_name: str = "classic
              fps: float = 24.0, descriptors: dict | None = None,
              include_quotes: bool = False, style_changes: dict | None = None,
              durations: dict | None = None, dialogue_close_only: bool = False,
-             off_screen: set | None = None) -> dict:
-    global DIALOGO_SO_CLOSE
+             off_screen: set | None = None, aliases: dict | None = None) -> dict:
+    global DIALOGO_SO_CLOSE, ALIASES
     DIALOGO_SO_CLOSE = bool(dialogue_close_only)
+    ALIASES = dict(aliases or {})
     if style_name not in STYLES:
         raise ValueError(f"estilo desconhecido {style_name!r}; use {sorted(STYLES)}")
     style_changes = style_changes or {}
@@ -1277,18 +1402,24 @@ def enrich_camera_style(plan: dict, *, engine: str, log=print) -> int:
 
             if mudou:
                 total_mudados += 1
+                # BUGFIX 2026-09-27: a reconstrucao nao passava co_subject/co_descriptor
+                # -- com --camera-llm o parceiro sumia do still e do video (a correcao
+                # do achado #4 de 2026-09-16 nunca tinha chegado aqui).
                 sh["storyboard_prompt"] = _storyboard_prompt(
                     framing=sh["framing"], angle=sh["angle"], subject=sh["subject"],
                     location=sh.get("location", ""), time_of_day=sh.get("time_of_day", ""),
                     look=look_efetivo, descriptor=sh.get("descriptor", ""),
                     screen_side=sh.get("screen_side"), interior=sh.get("interior", ""),
-                    pose=sh.get("beat", ""))
+                    pose=sh.get("beat", ""), co_subject=sh.get("co_subject", ""),
+                    co_descriptor=sh.get("co_descriptor", ""))
                 sh["video_prompt"] = _video_prompt(
                     action=sh.get("beat", ""), movement=sh["movement"],
                     descriptor=sh.get("descriptor", ""), look=look_efetivo,
                     quote=sh.get("quote"), subject=sh["subject"],
                     fallback=sh.get("fallback", ""), emotion=sh.get("emotion"),
-                    framing=sh["framing"], speaking=sh.get("line_index") is not None)
+                    framing=sh["framing"], speaking=sh.get("line_index") is not None,
+                    co_subject=sh.get("co_subject", ""), co_descriptor=sh.get("co_descriptor", ""),
+                    contexto=sh.get("fallback", ""))
     log(f"[camera_style] {total_mudados} plano(s) com camera/luz refinada pelo LLM "
         f"(de {sum(len(v) for v in por_cena.values())} no total).")
     return total_mudados
@@ -1397,9 +1528,25 @@ def main() -> int:
     cast_path = Path(args.cast) if args.cast else sp_default_cast(sp_run=args.run, scenes_path=sp)
     descritores = {}
     off_screen = set()
+    apelidos: dict = {}
     if cast_path and cast_path.exists():
         cast = json.load(open(cast_path, encoding="utf-8"))
         descritores = {n: appearance_only(v.get("descriptor", "")) for n, v in cast.items()}
+        apelidos = {n: list(v.get("aliases") or []) for n, v in cast.items() if v.get("aliases")}
+        # Figurante sem fala (cast.json "extra": true) entra na lista de personagens
+        # da cena em que aparece -- o parse so lista quem tem fala ou nome proprio.
+        extras = {n: v for n, v in cast.items() if v.get("extra")}
+        if extras:
+            from script_pipeline.cast_characters import personagens_citados
+            for sc in scenes:
+                texto = json.dumps(
+                    [sc.get("action_text", ""), sc.get("shot_list", []), sc.get("dialogue", [])],
+                    ensure_ascii=False)
+                chars = sc.setdefault("characters", [])
+                for n in personagens_citados(texto, extras):
+                    if n not in chars:
+                        chars.append(n)
+            print(f"[shot_plan] figurantes cadastrados: {', '.join(extras)}")
         # on_screen=False (ver cast_characters._is_offscreen_voice): fonte de
         # audio sem corpo em cena (VOZ/radio/narrador) -- nunca vira sujeito
         # nem ganha close (2026-09-15).
@@ -1422,7 +1569,7 @@ def main() -> int:
     plan = plan_all(scenes, structure, style_name=args.style, fps=args.fps,
                     include_quotes=args.include_quotes, style_changes=changes,
                     descriptors=descritores, durations=duracoes,
-                    dialogue_close_only=so_close, off_screen=off_screen)
+                    dialogue_close_only=so_close, off_screen=off_screen, aliases=apelidos)
     if duracoes and args.max_speech_seconds > 0 and not args.include_quotes:
         from script_pipeline.speech_split import split_long_speech, load_audio_paths
         plan = split_long_speech(plan, duracoes, load_audio_paths(dlg),

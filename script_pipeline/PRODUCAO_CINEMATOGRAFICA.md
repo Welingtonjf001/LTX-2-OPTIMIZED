@@ -7,14 +7,20 @@ produziu um artefato; somente os gates aprovados liberam a próxima fase.
 ## Ordem recomendada
 
 1. **Preparar roteiro e elenco.** Converter prosa em cenas e unidades visuais
-   explícitas. Cadastrar as fotos fornecidas como `reference_image` de cada
-   personagem, fixar roupa/descritores e revisar qualquer elenco marcado
-   `reference_needs_review` antes de gerar.
+   explícitas, seguindo [`GUIA_ROTEIRO.md`](GUIA_ROTEIRO.md). Cadastrar as fotos fornecidas
+   como `reference_image` de cada personagem (a importação reavalia a voz pela foto),
+   fixar roupa/descritores, conferir os figurantes (`"extra"`) que o elenco criou e revisar
+   qualquer elenco marcado `reference_needs_review` antes de gerar. Ler
+   `parse/lacunas.md`: lacuna crítica é texto a completar, não algo para o modelo adivinhar.
 2. **Planejar cobertura e espaço.** Garantir que cada ação essencial tenha um
    plano próprio (causa, ação, reação e consequência), atores/objetos, duração,
-   enquadramento e locação estáveis. Para continuidade 3D, fornecer um spec
-   espacial com IDs estáveis e rodar `SPATIAL_PIPELINE.md`; o pipeline não cria
-   automaticamente um mapa 3D confiável a partir de qualquer prosa.
+   enquadramento e locação estáveis. `shots/complexity_report.json` diz quais planos
+   pedem blocking revisado ou previs 3D. Desde 2026-09-27 (`previs_spec.py`,
+   MEMORIAL §3.135) o previs 3D dos planos complexos é gerado sozinho, sem spec
+   manual — roda como parte de `run_decupagem` (`--previs3d`, padrão `complexas`)
+   e produz `shots/previs_3d.png`/`.mp4` para revisão antes dos stills. Para
+   continuidade 3D com estado explícito e persistente entre cenas (spec escrito à
+   mão, IDs estáveis), continue com `SPATIAL_PIPELINE.md`.
 3. **Gerar stills e revisar o animatic.** Rodar até `--ate animatic`, revisar a
    sequência inteira e corrigir identidade, eixo, geografia, figurino e ritmo
    antes de gastar GPU com vídeo.
@@ -57,6 +63,10 @@ investigação e é recusado no modo final.
 - O auditor facial não prova identidade quando não detecta rosto. Planos abertos
   sem rosto suficiente ficam não conclusivos; os gates visuais devem confirmar
   roupa, silhueta e posição nesses planos.
-- O spec espacial é explícito e fornecido pelo operador. A tradução automática
-  de roteiro livre em blocking 3D completo ainda é futura; não marque essa etapa
-  como cumprida sem `world/spec.json`, bindings e relatório espacial aprovado.
+- O spec espacial ESCRITO À MÃO (`SPATIAL_PIPELINE.md`) continua explícito e
+  fornecido pelo operador — é o caminho para estado persistente entre cenas e
+  eventos temporais explícitos. O previs 3D AUTOMÁTICO (`previs_spec.py`) é
+  outra coisa: um rascunho de blocking derivado da decupagem, só para revisão
+  de posição/câmera nos planos complexos, sem estado persistente entre corridas.
+  Não confunda um pelo outro nem marque a continuidade 3D manual como cumprida
+  sem `world/spec.json`, bindings e relatório espacial aprovado.

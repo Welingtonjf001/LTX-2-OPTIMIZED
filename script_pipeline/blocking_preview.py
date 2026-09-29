@@ -27,7 +27,7 @@ COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f0
 # Primitivas que envolvem DOIS personagens no mesmo eixo (perseguicao, queda, resgate, protecao) --
 # o diagrama desenha uma seta actor->partner com rotulo, para o olho notar rapido se o alvo faz
 # sentido (personagens no mesmo lado da tela nunca deveriam "perseguir" um ao outro de frente).
-PARTNERED = {"pursue", "contact", "takedown", "protect", "reach"}
+PARTNERED = {"pursue", "contact", "takedown", "protect", "reach", "restrain", "escort"}
 
 
 def _font(size: int):

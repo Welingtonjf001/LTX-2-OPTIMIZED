@@ -303,8 +303,75 @@ def verify(run_dir: Path, *, output_name: str, min_audio_db: float,
                           "ou trate a trilha do TTS+lipsync como a autoritativa.",
             })
 
+    _check_gates(run_dir, report, findings)
     _check_enrichment(run_dir, report, findings)
     return report
+
+
+def _check_gates(run_dir: Path, report: dict, findings: list) -> None:
+    """Integridade tecnica nao e aprovacao. MEDIDO 2026-09-27 (CERCO EM SEUL): o filme
+    montado passou aqui com "0 problemas" enquanto os gates visuais estavam bloqueados e
+    a auditoria de identidade reprovava 11/18 clipes -- quem lia so o verification.json
+    tomava o filme por aprovado. Isto nao reprova o ARQUIVO (a trava de entrega e o
+    `run_decupagem --ate final`, fail-closed); so registra o estado dos gates."""
+    # ACHADO externo 2026-09-29: pular silenciosamente quando o arquivo do gate nao existe,
+    # ou converter erro de leitura/JSON invalido em "sem alerta", deixa o verification.json
+    # indistinguivel entre "gate rodou e aprovou" e "gate nunca rodou"/"gate corrompido" -- o
+    # proprio docstring desta funcao ja distingue integridade de aprovacao, mas o relatorio
+    # nao registrava esse terceiro estado (ausente/ilegivel) de forma explicita. Agora cada
+    # gate grava um "status" e ausencia/erro de leitura tambem viram pendencia, nao silencio.
+    shots = run_dir / "shots"
+    pendencias = []
+    for estagio in ("stills", "video"):
+        path = shots / f"visual_{estagio}_audit.json"
+        if not path.exists():
+            report["checks"].append({"check": f"gate_{estagio}", "status": "missing"})
+            pendencias.append(f"gate visual de {estagio}: AUSENTE ({path.name} nao existe -- "
+                              "gate nunca rodou ou corrida nao chegou nessa etapa)")
+            continue
+        try:
+            gate = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            report["checks"].append({"check": f"gate_{estagio}", "status": "unreadable",
+                                     "error": f"{type(exc).__name__}: {exc}"})
+            pendencias.append(f"gate visual de {estagio}: ILEGIVEL ({path.name} existe mas nao "
+                              f"parseia -- {type(exc).__name__})")
+            continue
+        status = gate.get("status")
+        report["checks"].append({"check": f"gate_{estagio}", "status": status,
+                                 "rejected": gate.get("rejected"),
+                                 "auditor_errors": len(gate.get("auditor_errors") or []),
+                                 "evaluated": gate.get("evaluated", gate.get("audited")),
+                                 "expected": gate.get("expected")})
+        if status != "ok":
+            pendencias.append(f"gate visual de {estagio}: {status} "
+                              f"({gate.get('rejected', '?')} reprovado(s), "
+                              f"{len(gate.get('auditor_errors') or [])} erro(s) do auditor, "
+                              f"{gate.get('evaluated', gate.get('audited', '?'))}/"
+                              f"{gate.get('expected', '?')} avaliado(s))")
+    ident = shots / "clip_identity_audit.json"
+    if not ident.exists():
+        report["checks"].append({"check": "identity_audit", "status": "missing"})
+        pendencias.append(f"identidade: AUSENTE ({ident.name} nao existe -- auditoria nunca rodou)")
+    else:
+        try:
+            dados = json.loads(ident.read_text(encoding="utf-8"))
+            alertas = [k for k, v in dados.items() if isinstance(v, dict) and v.get("alerta")]
+            report["checks"].append({"check": "identity_audit", "status": "ok", "alerts": len(alertas)})
+            if alertas:
+                pendencias.append(f"identidade: {len(alertas)} clipe(s) abaixo do limiar")
+        except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            report["checks"].append({"check": "identity_audit", "status": "unreadable",
+                                     "error": f"{type(exc).__name__}: {exc}"})
+            pendencias.append(f"identidade: ILEGIVEL ({ident.name} existe mas nao parseia -- "
+                              f"{type(exc).__name__})")
+    if pendencias:
+        findings.append({
+            "code": "GATES_NOT_APPROVED", "severity": "warning",
+            "detail": "Arquivo integro, mas o filme NAO esta aprovado (ou nao foi possivel "
+                      "confirmar): " + "; ".join(pendencias)
+                      + ". Revise shots/visual_*_audit.json e shots/clip_identity_audit.json.",
+        })
 
 
 def _check_enrichment(run_dir: Path, report: dict, findings: list) -> None:

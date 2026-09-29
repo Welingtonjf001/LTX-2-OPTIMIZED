@@ -183,6 +183,10 @@ def _run_stages_worker(stages: list[str], args: types.SimpleNamespace) -> None:
             if not ok:
                 _status(f"Etapa '{stage}' falhou.", phase=f"Falhou em: {stage}")
                 return
+            if stage == "cast":
+                # Relatorio de lacunas do roteiro (parse/lacunas.md), igual ao CLI.
+                spv.run_gaps_report(CURRENT_RUN_DIR, getattr(args, "cast_engine", None),
+                                    log=lambda m: _status(m))
         CURRENT_PHASE = "Concluido"
         _status("Pipeline concluido.")
     finally:

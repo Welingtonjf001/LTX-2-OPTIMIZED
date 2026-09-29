@@ -46,6 +46,10 @@ WORKFLOW_TEMPLATES = {
     "flux": ROOT / "comfyui_workflows" / "storyboard_flux_txt2img.json",
     "sd35": ROOT / "comfyui_workflows" / "storyboard_sd35_txt2img.json",
     "flux1": ROOT / "comfyui_workflows" / "storyboard_flux1_txt2img.json",
+    # Mesmo grafo do "flux" (FLUX.2 Klein), so o node 1 troca UNETLoader por
+    # UnetLoaderGGUF (sem weight_dtype -- a GGUF ja vem quantizada). Ver IMAGE_ENGINES
+    # e detect_architecture. MEMORIAL 2026-09-28.
+    "flux-klein-gguf": ROOT / "comfyui_workflows" / "storyboard_flux_klein_gguf_txt2img.json",
 }
 
 # Padroes por MOTOR DE IMAGEM, num lugar so. Antes disto `render_shots` fixava
@@ -67,6 +71,22 @@ IMAGE_ENGINES = {
         # controla adesao ao prompt e o FluxGuidance.
         "steps": 8, "cfg": 1.0, "guidance": 3.5,
         "descricao": "FLUX.2 Klein 9B fp8 -- melhor adesao a prompt longo, aceita imagem de referencia",
+    },
+    # Mesmo checkpoint acima ("flux"), quantizado GGUF (unsloth/FLUX.2-klein-9B-GGUF,
+    # ferramenta city96/ComfyUI-GGUF) -- pedido do usuario 2026-09-28. Q8_0 (~10 GB, a
+    # mais proxima do fp8 em qualidade) cabe folgado na 3090 ao lado do resto do grafo.
+    # Reusa o MESMO encoder Qwen3-8B e a MESMA VAE do "flux" -- so o transformer muda de
+    # formato. Arquitetura propria (`detect_architecture`) porque o loader e outro
+    # (`UnetLoaderGGUF`, sem `weight_dtype`), mas se comporta como "flux" em tudo mais
+    # (referencia de personagem, condicionamento espacial, LoRA) -- ver os `in ("flux",
+    # "flux-klein-gguf")` espalhados pelo arquivo.
+    "flux-klein-gguf": {
+        "checkpoint": "flux-2-klein-9b-Q8_0.gguf",
+        "clip": "Qwen3-8B-FP8-native-bf16.safetensors",
+        "vae": "flux2-vae.safetensors",
+        "steps": 8, "cfg": 1.0, "guidance": 3.5,
+        "descricao": "FLUX.2 Klein 9B GGUF Q8_0 -- mesmo checkpoint do \"flux\", quantizado; "
+                     "mais rapido de carregar, cabe menos VRAM",
     },
     "sd35": {
         "checkpoint": "sd3.5_medium.safetensors",
@@ -179,6 +199,7 @@ LORA_IMAGES_DIR = ROOT / "models" / "loras_images"
 ARCH_MODEL_CONSUMER = {
     # arquitetura: (node id do consumidor, chave do input, [node id, slot] original)
     "flux": ("8", "model", ["1", 0]),
+    "flux-klein-gguf": ("8", "model", ["1", 0]),  # mesmo grafo do "flux", node 1 vira UnetLoaderGGUF
     "flux-ref": ("11", "model", ["1", 0]),  # character_flux_reference.json
     "flux1": ("8", "model", ["1", 0]),
     "sd35": ("8", "model", ["1", 0]),
@@ -313,6 +334,8 @@ def detect_architecture(checkpoint: str) -> str:
         return "hidream"
     if "qwen-image" in nome:  # depois dos checks de "2.1"/"21" acima, que tem prioridade
         return "qwen-image-base"
+    if "klein" in nome and nome.endswith(".gguf"):
+        return "flux-klein-gguf"
     # "flux1-..." (Krea/Kontext/dev/schnell) precisa vir ANTES do "flux" generico:
     # os dois nomes contem "flux", mas so o FLUX.2 Klein usa o CLIPLoader Qwen3
     # unico que o branch "flux" abaixo monta.
@@ -340,6 +363,22 @@ def _load_cast(run_dir: Path) -> dict:
     return json.loads(cast_path.read_text(encoding="utf-8"))
 
 
+def _detitle_cast_names(prompt: str, cast: dict) -> str:
+    """Nomes de personagem em MAIUSCULAS ("SEO-YEON", "COPILOTO") -> Title Case
+    ("Seo-yeon", "Copiloto"), preservando fronteira de palavra. So usado pelo motor
+    zimage (ver generate_scene_storyboard) -- outros motores nao tem esse gatilho."""
+    import re
+    nomes = list(cast or {})
+    for info in (cast or {}).values():
+        nomes.extend((info or {}).get("aliases") or [])
+    for nome in sorted(set(nomes), key=len, reverse=True):
+        if not nome or not nome.isupper():
+            continue
+        padrao = re.compile(r"(?<![A-Za-z])" + re.escape(nome) + r"(?![A-Za-z])")
+        prompt = padrao.sub(nome.capitalize(), prompt)
+    return prompt
+
+
 def build_prompt(scene: dict, cast: dict) -> str:
     if scene.get("visual_prompt"):
         base = scene["visual_prompt"]
@@ -347,7 +386,15 @@ def build_prompt(scene: dict, cast: dict) -> str:
         heading = ", ".join(p for p in (scene.get("location"), scene.get("time_of_day")) if p)
         base = f"{heading or 'scene'}. {scene.get('action_text', '')}".strip()
     descriptors = []
-    for name in scene.get("characters", []):
+    nomes = list(scene.get("characters", []))
+    # Figurante sem fala (cast.json "extra") so e citado pelo papel ("the President") e
+    # nao entra em scene["characters"]; sem isto o still o inventava a cada cena.
+    extras = {n: v for n, v in (cast or {}).items() if (v or {}).get("extra")}
+    if extras:
+        from script_pipeline.cast_characters import personagens_citados
+        nomes += [n for n in personagens_citados(f"{base} {scene.get('action_text', '')}", extras)
+                  if n not in nomes]
+    for name in nomes:
         entry = cast.get(name)
         if entry and entry.get("descriptor"):
             descriptors.append(entry["descriptor"])
@@ -356,7 +403,17 @@ def build_prompt(scene: dict, cast: dict) -> str:
     # The storyboard is a seed frame for LTX video, not artwork -- say so positively as
     # well as in the negative prompt, since the scene text alone left FLUX free to
     # answer in illustration style, which then set the look of the whole clip.
-    return base.rstrip(". ") + ". Photorealistic cinematic film still, live action footage, natural lighting."
+    # ACHADO 2026-09-29 (REENTRY WINDOW, roteiro sci-fi): a frase acima nao bastou --
+    # vocabulario de painel/HUD ("amber warning bars", "countdown numerals", nome de
+    # nave) empurrou o FLUX pra estetica de jogo/anime mesmo com "Photorealistic" no
+    # positivo e "cartoon, anime, illustration" no negativo (default, ver
+    # NEGATIVE_PROMPT_DEFAULT). MEDIDO: reforcar com referencia de camera/lente real
+    # + textura de pele + negacao explicita de meio ("NOT an illustration, NOT anime,
+    # NOT concept art") resolveu de primeira no mesmo plano que travava o gate.
+    return (base.rstrip(". ") + ". Shot on a DSLR camera with a fast prime lens, shallow depth "
+            "of field, real skin texture with visible pores, natural film grain, documentary "
+            "photojournalism style, photorealistic, live-action movie still, NOT an illustration, "
+            "NOT anime, NOT concept art, NOT a video game render.")
 
 
 def _fill_template(template: dict, values: dict) -> dict:
@@ -515,6 +572,13 @@ def ensure_comfyui_running(server: str, *, log=print, wait_seconds: int = 180,
     porque matar+religar o ComfyUI e uma recuperacao ja usada em varios
     lugares deste projeto quando o servidor engasga -- nao e uma acao nova ou
     mais arriscada que o que ja se fazia na mao."""
+    # ACHADO 2026-09-28: Z-Image/Qwen-Image-2.1/Fish Speech residentes disputam a
+    # MESMA 3090 e ninguem os derrubava antes dos stills (so antes do estagio de
+    # VIDEO, achado gemeo 2026-09-22 em render_shots.py) -- medido AO VIVO com o
+    # Fish Speech ainda no ar: passos de ~5-9s viravam 120-470s, contencao de
+    # VRAM. Ver `gpu_watchdog.free_other_still_servers`.
+    from script_pipeline import gpu_watchdog
+    gpu_watchdog.free_other_still_servers(gpu_watchdog.STILL_ENGINE_PORTS["comfyui"], log=log)
     if comfy_is_up(server):
         if watch_stalls:
             _start_stall_watch_once(server, log=log)
@@ -736,6 +800,7 @@ def generate_scene_storyboard(
     weight_dtype: str = "default", lora_name: str = "", lora_strength: float = 0.8,
     control_bundle: dict | None = None, spatial_denoise: float = 0.65,
     spatial_mode: str = 'img2img',
+    qwen_lora: tuple[str, float] | None = None,
 ) -> bool:
     """`reference_image_role`/`reference_image_2_role`/`extra_references`: SÓ o
     motor `qwenimage21` usa -- o backend já suporta até 10 referências com
@@ -749,7 +814,7 @@ def generate_scene_storyboard(
     ao de antes -- isto é aditivo, não muda nenhuma chamada existente.
     Outros motores (flux/hidream/zimage/sd35/sdxl) ignoram os três."""
     architecture = detect_architecture(checkpoint)
-    if control_bundle and architecture != "flux":
+    if control_bundle and architecture not in ("flux", "flux-klein-gguf"):
         raise ValueError("Spatial conditioning currently requires FLUX.2 Klein")
     if architecture == "zimage":
         # Desvia do grafo ComfyUI inteiro: Z-Image-Turbo roda num servidor HTTP
@@ -758,9 +823,23 @@ def generate_scene_storyboard(
         # aplicam aqui -- se precisar deles, use --image-engine flux.
         import zimage_backend
         prompt = prompt_override if prompt_override else build_prompt(scene, cast)
+        # ACHADO (teste rapido 2026-09-27): o nome do personagem em MAIUSCULAS dentro
+        # do prompt ("SEO-YEON, dark hair...", formato padrao de storyboard_prompt/
+        # video_prompt) e lido pelo Z-Image como um ROTULO e sai escrito no figurino
+        # ("COPILOTO" alucinado no uniforme) -- reproduzido e isolado: o mesmo prompt
+        # sem o nome em caixa alta nao produz texto. Sem negative prompt aqui (pipeline
+        # turbo sem CFG, server.py nao aceita esse parametro), o unico jeito e nao dar
+        # o gatilho. Titlecase preserva a identificacao do personagem no texto sem
+        # disparar o comportamento de letreiro.
+        prompt = _detitle_cast_names(prompt, cast)
+        # `strength` 0.55 (padrao do backend) preserva demais: pose/cenario do plano
+        # quase nao mudavam em relacao a referencia. 0.70 deixa o prompt reescrever
+        # pose/fundo de verdade, com identidade ainda reconhecivel -- meio-termo
+        # medido no mesmo teste (0.55 sem mudanca visivel, 0.80 com deriva facial
+        # perceptivel). Sem referencia, `strength` e ignorado pelo servidor.
         ok = zimage_backend.generate(
             prompt, out_path, width=width, height=height, steps=steps, seed=seed,
-            reference_image=reference_image, log=log)
+            reference_image=reference_image, strength=0.7, log=log)
         if ok:
             log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
         return ok
@@ -780,7 +859,8 @@ def generate_scene_storyboard(
         roles = [r or "" for _, r in pares]
         ok = qwen_image21_backend.generate(
             prompt, out_path, width=width, height=height, steps=steps, seed=seed,
-            reference_images=refs, reference_roles=roles if any(roles) else None, log=log)
+            reference_images=refs, reference_roles=roles if any(roles) else None,
+            lora=qwen_lora, log=log)
         if ok:
             log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
         return ok
@@ -842,21 +922,40 @@ def generate_scene_storyboard(
         log(f"Cena {scene['index']}: storyboard salvo em {out_path}")
         return True
     if architecture == "qwen-image-base":
-        # Grafo proprio, mais simples que o HiDream: 1 encoder so (CLIPLoader type="qwen_image"),
-        # CLIPTextEncode generico -- mas NAO e destilado, entao o negative prompt importa de
-        # verdade aqui (ao contrario do qwen-image-2.1, cfg=1 sempre).
+        # Grafo proprio, mais simples que o HiDream -- mas NAO e destilado, entao o
+        # negative prompt importa de verdade aqui (ao contrario do qwen-image-2.1, cfg=1 sempre).
+        # Referencia de personagem (2026-09-25, achado da comparacao de qualidade do CERCO EM
+        # SEUL): o ComfyUI local ja tem TextEncodeQwenImageEditPlus (ate 3 imagens, encode
+        # multimodal Qwen2VL + reference_latents), mas este branch nunca usava -- por isso o
+        # motor alucinava fisionomia/objetos (missil, letreiro ilegivel) sem NENHUMA ancora
+        # visual. Com referencia(s), troca CLIPTextEncode simples por EditPlus; sem referencia,
+        # comportamento IDENTICO ao de sempre (txt2img puro).
         clip_name = clip or IMAGE_ENGINES["qwen-image"]["clip"]
         vae_name = vae or IMAGE_ENGINES["qwen-image"]["vae"]
         prompt = prompt_override if prompt_override else build_prompt(scene, cast)
         negative = negative_prompt_for(art_directed=art_directed)
+        refs = [r for r in (reference_image, reference_image_2,
+                            (extra_references or [(None, None)])[0][0]) if r][:3]
         workflow = {
             "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": checkpoint}},
             "2": {"class_type": "CLIPLoader", "inputs": {
                 "clip_name": clip_name, "type": "qwen_image", "device": "default"}},
             "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}},
-            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
             "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative}},
             "6": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        }
+        if refs:
+            img_inputs = {}
+            for i, ref in enumerate(refs, 1):
+                staged = _stage_reference(ref, f"qwenbase_{scene['index']}_{i}")
+                node_id = f"90{i}"
+                workflow[node_id] = {"class_type": "LoadImage", "inputs": {"image": staged}}
+                img_inputs[f"image{i}"] = [node_id, 0]
+            workflow["4"] = {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {
+                "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, **img_inputs}}
+        else:
+            workflow["4"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}}
+        workflow.update({
             "7": {"class_type": "KSampler", "inputs": {
                 "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
                 "seed": seed, "steps": steps, "cfg": cfg or 4.0,
@@ -864,7 +963,7 @@ def generate_scene_storyboard(
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
             "9": {"class_type": "SaveImage", "inputs": {
                 "images": ["8", 0], "filename_prefix": f"storyboard_scene_{scene['index']:02d}"}},
-        }
+        })
         log(f"Cena {scene['index']}: {prompt[:120]}...")
         entry = submit_and_wait(server, workflow, log=log)
         if entry is None:
@@ -885,7 +984,7 @@ def generate_scene_storyboard(
     # controlled test in this project showed FLUX.2 Klein genuinely honours: same
     # prompt + same seed produced an unrelated person WITHOUT the reference and the
     # referenced person WITH it. Only FLUX has this path; SDXL falls back to text.
-    used_reference_template = bool(reference_image and architecture == "flux")
+    used_reference_template = bool(reference_image and architecture in ("flux", "flux-klein-gguf"))
     # DUAL reference (2026-09-10, opcao B do pedido do usuario): um plano com
     # DOIS personagens nomeados so tinha referencia pro `subject` principal --
     # o outro era pura invencao textual do FLUX, e foi assim que o still real
@@ -902,6 +1001,11 @@ def generate_scene_storyboard(
         template = json.loads(WORKFLOW_TEMPLATES[architecture].read_text(encoding="utf-8"))
         reference_image = None
         reference_image_2 = None
+    if architecture == "flux-klein-gguf" and (used_reference_template or used_dual_reference):
+        # Os templates de referencia (com/sem dupla) sao compartilhados com o "flux" fp8
+        # e carregam via UNETLoader; troca so o node 1 pro loader GGUF, sem duplicar
+        # os dois arquivos inteiros so por causa disso.
+        template["1"] = {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "{{CHECKPOINT}}"}}
     prompt = prompt_override if prompt_override else build_prompt(scene, cast)
     values = {
         "SEED": seed, "STEPS": steps,
@@ -910,7 +1014,7 @@ def generate_scene_storyboard(
         "NEGATIVE_PROMPT": negative_prompt_for(art_directed=art_directed),
         "FILENAME_PREFIX": f"storyboard_scene_{scene['index']:02d}",
     }
-    if architecture == "flux":
+    if architecture in ("flux", "flux-klein-gguf"):
         values["CLIP_NAME"] = clip
         values["VAE_NAME"] = vae
         values["GUIDANCE"] = guidance

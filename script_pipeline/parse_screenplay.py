@@ -739,6 +739,19 @@ def _build_scene_user_prompt(scene: Scene) -> tuple[str, list[tuple[int, str, st
 ESTILO_VISUAL_RE = re.compile(r"^[ \t]*ESTILO VISUAL[ \t]*:[ \t]*(.+?)[ \t]*$",
                               re.IGNORECASE | re.MULTILINE)
 
+# ACHADO 2026-09-29 (REENTRY WINDOW): o exemplo de sintaxe no prompt do
+# `prose_to_screenplay` ("ESTILO VISUAL: polished hand-drawn cel animation, sharp
+# ink lines") foi copiado literalmente pelo qwen2.5:32b para um roteiro que nunca
+# mencionou nenhum meio visual -- o resto do pipeline tratou isso como "dado lido"
+# (ganha do palpite do enriquecimento, ver _apply_setting) e todo still saiu
+# ilustrado, derrubando a consistencia facial contra fotos reais de ator pra perto
+# de zero. Corrigido na instrucao do prompt (nao copiar o exemplo por padrao), mas
+# esta e a segunda camada: se o valor bater EXATAMENTE com o exemplo do prompt,
+# um LLM cego a instrucao ainda pode reproduzi-lo -- melhor perder um "cel
+# animation" genuino e raro do que herdar silenciosamente o exemplo em todo
+# roteiro sem estilo declarado.
+_ESTILO_VISUAL_EXEMPLO_LITERAL = "polished hand-drawn cel animation, sharp ink lines"
+
 
 # VALIDACAO DE ESTILO CONFLITANTE -- pedido do usuario 2026-09-10 depois de
 # medir o efeito real: uma direcao de arte como "photorealistic cinematic
@@ -805,7 +818,14 @@ def extract_art_direction(text: str) -> tuple[str, str]:
     m = ESTILO_VISUAL_RE.search(text or "")
     if not m:
         return text, ""
-    return (text[:m.start()] + text[m.end():]).lstrip(), m.group(1).strip()[:200]
+    texto_limpo = (text[:m.start()] + text[m.end():]).lstrip()
+    meio = m.group(1).strip()[:200]
+    if meio.casefold() == _ESTILO_VISUAL_EXEMPLO_LITERAL.casefold():
+        print("[parse_screenplay] AVISO: 'ESTILO VISUAL' bate literalmente com o exemplo do prompt "
+              "do prose_to_screenplay -- provavel copia do LLM, nao dado real do roteiro; descartando.",
+              file=sys.stderr)
+        return texto_limpo, ""
+    return texto_limpo, meio
 
 
 def _apply_setting(scene: Scene, payload: dict) -> None:

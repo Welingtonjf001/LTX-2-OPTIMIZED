@@ -8,9 +8,14 @@ import math
 TIGHT_FRAMINGS = {"close", "extreme_close"}
 
 
-def _entity_point(entity, height=1.55):
-    x, y, z = entity["position"]
-    return [float(x), float(y), float(z) + height]
+def _entity_point(entity):
+    """Onde a camera mira: o rosto na pose ATUAL (em pe da posicao + 1,55 m, como antes;
+    ajoelhado ou no chao, a cabeca de verdade -- ver mannequin_poses.focus_point)."""
+    from script_pipeline.mannequin_poses import focus_point
+    if entity.get("kind") == "prop":
+        x, y, z = entity["position"]
+        return [float(x), float(y), float(z)]
+    return focus_point(entity)
 
 
 def camera_for_shot(base_camera, shot, entities):
@@ -82,10 +87,15 @@ def active_entities_for_shot(shot, entities, *, location_cast=None):
 
 
 def state_for_shot(state, active_entities):
+    """Visibilidade e a INTERSECAO de "quem o enquadramento mostra" com "quem existe
+    semanticamente" -- nao so o primeiro. ACHADO (review adversarial 2026-09-27): sobrescrever
+    `present` so pelo enquadramento fazia um evento que tira alguem de cena (`present=False`)
+    ser ignorado sempre que esse alguem ainda estava na lista `active_entities` do plano (ex.:
+    plano aberto que lista todo o elenco da locacao) -- ele reaparecia no quadro final."""
     result = copy.deepcopy(state)
     active = set(active_entities)
     for entity_id, entity in result["entities"].items():
-        entity["present"] = entity_id in active
+        entity["present"] = entity_id in active and entity.get("present", True)
     return result
 
 

@@ -25,6 +25,7 @@ PRIMITIVE_TO_CLIP: dict[str, str] = {
     "environment": "idle", "idle": "idle", "speak": "idle", "gesture": "idle",
     "turn": "idle", "fire": "idle", "reach": "idle", "locomote": "walk",
     "pursue": "walk", "contact": "walk", "takedown": "walk", "protect": "walk",
+    "restrain": "idle", "escort": "walk",
 }
 
 

@@ -283,13 +283,18 @@ def _aplicar(run: Path, plan: dict, veredito: dict, engine: str, log=print) -> d
             if novo_beat:
                 shot["beat"] = novo_beat
                 shot["editorial_v1_beat_rewritten"] = True
+                # BUGFIX 2026-09-27: `speaking` vinha de `quote`, que so existe com
+                # --include-quotes (MiniMax) -- no LTX todo plano de fala virava acao muda
+                # (emocao com gesto, close sem a regra de reacao). E sem co_descriptor o
+                # parceiro perdia a aparencia na reconstrucao.
                 shot["video_prompt"] = _video_prompt(
                     action=novo_beat, movement=shot.get("movement", "static"),
                     descriptor=shot.get("descriptor", ""), look=shot.get("look_base", ""),
                     quote=shot.get("quote"), subject=shot.get("subject", ""),
                     fallback=shot.get("fallback", ""), emotion=shot.get("emotion"),
-                    framing=shot.get("framing", ""), speaking=shot.get("quote") is not None,
-                    co_subject=shot.get("co_subject", ""))
+                    framing=shot.get("framing", ""), speaking=shot.get("line_index") is not None,
+                    co_subject=shot.get("co_subject", ""), co_descriptor=shot.get("co_descriptor", ""),
+                    contexto=shot.get("fallback", ""))
                 # Reconstruir o video_prompt do zero apagaria a clausula de
                 # movimento que motion_conditioner.apply_motion_score anexou
                 # (--motion-conditioning); recoloca-la mantem o condicionamento.

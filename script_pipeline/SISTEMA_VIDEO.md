@@ -55,10 +55,18 @@ vídeo precisam aprovar todos os planos; depois de lipsync/mix,
 `verify_output --strict` bloqueia o sucesso se houver erro técnico. Um MP4
 existir não significa aprovação.
 
-O modo espacial não é inferido automaticamente do texto livre. Ele exige um
+O modo espacial MANUAL não é inferido automaticamente do texto livre. Ele exige um
 blocking/spec de locação, entidades, câmeras e eventos; quando usado, deve ser
 gerado e auditado antes dos stills/vídeos conforme `SPATIAL_PIPELINE.md`. A
 ausência de spec não pode ser descrita como “mapa 3D executado”.
+
+Desde 2026-09-27 existe um segundo modo, AUTOMÁTICO (`previs_spec.py`, MEMORIAL §3.135, só no
+caminho da decupagem — `run_decupagem`/`decupagem_ui`, não neste pipeline de 9 estágios): gera o
+spec sozinho a partir de `shot_plan.json` + `cast.json` + `motion_plan.json` +
+`shots/complexity_report.json` e renderiza manequins/câmera em baixa resolução no Blender (CPU,
+sem difusão) para os planos que a etapa `[M] complexidade` marcou como complexos —
+`shots/previs_3d.png`/`.mp4`. É um rascunho de blocking para REVISÃO, não o estado persistente
+entre cenas do modo manual; não confundir os dois. `--previs3d {complexas,medias,todos,off}`.
 
 ---
 
@@ -102,13 +110,38 @@ o enriquecimento falha, o pipeline ainda tem uma estrutura válida para seguir.
 Consolida os personagens: nome canônico, descritor visual fixo (repetido em todo prompt para
 manter consistência) e escolha de voz. `cast.json` é **editável à mão** antes de continuar.
 
-A escolha de voz alterna entre pools masculino e feminino; quando o gênero não é dedutível,
-o registro ganha `gender_guessed: true` em vez de cair numa lista alfabética — correção de um
-bug em que um personagem masculino recebeu voz feminina.
+**Voz (desde 2026-09-27).** Gênero, em ordem de confiança: foto de referência (insightface
+genderage) > LLM lendo o roteiro inteiro > pista textual do descritor > alternância marcada
+`gender_guessed: true`. Idade: o **roteiro** manda (`_parse_age`: "mid-30s", "7 anos",
+"idoso"); a foto só vale quando o texto cala — ela estima a idade do ATOR (Min-jun "mid-30s"
+saiu 23 pela foto). A voz é escolhida pela faixa etária (infantil/jovem/adulto/maduro), nunca
+infantil para adulto, sem repetir voz de outro personagem. `import_reference` reavalia as
+vozes ao importar uma foto; `cast_characters --revoice` faz só isso; `"voice_locked": true`
+protege uma voz escolhida à mão. MEDIDO no CERCO EM SEUL: Ha-eun (sem pronome no descritor)
+tinha voz masculina e Seo-yeon (35 anos) a voz infantil — os dois corrigidos pela foto.
+
+**Figurantes recorrentes sem nome** (o Presidente, o motociclista, o garçom): entram no
+elenco com `"extra": true` e `"aliases"` (todas as formas do texto, nos dois idiomas —
+"Presidente" e "the President"). Com `--engine`, o LLM junta sinônimos que são a MESMA pessoa
+("the motorcycle rider" = "the terrorist" — decisão de enredo, nunca de tabela) e escreve a
+aparência, que passa pela mesma auditoria de completude dos demais. Sem LLM, uma lista de
+papéis com artigo definido (≥ 2 frases) cobre o básico, juntando só tradução PT↔EN. Sem
+figurante cadastrado, cada still inventava outra pessoa para o mesmo papel.
 
 Personagens aceitam **foto de referência** (`reference_image`), roteada para o workflow
 `character_flux_reference.json`. O nó `ReferenceLatent` do FLUX.2 honra a imagem — confirmado
 em teste controlado com imagem de controle sem referência.
+
+### [2b] lacunas — `screenplay_gaps.py` (desde 2026-09-27)
+
+Relatório do que o roteiro **não diz** e o vídeo vai inventar, antes de gastar GPU:
+`parse/lacunas.md` + `.json`. Determinístico: pessoa que age sem cadastro, ação sem agente,
+ação de contato/tiro sem alvo, fala cujo beat repete a ação vizinha (o evento recomeça na
+tela), fala sobre ação física (um close não a mostra), aparência incompleta, voz por palpite
+e a lista de **mudanças de estado** a carregar (explodiu, fechou, algemado). Com `--engine`,
+o LLM acrescenta sugestões por ação, marcadas como inferidas. Nunca reescreve o roteiro.
+Roda nos dois caminhos (decupagem e screenplay); só na decupagem pode bloquear
+(`--lacunas bloquear`). O que o roteiro precisa indicar: [`GUIA_ROTEIRO.md`](GUIA_ROTEIRO.md).
 
 ### [3] storyboard — `generate_storyboards.py`
 
@@ -147,6 +180,12 @@ ação principal → detalhe de movimento → personagem/ambiente → **câmera 
 último**; parágrafo único no presente, abaixo de 200 palavras, fala entre aspas com direção
 de atuação, emoção como pista física visível, e áudio declarado ao final em camadas
 (ambiência / voz / efeitos).
+
+**Regras compartilhadas com a decupagem (desde 2026-09-27):** clipe de ação leva a aparência
+de até dois personagens citados (inclusive figurantes) — antes ia sem descrição de ninguém;
+fala cujo beat é ação física (proteger, derrubar, atirar) vira **reação** ("reacts urgently to
+the action happening just outside the frame") — o modelo transferia a ação para quem fala; e
+a emoção vira expressão visível (`shot_plan.emocao_para_video`), sem sorriso em cena de ação.
 
 **Restrições do LTX 2.3** aplicadas automaticamente:
 - resolução múltipla de **64**

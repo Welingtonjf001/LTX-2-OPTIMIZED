@@ -54,6 +54,11 @@ def server_is_up() -> bool:
 def ensure_server(log_cb=None, boot_timeout: int = 180) -> None:
     global _server_proc
     log = log_cb or print
+    # Mesmo achado do zimage_backend/generate_storyboards (2026-09-28): servidores
+    # residentes (Fish Speech, ComfyUI do FLUX, Z-Image) disputam VRAM com qualquer
+    # motor de still -- derruba os outros antes de subir/usar este.
+    from script_pipeline import gpu_watchdog
+    gpu_watchdog.free_other_still_servers(gpu_watchdog.STILL_ENGINE_PORTS["qwen21_comfy"], log=log)
     if server_is_up():
         return
     python_exe = QWEN_COMFY_ROOT / ".venv" / "Scripts" / "python.exe"
@@ -83,17 +88,49 @@ def roles_prefix(roles: list[str]) -> str:
 
 def build_workflow(prompt: str, image_names: list[str], *, width: int, height: int, steps: int, seed: int,
                    ref_resolution: int = 1024, edit_target: bool = False, cache_device: str = "auto",
-                   cache_dtype: str = "default", unet: str | None = None, prefix: str = "qwen21") -> dict:
-    """Grafo API: GGUF + QwenImage21Cache + TextEncodeQwenImage21 (+ refs) + KSampler euler/simple cfg 1.
+                   cache_dtype: str = "default", unet: str | None = None, prefix: str = "qwen21",
+                   lora: tuple[str, float] | None = None, unet_gguf: bool = True,
+                   attention_backend: str | None = None, model_sampling_flux: tuple[float, float] | None = None,
+                   cfg: float = 1.0) -> dict:
+    """Grafo API: UNET (GGUF ou safetensors puro) + QwenImage21Cache + TextEncodeQwenImage21 (+ refs) +
+    KSampler euler/simple.
 
     edit_target=True: a imagem 1 e o alvo de edicao e a saida herda o tamanho dela (latente do codificador);
-    False: canvas vazio width x height e todas as imagens sao apenas referencias."""
+    False: canvas vazio width x height e todas as imagens sao apenas referencias.
+    lora=(nome, forca): insere LoraLoaderModelOnly entre o UNET e o QwenImage21Cache -- teste do
+    Viggle Turbo 4-step (ver MEMORIAL).
+    unet_gguf=False: usa `UNETLoader` em vez de `UnetLoaderGGUF` -- necessario para checkpoints
+    int8/safetensors "convrot" (ex.: `qwen_image_2.1_int8_convrot.safetensors`), que NAO sao GGUF
+    (achado 2026-09-28, workflow "Qwen Image 2.1 Image Edit Viggle 4-Step").
+    attention_backend: ex. "comfy kitchen attention" -- insere ModelAttentionBackend (so existe com
+    convrot+INT8; sem suporte de hardware o node recusa a opcao, deixe None para pular).
+    model_sampling_flux=(max_shift, base_shift): insere ModelSamplingFlux com width/height do
+    proprio pedido -- o workflow original do Viggle turbo usa isso para casar o shift do sampler
+    com a resolucao alvo (sem ele a LoRA de 4 passos tende a sair menos nitida)."""
+    model_ref = ["1", 0]
+    unet_class = "UnetLoaderGGUF" if unet_gguf else "UNETLoader"
     g: dict = {
-        "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet or UNET}},
-        "2": {"class_type": "QwenImage21Cache", "inputs": {"model": ["1", 0], "device": cache_device, "dtype": cache_dtype}},
+        "1": {"class_type": unet_class, "inputs": {"unet_name": unet or UNET}},
         "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": CLIP, "type": "qwen_image", "device": "default"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": VAE}},
     }
+    if not unet_gguf:
+        g["1"]["inputs"]["weight_dtype"] = "default"
+    if lora:
+        lora_name, lora_strength = lora
+        g["10"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": model_ref, "lora_name": lora_name, "strength_model": float(lora_strength)}}
+        model_ref = ["10", 0]
+    if attention_backend:
+        g["11"] = {"class_type": "ModelAttentionBackend", "inputs": {"model": model_ref, "attention": attention_backend}}
+        model_ref = ["11", 0]
+    if model_sampling_flux:
+        max_shift, base_shift = model_sampling_flux
+        g["12"] = {"class_type": "ModelSamplingFlux", "inputs": {
+            "model": model_ref, "max_shift": float(max_shift), "base_shift": float(base_shift),
+            "width": int(width), "height": int(height)}}
+        model_ref = ["12", 0]
+    g["2"] = {"class_type": "QwenImage21Cache", "inputs": {"model": model_ref, "device": cache_device, "dtype": cache_dtype}}
     enc_inputs = {"clip": ["3", 0], "prompt": prompt, "negative_prompt": "", "resolution": int(ref_resolution),
                   "vae": ["4", 0]}
     for i, name in enumerate(image_names, 1):
@@ -107,7 +144,7 @@ def build_workflow(prompt: str, image_names: list[str], *, width: int, height: i
         latent = ["6", 0]
     g["7"] = {"class_type": "KSampler", "inputs": {
         "model": ["2", 0], "positive": ["5", 0], "negative": ["5", 1], "latent_image": latent, "seed": int(seed),
-        "steps": int(steps), "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}}
+        "steps": int(steps), "cfg": float(cfg), "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}}
     g["8"] = {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["4", 0]}}
     g["9"] = {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": prefix}}
     return g
@@ -134,7 +171,9 @@ def interrupt() -> None:
 def generate(prompt: str, out_path: Path, *, width: int = 1024, height: int = 1024, steps: int = 30, seed: int = 42,
              reference_images: list[str] | None = None, reference_roles: list[str] | None = None,
              ref_resolution: int = 1024, edit_target: bool = False, timeout: int = DEFAULT_TIMEOUT,
-             cache_device: str = "auto", cache_dtype: str = "default", unet: str | None = None, log=print) -> bool:
+             cache_device: str = "auto", cache_dtype: str = "default", unet: str | None = None,
+             lora: tuple[str, float] | None = None, unet_gguf: bool = True, attention_backend: str | None = None,
+             model_sampling_flux: tuple[float, float] | None = None, cfg: float = 1.0, log=print) -> bool:
     ensure_server(log)
     refs = [Path(p) for p in (reference_images or []) if p][:MAX_REFERENCES]
     if reference_roles:
@@ -143,7 +182,9 @@ def generate(prompt: str, out_path: Path, *, width: int = 1024, height: int = 10
     try:
         return _generate_staged(prompt, out_path, staged, width=width, height=height, steps=steps, seed=seed,
                                 ref_resolution=ref_resolution, edit_target=edit_target, timeout=timeout,
-                                cache_device=cache_device, cache_dtype=cache_dtype, unet=unet, log=log)
+                                cache_device=cache_device, cache_dtype=cache_dtype, unet=unet, lora=lora,
+                                unet_gguf=unet_gguf, attention_backend=attention_backend,
+                                model_sampling_flux=model_sampling_flux, cfg=cfg, log=log)
     finally:
         # As referencias staged em ComfyUI/input nunca eram removidas -- numa decupagem de
         # dezenas de planos isso acumulava PNGs orfaos sem limite (achado da auditoria 2026-09-21).
@@ -153,10 +194,13 @@ def generate(prompt: str, out_path: Path, *, width: int = 1024, height: int = 10
 
 def _generate_staged(prompt: str, out_path: Path, staged: list[str], *, width: int, height: int, steps: int,
                      seed: int, ref_resolution: int, edit_target: bool, timeout: int, cache_device: str,
-                     cache_dtype: str, unet: str | None, log) -> bool:
+                     cache_dtype: str, unet: str | None, lora: tuple[str, float] | None = None,
+                     unet_gguf: bool = True, attention_backend: str | None = None,
+                     model_sampling_flux: tuple[float, float] | None = None, cfg: float = 1.0, log) -> bool:
     workflow = build_workflow(prompt, staged, width=_r32(width), height=_r32(height), steps=steps, seed=seed,
                               ref_resolution=ref_resolution, edit_target=edit_target, cache_device=cache_device,
-                              cache_dtype=cache_dtype, unet=unet)
+                              cache_dtype=cache_dtype, unet=unet, lora=lora, unet_gguf=unet_gguf,
+                              attention_backend=attention_backend, model_sampling_flux=model_sampling_flux, cfg=cfg)
     started = time.monotonic()
     try:
         prompt_id = _http("/prompt", {"prompt": workflow, "client_id": uuid.uuid4().hex})["prompt_id"]
@@ -205,6 +249,42 @@ def edit(image_path: str | Path, instruction: str, out_path: Path, *, extra_refe
     """Edicao nativa: imagem 1 = alvo (a saida herda o tamanho dela); demais = referencias (`<image2>`...)."""
     return generate(instruction, out_path, steps=steps, seed=seed, reference_images=[str(image_path), *(extra_references or [])],
                     edit_target=True, ref_resolution=ref_resolution, timeout=timeout, log=log)
+
+
+CONVROT_UNET = "qwen_image_2.1_int8_convrot.safetensors"
+VIGGLE_TURBO_LORA = "Qwen-Image-2.1-viggle-turbo-4step-lora-r64.safetensors"
+
+MULTIANGLE_SHEET_PROMPT = (
+    "Create an ultra-realistic character sheet of the same adult person from the reference image(s). "
+    "Preserve their facial identity, hair, skin tone, body proportions, and overall realistic appearance. "
+    "Show 4 full-body angles: front view, 3/4 view, side view, and back view, plus 1 close-up portrait "
+    "of the face. Clean neutral studio background, evenly lit, highly detailed natural skin texture, "
+    "realistic anatomy, consistent proportions across all angles, fashion-model turnaround sheet style, "
+    "clear separation between each view, photorealistic."
+)
+
+
+def generate_character_sheet_convrot(reference_images: list[str], out_path: Path, *, outfit: str | None = None,
+                                     width: int = 1536, height: int = 1536, seed: int = 314159265,
+                                     timeout: int = DEFAULT_TIMEOUT, log=print) -> bool:
+    """Folha de personagem 4 angulos + close numa unica geracao, via `qwen_image_2.1_int8_convrot.safetensors`
+    (checkpoint int8 dedicado, NAO GGUF) + LoRA Viggle Turbo 4-step -- workflow "Qwen Image 2.1 Image Edit
+    Viggle 4-Step" do usuario (2026-09-28). 1-3 referencias (`image_1`..`image_3` do `TextEncodeQwenImage21`).
+
+    Mais leve que o caminho GGUF Q4_K_M ja em producao no character_sheet.py (~7,3-7,6 GB de VRAM
+    contra ~18 GB medido, MEMORIAL 3.101) e mais rapido (4 passos fixos, cfg 1, sem CFG real) -- ver
+    MEMORIAL para os numeros medidos com GPU real, se ja validado.
+
+    `outfit`: se dado, anexa "wearing {outfit}" ao prompt padrao (a folha muda a roupa por design,
+    para nao herdar a roupa da referencia se ela nao servir para o resto da decupagem)."""
+    prompt = MULTIANGLE_SHEET_PROMPT
+    if outfit:
+        prompt = prompt.replace("appearance.", f"appearance. Change their outfit to {outfit}.", 1)
+    max_shift, base_shift = 0.6935483870967742, 0.5  # valores do workflow original (16:9 @ ~1536px)
+    return generate(prompt, out_path, width=width, height=height, steps=4, seed=seed,
+                    reference_images=reference_images[:3], ref_resolution=1024, timeout=timeout,
+                    unet=CONVROT_UNET, unet_gguf=False, lora=(VIGGLE_TURBO_LORA, 1.0),
+                    model_sampling_flux=(max_shift, base_shift), cfg=1.0, log=log)
 
 
 def shutdown_server() -> None:

@@ -273,7 +273,8 @@ def main(argv=None) -> int:
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--n-candidates", type=int, default=4)
     ap.add_argument("--image-engine", default="flux",
-                    choices=["flux", "sd35", "sdxl", "flux-krea", "flux-kontext", "zimage", "qwen-image-2.1", "hidream", "qwen-image"])
+                    choices=["flux", "flux-klein-gguf", "sd35", "sdxl", "flux-krea", "flux-kontext",
+                            "zimage", "qwen-image-2.1", "hidream", "qwen-image"])
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=544)
     ap.add_argument("--apply", action="store_true",

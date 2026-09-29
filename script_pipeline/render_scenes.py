@@ -435,6 +435,39 @@ def build_render_plan(
     None/empty leaves clips exactly as before (no camera-direction clause added)."""
     camera_clause = f" Camera movement: {camera_movement}." if camera_movement else ""
     jobs = []
+    from script_pipeline.cast_characters import personagens_citados
+    from script_pipeline.motion_conditioner import infer_primitive
+    from script_pipeline.shot_plan import EMOCAO_VISIVEL_FALA, emocao_para_video
+
+    # Mesmas regras da decupagem (shot_plan, MEMORIAL 3.132), para o caminho do screenplay:
+    def aparencia_citada(texto: str, limite: int = 2) -> str:
+        """Clipe de acao ia SEM descricao de ninguem -- cada clipe inventava as pessoas.
+        Ate `limite` personagens citados (nome ou apelido de figurante)."""
+        partes = []
+        for nome in personagens_citados(texto, cast)[:limite]:
+            desc = (cast.get(nome) or {}).get("descriptor", "")
+            if desc:
+                partes.append(f"{nome}, {desc.rstrip('.')}")
+        return ". ".join(partes)
+
+    def acao_da_fala(character: str, beat: str) -> str:
+        """Fala e close; um beat de acao FISICA (proteger, saltar, atirar) nao cabe num
+        retrato e o modelo transferia a acao para quem fala (Ha-eun vestiu o capacete
+        do fugitivo, CERCO EM SEUL). Nesses casos o plano de fala e reacao."""
+        primitiva, _ = infer_primitive(beat or "", character, "", framing="medium", speaking=False)
+        if primitiva in {"takedown", "restrain", "escort", "protect", "pursue", "contact",
+                         "fire", "locomote", "reach"}:
+            return (f"{character} reacts urgently to the action happening just outside the "
+                    f"frame, head and eyes moving, body steady")
+        return beat
+
+    def entrega_visivel(delivery: str, contexto: str) -> str:
+        """Slug de emocao ("alegre") vira expressao visivel sem ocupar a boca; rubrica em
+        texto livre do roteirista segue como esta."""
+        slug = (delivery or "").strip().lower()
+        if slug in EMOCAO_VISIVEL_FALA:
+            return emocao_para_video(slug, falando=True, contexto=contexto)
+        return delivery
 
     def compose_prompt(*, action: str, characters: str = "", setting: str = "",
                        speech: str = "", audio: str = "") -> str:
@@ -506,7 +539,8 @@ def build_render_plan(
                     "id": f"scene{scene['index']:02d}_s{shot_position:03d}_act",
                     "scene_index": scene["index"], "line_index": None,
                     "prompt": compose_prompt(
-                        action=visual, setting=setting_anchor, audio=AMBIENT_AUDIO_HINT,
+                        action=visual, characters=aparencia_citada(visual),
+                        setting=setting_anchor, audio=AMBIENT_AUDIO_HINT,
                     ),
                     "storyboard_path": shot_storyboard,
                     # No dialogue -> no TTS audio; duration is the caller's
@@ -529,10 +563,13 @@ def build_render_plan(
             # action_text, so nothing told the model what changed at THIS line.
             # beat_visual is the per-line "what's happening right now" description.
             action = beat_visual or scene.get("visual_prompt") or scene.get("action_text", "")
+            if beat_visual:
+                action = acao_da_fala(character, beat_visual)
             # The guide asks for emotion as a VISIBLE physical cue rather than an
             # abstract label, and for dialogue in quotes with a short acting direction
             # attached to the line -- not a bare quoted string.
-            delivery = line.get("parenthetical") or line.get("emotion") or ""
+            delivery = entrega_visivel(line.get("parenthetical") or line.get("emotion") or "",
+                                       f"{scene.get('art_direction', '')} {scene.get('action_text', '')}")
             speech = (
                 f'Close-up on {character}, speaking directly to camera with natural mouth '
                 f'articulation, saying: "{line["text"]}"'

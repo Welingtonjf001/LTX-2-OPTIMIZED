@@ -301,13 +301,18 @@ def main() -> int:
         shot["_acao"] = (shot.get("video_prompt") or "").split(".")[0]
         shot["_descritor"] = descritores.get((shot.get("subject") or "").upper(), "")
         # a emocao ja calculada, traduzida para o que se VE (3.36.4)
+        # Mesma regra do shot_plan (emocao_para_video): em plano de FALA a versao que
+        # nao ocupa a boca, e em cena de acao sem sorriso. Antes usava a versao de
+        # acao muda -- "alegre" voltava a ser "open smile" no prompt polido.
         try:
-            from script_pipeline.shot_plan import emocao_visivel
+            from script_pipeline.shot_plan import emocao_para_video
             if shot.get("type") == "dialogue":
                 dlg = scene.get("dialogue") or []
                 li = shot.get("line_index")
                 if li is not None and 0 <= li < len(dlg):
-                    shot["_emocao_visivel"] = emocao_visivel(dlg[li].get("emotion"))
+                    shot["_emocao_visivel"] = emocao_para_video(
+                        dlg[li].get("emotion"), falando=True,
+                        contexto=f"{shot.get('look_base', '')} {shot.get('fallback', '')}")
         except ImportError:
             pass
         novo, antes, depois = polish_prompt(shot, scene, fala=fala,

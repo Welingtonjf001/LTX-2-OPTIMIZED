@@ -24,7 +24,17 @@ import urllib.request
 from pathlib import Path
 
 
-DEFAULT_MODEL = "qwen3-vl:30b"
+# ACHADO 2026-09-29 (REENTRY WINDOW, pedido do usuario para baratear o gate): a chamada
+# de DECISAO (`_evaluation_prompt`) nunca recebe imagem -- so o JSON de percepcao + o
+# contrato do plano, em texto puro (ver `audit()`: `_ollama_json(model, ..., [], ...)`,
+# lista de imagens vazia). Rodar essa chamada no mesmo modelo de visao de 30B pagava o
+# preco de um modelo grande (e o overhead de troca de GPU ComfyUI<->Ollama a cada rodada
+# de retry) para uma tarefa que e julgamento de texto estruturado. Trocado para
+# qwen2.5:32b-instruct-q4_K_M, ja validado nesta maquina para saida JSON estruturada
+# (parse_screenplay/cast_characters) e sem o bug de raciocinio-vazando-pro-content do
+# qwen3-vl:30b (MEMORIAL 3.133). A percepcao continua no modelo de visao -- e a unica
+# chamada que precisa "ver" a imagem.
+DEFAULT_MODEL = "qwen2.5:32b-instruct-q4_K_M"
 DEFAULT_PERCEPTION_MODEL = "qwen3-vl:30b"
 
 
@@ -71,8 +81,15 @@ def _ollama_json_once(model: str, prompt: str, images: list[Path], *, timeout: i
         "format": "json",
         "think": False,
         "keep_alive": "10m",
-        "options": ({"temperature": 0.3, "seed": 7, "num_ctx": 8192, "num_predict": 3000} if retry else
-                    {"temperature": 0, "num_ctx": 8192, "num_predict": 2000}),
+        # MEDIDO 2026-09-27: desde o Ollama 0.34.4 (atualizado sozinho em 26/09) o
+        # qwen3-vl:30b RACIOCINA mesmo com think=false (nem "/no_think" no prompt ou
+        # no system desliga) -- ~6000 caracteres de `thinking` antes do JSON. Com
+        # num_predict 2000 o plano com 2+ imagens estourava (done_reason=length) e
+        # o JSON saia cortado ou vazio: 12 de 17 "reprovacoes" do CERCO EM SEUL v2
+        # eram isso. Folga para raciocinio + resposta; 16384 de contexto cabe
+        # inteiro na 3090 (20 GB carregado, medido).
+        "options": ({"temperature": 0.3, "seed": 7, "num_ctx": 16384, "num_predict": 12000} if retry else
+                    {"temperature": 0, "num_ctx": 16384, "num_predict": 8192}),
         "messages": [{
             "role": "user",
             "content": prompt,
@@ -672,13 +689,21 @@ def audit(run_dir: Path, *, stage: str, model: str = DEFAULT_MODEL,
     merged = merge_results(previous, results)
     plan_indices = [int(s.get("index", -1)) for s in all_shots]
     blocking = [r for r in merged if not r.get("pass")]
+    # Erro do auditor (resposta vazia/cortada, Ollama fora) continua bloqueando --
+    # nao ha aprovacao sem auditoria -- mas nao e REPROVACAO do plano. Contados
+    # separados: misturados, 12 erros de parse do CERCO EM SEUL v2 pareciam 12
+    # planos reprovados (2026-09-27).
+    auditor_errors = [int(r["shot"]) for r in blocking if r.get("auditor_error")]
     report = {
         "status": build_status(merged, plan_indices),
         "stage": stage,
         "decision_model": model,
         "perception_model": perception_model,
         "audited": len(merged),
+        "evaluated": len(merged) - len(auditor_errors),
         "expected": len(all_shots),
+        "rejected": len(blocking) - len(auditor_errors),
+        "auditor_errors": auditor_errors,
         "blocking": blocking,
         "warnings": {str(r["shot"]): r["warnings"] for r in merged if r.get("warnings")},
         "results": merged,
@@ -686,8 +711,10 @@ def audit(run_dir: Path, *, stage: str, model: str = DEFAULT_MODEL,
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[visual_audit:{stage}] status={report['status']}; "
-          f"{report['audited']}/{report['expected']} auditado(s); "
-          f"{len(blocking)} bloqueio(s); percepcao={perception_model}; decisao={model}")
+          f"{report['evaluated']}/{report['expected']} avaliado(s); "
+          f"{report['rejected']} reprovado(s), {len(auditor_errors)} erro(s) do auditor"
+          + (f" (planos {', '.join(map(str, auditor_errors))} -- NAO avaliados)" if auditor_errors else "")
+          + f"; percepcao={perception_model}; decisao={model}")
     print(f"[visual_audit:{stage}] relatorio: {out}")
     return report
 

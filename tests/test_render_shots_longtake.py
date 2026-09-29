@@ -176,9 +176,11 @@ def test_planos_de_cenas_diferentes_nao_se_misturam(tmp_path, monkeypatch):
     assert [f["shot"] for f in feitos] == [0, 1, 2, 3]
 
 
-def test_assign_takes_wide_full_abrem_take_novo():
+def test_assign_takes_wide_full_abrem_take_novo(monkeypatch):
     # Mesmo padrao de framings do shot_plan real do CERCO EM SEUL (25 planos,
-    # 1 cena so): wide nos indices 0, 8, 12, 16 -- 4 takes esperados.
+    # 1 cena so): wide nos indices 0, 8, 12, 16 -- 4 takes esperados. Teto de
+    # planos desligado aqui: este teste e so da quebra por wide/full.
+    monkeypatch.setattr(rs, "MAX_PLANOS_POR_TAKE", 100)
     framings = ["wide", "insert", "insert", "close", "close", "insert", "insert", "medium",
                 "wide", "close", "close", "medium",
                 "wide", "medium", "insert", "close",
@@ -234,13 +236,16 @@ def test_grupo_de_3_com_wide_no_meio_quebra_em_2_takes(tmp_path, monkeypatch):
     assert all(f["clip"] for f in feitos)
 
 
-def test_falha_no_grupo_marca_todos_como_nao_ok(tmp_path, monkeypatch):
+def test_falha_no_grupo_refaz_planos_avulsos(tmp_path, monkeypatch):
+    """Take que falha (trava do easy-media, 2026-09-27) cai no clipe avulso por plano."""
     import minimax_h3_backend as b
 
     def fake_generate_longtake(segments, out_path, **kw):
         raise RuntimeError("ComfyUI (MiniMax H3) explodiu")
 
+    avulsos = []
     monkeypatch.setattr(b, "generate_longtake", fake_generate_longtake)
+    monkeypatch.setattr(b, "generate", lambda prompt, out, **kw: avulsos.append(out))
     import script_pipeline.generate_storyboards as sb_real
     monkeypatch.setattr(sb_real, "stop_comfyui", lambda *a, **kw: None)
 
@@ -251,5 +256,36 @@ def test_falha_no_grupo_marca_todos_como_nao_ok(tmp_path, monkeypatch):
     feitos = rs._minimax_longtake_flush(
         pend, fps=24, seed=1, minimax_aspect_ratio=None, minimax_megapixels=None)
 
+    assert len(avulsos) == 2
+    assert all(f["clip"] for f in feitos)
+    assert pend[0]["marca"].exists()
+
+
+def test_falha_no_grupo_e_no_avulso_marca_como_nao_ok(tmp_path, monkeypatch):
+    import minimax_h3_backend as b
+
+    def explode(*a, **kw):
+        raise RuntimeError("ComfyUI (MiniMax H3) explodiu")
+
+    monkeypatch.setattr(b, "generate_longtake", explode)
+    monkeypatch.setattr(b, "generate", explode)
+    import script_pipeline.generate_storyboards as sb_real
+    monkeypatch.setattr(sb_real, "stop_comfyui", lambda *a, **kw: None)
+
+    pend = [_pendente(0, scene=5, tmp_path=tmp_path), _pendente(1, scene=5, tmp_path=tmp_path)]
+    feitos = rs._minimax_longtake_flush(
+        pend, fps=24, seed=1, minimax_aspect_ratio=None, minimax_megapixels=None)
+
     assert [f["clip"] for f in feitos] == [None, None]
     assert not pend[0]["marca"].exists()
+
+
+def test_assign_takes_teto_de_planos(tmp_path):
+    pend = [_pendente(i, scene=1, tmp_path=tmp_path, framing="close") for i in range(9)]
+    pend[0]["framing"] = "wide"
+    rs._assign_takes(pend)
+    tamanhos = {}
+    for p in pend:
+        tamanhos[p["take_id"]] = tamanhos.get(p["take_id"], 0) + 1
+    assert max(tamanhos.values()) <= rs.MAX_PLANOS_POR_TAKE
+    assert sum(tamanhos.values()) == 9

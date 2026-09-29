@@ -34,6 +34,9 @@ def validate_state(state):
             raise ValueError(f'Invalid position: {eid}')
         if not math.isfinite(entity.get('yaw', 0)):
             raise ValueError(f'Invalid yaw: {eid}')
+        if entity['kind'] != 'prop':
+            from script_pipeline.mannequin_poses import validate_pose
+            validate_pose(entity.get('pose'))
         attachment = entity.get('attachment')
         if attachment:
             owner = entities.get(attachment.get('entity_id'))
@@ -57,6 +60,14 @@ def apply_operations(state, operations):
             if (previous or {}).get('entity_id') != op.get('from'):
                 raise ValueError('Transfer precondition failed')
             entity['attachment'] = {'entity_id': op['to'], 'socket': op['socket']}
+        elif op.get('op') == 'detach':
+            # Objeto largado: sai da mao de `from` e fica parado em `position` (a mochila deixada
+            # junto ao carro, a arma chutada para longe). O inverso e `transfer` com from=None.
+            previous = entity.get('attachment')
+            if entity.get('kind') != 'prop' or (previous or {}).get('entity_id') != op.get('from'):
+                raise ValueError('Detach precondition failed')
+            entity.pop('attachment', None)
+            entity['position'] = copy.deepcopy(op['position'])
         elif op.get('op') == 'set':
             field = op.get('field')
             if field not in ('position', 'yaw', 'pose', 'wardrobe_id', 'present'):

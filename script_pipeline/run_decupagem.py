@@ -125,6 +125,7 @@ def _visual_gate(run, args, *, stage: str, regen_base: list, nome: str) -> bool:
         total_shots=len(json.loads((Path(run) / 'parse' / 'shot_plan.json').read_text(encoding='utf-8')).get('shots', [])),
         expand_fn=((lambda shots: __import__("script_pipeline.location_master", fromlist=["x"])
                     .expand_blocked(run, shots)) if stage == "stills" else None),
+        max_regen_fraction=args.gate_max_regen_fraction,
         log=lambda m: print(m, flush=True))
     if not ok and args.visual_unresolved == "continue":
         print(f"[run_decupagem] AVISO: gate {stage} com planos reprovados; seguindo "
@@ -229,15 +230,20 @@ def main() -> int:
     ap.add_argument("--no-consistency-check", action="store_true",
                     help="desliga o gate de consistencia facial dos stills (volta ao "
                          "comportamento antigo: gera uma vez, nao compara com a referencia).")
-    ap.add_argument("--visual-audit-model", default="qwen3-vl:30b",
-                    help="LLM que julga a percepcao visual contra o contrato e bloqueia "
-                         "still/video fora dele. Padrao: qwen3-vl:30b. Diferente da auditoria textual e do "
+    ap.add_argument("--visual-audit-model", default="qwen2.5:32b-instruct-q4_K_M",
+                    help="LLM que julga a percepcao visual (ja em texto) contra o contrato e "
+                         "bloqueia still/video fora dele. NAO recebe imagem -- so o JSON da "
+                         "percepcao + o contrato, por isso o padrao e um modelo de TEXTO rapido "
+                         "(qwen2.5:32b-instruct-q4_K_M), nao mais o mesmo VLM de 30B da percepcao "
+                         "(achado 2026-09-29: essa chamada nunca precisou de visao, so pagava o "
+                         "preco de um modelo grande). Diferente da auditoria textual e do "
                          "InsightFace: verifica locacao, objetos, falante, texto inventado "
                          "e regras opt-in como a aeronave do Voo 702.")
     ap.add_argument("--visual-perception-model", default="qwen3-vl:30b",
-                    help="VLM usado somente para descrever pixels sem ver o contrato. "
-                         "O mesmo Qwen3-VL faz uma segunda chamada textual para decidir. "
-                         "Separar as chamadas evita confirmacao do prompt.")
+                    help="VLM usado para descrever pixels sem ver o contrato -- a UNICA chamada "
+                         "do gate que precisa de visao de verdade. --visual-audit-model faz a "
+                         "segunda chamada, textual, para decidir. Separar as chamadas evita "
+                         "confirmacao do prompt e permite usar um modelo mais barato na decisao.")
     ap.add_argument("--visual-max-retries", type=int, default=2,
                     help="quando o gate visual reprova planos, refaz SO eles com outra seed e "
                          "reaudita, ate N rodadas (0 = comportamento antigo: so bloqueia). "
@@ -246,6 +252,17 @@ def main() -> int:
                     help="o que fazer com planos que seguem reprovados depois das rodadas: "
                          "block (padrao) para a corrida; continue segue e deixa o registro "
                          "em shots/visual_gate_*_retries.json.")
+    ap.add_argument("--gate-max-regen-fraction", type=float, default=0.4,
+                    help="ACHADO 2026-09-29 (REENTRY WINDOW): fracao maxima de planos reprovados "
+                         "numa unica rodada que ainda aciona regeneracao em massa (gate_retry.py); "
+                         "acima disso o gate se recusa a regenerar (\"gate suspeito\") e nenhuma "
+                         "rodada de retry roda. Padrao 0.4 (40%%) protege contra gate mal calibrado "
+                         "queimando GPU regenerando o filme inteiro por um bug do auditor -- mas a "
+                         "mesma trava impede QUALQUER retry quando a reprovacao e genuina e so "
+                         "precisa de mais tentativas de seed (ex.: identity_match do Qwen3-VL "
+                         "contra foto real de ator, mais dificil de casar que contra referencia "
+                         "gerada pelo proprio FLUX). Suba para 1.0 para desligar a trava nesta "
+                         "corrida (decisao explicita do usuario, nao padrao).")
     ap.add_argument("--max-speech-seconds", type=float, default=6.0,
                     help="fala mais longa que isto vira varios planos de fala (mesmo falante "
                          "em close, audio recortado em silencio). 0 desliga. Ver speech_split.py.")
@@ -277,8 +294,37 @@ def main() -> int:
     ap.add_argument("--motion-conditioning", action="store_true",
                     help="compila a decupagem em movimento por personagem: acrescenta um "
                          "motion_prompt curto ao LTX/MiniMax e salva parse/motion_plan.json "
-                         "como contrato para um adaptador MotionBricks/retarget. Nao exige "
-                         "o runtime 3D e e opt-in para preservar prompts ja validados.")
+                         "como contrato para um adaptador MotionBricks/retarget. Desde "
+                         "2026-09-27 o movimento e aplicado SEMPRE que a corrida passa pela "
+                         "etapa [M]; o flag ficou so por compatibilidade.")
+    ap.add_argument("--lacunas", default="relatorio", choices=["relatorio", "bloquear", "off"],
+                    help="auditoria de lacunas do roteiro antes da decupagem (parse/lacunas.md): "
+                         "agente/alvo de cada acao, pessoa agindo sem cadastro, fala que repete a "
+                         "acao vizinha, estado que muda. 'bloquear' para a corrida se houver "
+                         "lacuna critica. Ver script_pipeline/GUIA_ROTEIRO.md.")
+    ap.add_argument("--lacunas-sem-llm", action="store_true",
+                    help="so as checagens deterministicas (sem as sugestoes por acao do --engine)")
+    ap.add_argument("--text-validation", default="relatorio", choices=["relatorio", "bloquear", "off"],
+                    help="validacao pos-parse, ainda em texto (parse/text_validation.md): o "
+                         "shot_plan.json inteiro contra o roteiro-fonte -- personagem/fala/local sem "
+                         "base no texto, descritor divergente entre planos da mesma cena. Descritor "
+                         "divergente e CORRIGIDO automaticamente (contra o canonico do cast.json), "
+                         "nao so relatado. 'bloquear' para a corrida por fala/local/personagem sem "
+                         "base que nao deu pra corrigir sozinho.")
+    ap.add_argument("--text-validation-sem-llm", action="store_true",
+                    help="so as checagens deterministicas e a correcao de descritor (sem a "
+                         "checagem semantica por cena do --engine)")
+    ap.add_argument("--previs3d", default="complexas", choices=["complexas", "medias", "todos", "off"],
+                    help="previs 3D automatico (MEMORIAL 3.135): gera o spec espacial da decupagem e "
+                         "renderiza no Blender, em baixa resolucao, manequins e camera dos planos do "
+                         "nivel pedido de shots/complexity_report.json -- folha shots/previs_3d.png e "
+                         "movimento shots/previs_3d.mp4. So CPU; so relata, nunca bloqueia.")
+    ap.add_argument("--previs3d-stills", action="store_true",
+                    help="usa o quadro inicial do previs como blocking do still desses planos "
+                         "(FLUX img2img nos abertos/medios, referencia nos closes). Exige "
+                         "--image-engine flux; ignorado com --spatial-spec (spec manual manda).")
+    ap.add_argument("--previs3d-intergen", action="store_true",
+                    help="movimento de dupla em contato pelo InterGen (GPU) no clipe do previs")
     ap.add_argument("--character-sheet", action="store_true",
                     help="Forca a Fase A da consistencia de personagem (MEMORIAL 3.72) mesmo "
                          "com 1 personagem so no cast. Normalmente desnecessario: com 2+ "
@@ -301,6 +347,13 @@ def main() -> int:
                          "nao confundir com os LoRAs de video em models/loras/). "
                          "Sem isto, nenhum LoRA (comportamento de sempre).")
     ap.add_argument("--lora-strength", type=float, default=0.8)
+    ap.add_argument("--qwen-lora", default=None,
+                    help="LoRA do TRANSFORMER do Qwen-Image-2.1 (so --image-engine "
+                         "qwen-image-2.1), formato NOME[:FORCA]. Ex.: "
+                         "Qwen-Image-2.1-viggle-turbo-4step-lora-r64.safetensors:1.0 -- "
+                         "testado com GPU real (still solo e 2 referencias nomeadas): "
+                         "mantem identidade em 4-8 passos, 3-8x mais rapido que os 30 "
+                         "do padrao.")
     # LoRAs de VIDEO do LTX 2.5 (pedido do usuario 2026-09-12) -- so na passada de video,
     # nunca nos stills. Catalogo, forcas, gatilhos e compatibilidade 2.3->2.5 em
     # ltx_loras.py; montagem das referencias IC em script_pipeline/ic_references.py.
@@ -393,6 +446,16 @@ def main() -> int:
                                      "--script", args.script, "--run-dir", str(run),
                                      "--enrich-engine", args.engine]):
                 return 1
+            # ACHADO 2026-09-29: nada guardava o roteiro-FONTE original -- so a versao
+            # ja reestruturada por LLM (parse/screenplay_auto.txt), que e exatamente onde
+            # bugs de reestruturacao (fala presa no cabecalho errado, exemplo de estilo
+            # copiado) podem ja ter entrado. `text_validation.py` precisa do original de
+            # verdade pra comparar contra, nao contra o que o proprio LLM ja alterou.
+            try:
+                (run / "parse" / "screenplay_original.txt").write_text(
+                    Path(args.script).read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            except OSError:
+                pass
         else:
             print("[1 parse] ja feito, reaproveitando")
 
@@ -449,6 +512,20 @@ def main() -> int:
                               "--out", str(run / "parse" / "story_structure.json")],
               obrigatorio=False)
 
+    if ate("plano") and args.lacunas != "off":
+        # Lacunas do roteiro ANTES da decupagem (MEMORIAL 3.134): o que o texto nao diz
+        # e o video vai inventar -- agente/alvo da acao, pessoa sem cadastro, fala que
+        # repete a acao, estado que muda. So relata, salvo --lacunas bloquear.
+        cmd_lac = ["-m", "script_pipeline.screenplay_gaps", "--run-dir", str(run)]
+        if not args.lacunas_sem_llm:
+            cmd_lac += ["--engine", args.engine]
+        if args.lacunas == "bloquear":
+            cmd_lac.append("--bloquear")
+        if not passo("L lacunas do roteiro", cmd_lac, obrigatorio=args.lacunas == "bloquear"):
+            print("[run_decupagem] decupagem bloqueada: o roteiro tem lacunas criticas -- "
+                  "veja parse/lacunas.md (ou rode com --lacunas relatorio).", file=sys.stderr)
+            return 1
+
     if ate("plano"):
         if args.reuse_plan and (run / "parse" / "shot_plan.json").exists():
             print("[P decupagem] shot_plan existente preservado (--reuse-plan)")
@@ -499,8 +576,12 @@ def main() -> int:
     # Toda geração de vídeo recebe o contrato semântico de movimento. O flag
     # continua útil para produzir/inspecionar o score antes da etapa de vídeo,
     # mas não deixa mais a rota de entrega renderizar uma perseguição como idle.
+    # Sempre aplica quando a parada alcanca "motion": a decupagem e REGERADA a cada
+    # corrida, e uma corrida --ate animatic sem este passo sobrescrevia o shot_plan
+    # sem movimento -- e um video disparado depois (ou retomado) herdava o plano cru.
+    # MEDIDO 2026-09-27 (CERCO EM SEUL): algemar/conduzir renderizados como gente parada.
     motion_required_for_video = PARADAS.index(args.ate) >= PARADAS.index("render")
-    if ate("motion") and (args.motion_conditioning or motion_required_for_video):
+    if ate("motion"):
         plan_path = run / "parse" / "shot_plan.json"
         if not plan_path.exists():
             print("[M movimento] shot_plan.json ausente; nao ha decupagem para condicionar", file=sys.stderr)
@@ -532,6 +613,54 @@ def main() -> int:
             except Exception as exc:
                 print(f"[blocking-preview] aviso: nao consegui gerar o contact sheet ({exc})",
                       flush=True)
+        # Complexidade por plano (MEMORIAL 3.134): onde o blocking 2D basta e onde um
+        # previs 3D de baixa resolucao paga o custo, com o limite do motor escolhido.
+        # So relata.
+        passo("M complexidade", ["-m", "script_pipeline.shot_complexity", "--run-dir", str(run),
+                                 "--engine", args.video_engine], obrigatorio=False)
+        # Previs 3D automatico (MEMORIAL 3.135): o spec espacial que antes era escrito a mao sai
+        # da decupagem + elenco + movimento, e o Blender renderiza manequins e camera so dos
+        # planos do nivel pedido. Roda depois da complexidade (usa o nivel de cada plano) e
+        # antes dos stills (o quadro inicial pode virar blocking do still, --previs3d-stills).
+        if args.previs3d != "off":
+            cmd_pv = ["-m", "script_pipeline.previs_spec", "--run-dir", str(run),
+                      "--niveis", args.previs3d, "--width", str(args.width), "--height", str(args.height)]
+            usar_still = args.previs3d_stills and not args.spatial_spec
+            if args.previs3d_stills and args.spatial_spec:
+                print("[3D previs] --spatial-spec ligado: o spec manual manda no still; "
+                      "--previs3d-stills ignorado", flush=True)
+            if usar_still and args.image_engine != "flux":
+                print("[3D previs] --previs3d-stills exige --image-engine flux; so o relatorio", flush=True)
+                usar_still = False
+            if usar_still:
+                cmd_pv.append("--stills")
+            if args.previs3d_intergen:
+                cmd_pv.append("--intergen")
+            passo("3D previs", cmd_pv, obrigatorio=False)
+        else:
+            # ACHADO (review adversarial 2026-09-27): --previs3d off nunca chama previs_spec, e
+            # so previs_spec sabia remover um vinculo previs->still deixado por corrida anterior
+            # (--reuse-plan). Sem isto, desligar a prevs aqui nao desligava o still condicionado
+            # nela numa corrida retomada.
+            passo("3D previs", ["-m", "script_pipeline.previs_spec", "--run-dir", str(run),
+                                "--desligar-stills"], obrigatorio=False)
+
+    # Validacao pos-parse, AINDA EM TEXTO (MEMORIAL 3.14x): o shot_plan.json inteiro
+    # (personagens, falas, locais, descritor por plano) contra o roteiro-FONTE original --
+    # antes de qualquer still. Roda enquanto o Ollama ainda esta quente (antes do unload_all
+    # logo abaixo), sem custo extra de subir o LLM de novo. So relata, salvo --text-validation
+    # bloquear. Ver script_pipeline/text_validation.py para o que cada checagem pega.
+    if ate("plano") and args.text_validation != "off":
+        cmd_tv = ["-m", "script_pipeline.text_validation", "--run-dir", str(run)]
+        if not args.text_validation_sem_llm:
+            cmd_tv += ["--engine", args.engine]
+        if args.text_validation == "bloquear":
+            cmd_tv.append("--bloquear")
+        if not passo("V validacao de texto", cmd_tv, obrigatorio=args.text_validation == "bloquear"):
+            print("[run_decupagem] decupagem bloqueada: a validacao pos-parse achou problema "
+                  "critico -- veja parse/text_validation.md (ou rode com --text-validation relatorio).",
+                  file=sys.stderr)
+            return 1
 
     # Parse, direção emocional, estrutura e câmera já terminaram de usar o
     # Ollama. Liberar o LLM antes de subir FLUX/SD evita que dois modelos
@@ -584,6 +713,8 @@ def main() -> int:
                            "--consistency-max-retries", str(args.consistency_max_retries)]
         if args.lora:
             cmd_stills += ["--lora", args.lora, "--lora-strength", str(args.lora_strength)]
+        if args.qwen_lora:
+            cmd_stills += ["--qwen-lora", args.qwen_lora]
         if not passo("5-D stills", cmd_stills):
             return 1
         from script_pipeline.production_project import sync_assets

@@ -211,6 +211,13 @@ def main() -> int:
                          "LTX em models/loras/, que sao incompativeis aqui). Sem isto, nenhum "
                          "LoRA (comportamento de sempre).")
     ap.add_argument("--lora-strength", type=float, default=0.8)
+    ap.add_argument("--qwen-lora", default=None,
+                    help="LoRA do TRANSFORMER do Qwen-Image-2.1 (so --image-engine "
+                         "qwen-image-2.1), formato NOME[:FORCA] -- arquivo em "
+                         "Qwen-Image-2.1/ComfyUI/models/loras/. Ex.: "
+                         "Qwen-Image-2.1-viggle-turbo-4step-lora-r64.safetensors:1.0 "
+                         "(testado com GPU real com 1 e 2 referencias nomeadas: mantem "
+                         "identidade em 4-8 passos contra 30 do padrao, 3-8x mais rapido).")
     # LoRAs de VIDEO do LTX 2.5 (models/loras e models/2.5/loras) -- nada a ver com o
     # --lora acima, que e dos STILLS. Catalogo, forcas e gatilhos: ltx_loras.py.
     ap.add_argument("--video-lora", action="append", default=[], metavar="CHAVE[:FORCA]",
@@ -322,6 +329,12 @@ def main() -> int:
         if video_loras:
             print("[5-D] LoRAs de video: " + ", ".join(f"{n} ({s:g})" for n, s in video_loras))
 
+    qwen_lora_name, qwen_lora_strength = "", 1.0
+    if args.qwen_lora:
+        nome, _, forca = args.qwen_lora.partition(":")
+        qwen_lora_name = nome
+        qwen_lora_strength = float(forca) if forca else 1.0
+
     feitos = rs.render(plan, shots_dir, width=args.width, height=args.height,
                        video_loras=video_loras, ic_mode=args.ic_reference, ic_lora=ic_lora_nome,
                        ic_strength=args.ic_strength, ic_guide_strength=args.ic_guide_strength,
@@ -337,6 +350,7 @@ def main() -> int:
                        consistency_threshold=args.consistency_threshold,
                        consistency_max_retries=args.consistency_max_retries,
                        lora_name=args.lora, lora_strength=args.lora_strength,
+                       qwen_lora_name=qwen_lora_name, qwen_lora_strength=qwen_lora_strength,
                        engine=args.engine, minimax_aspect_ratio=args.minimax_aspect_ratio,
                        minimax_megapixels=args.minimax_megapixels,
                        minimax_turbo=args.minimax_turbo, minimax_ref_audio=args.minimax_ref_audio,

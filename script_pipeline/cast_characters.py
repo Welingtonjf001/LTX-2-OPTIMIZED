@@ -165,6 +165,87 @@ def _content_words(text: str) -> set[str]:
             if w not in _FIDELITY_STOPWORDS}
 
 
+# ACHADO 2026-09-29 (REENTRY WINDOW): a sobreposicao de palavras pega invencao TOTAL
+# (a Lyra virando jaqueta de couro), mas nao pega TROCA PONTUAL de um atributo decisivo
+# quando o resto do vocabulario e parecido o bastante (os dois falam de "suit"/"flight"/
+# "chest"/"collar" porque os dois sao trajes de voo). MEDIDO: "long dark hair, charcoal
+# suit" -> "short, dark-brown hair... dark-blue suit" teve 30% de sobreposicao (acima do
+# limiar de 20%) apesar de trocar comprimento de cabelo E cor da roupa -- duas
+# contradicoes diretas que a taxa agregada nao enxerga. Estas funcoes comparam
+# CATEGORIA POR CATEGORIA (comprimento de cabelo, cor perto de "hair", cor perto de uma
+# peca de roupa) em vez de só contar palavras em comum.
+_HAIR_LENGTH_SHORT_WORDS = ("short", "cropped", "buzz", "pixie", "crew-cut", "shaved", "bald")
+_HAIR_LENGTH_LONG_WORDS = ("long", "flowing", "waist-length", "floor-length")
+_COLOR_WORDS = (
+    "black", "brown", "auburn", "blonde", "blond", "red", "gray", "grey", "white",
+    "silver", "charcoal", "blue", "green", "navy", "olive", "tan", "orange",
+    "purple", "pink", "gold", "chestnut",
+)
+_GARMENT_WORDS = ("jacket", "coat", "suit", "uniform", "jumpsuit", "dress", "robe", "cloak", "tunic")
+
+
+def _hair_length_bucket(text: str) -> str | None:
+    low = (text or "").lower()
+    for m in re.finditer(r"\bhair\b", low):
+        window = low[max(0, m.start() - 40):m.start()]
+        if any(w in window for w in _HAIR_LENGTH_SHORT_WORDS):
+            return "short"
+        if any(w in window for w in _HAIR_LENGTH_LONG_WORDS):
+            return "long"
+    return None
+
+
+def _color_near(text: str, keyword: str) -> str | None:
+    """Cor mais PROXIMA de `keyword` (ex.: 'hair', 'jacket') numa janela curta antes
+    dela -- nao a primeira da lista fixa `_COLOR_WORDS`. BUGFIX (2026-09-29, achado
+    pelo proprio teste de regressao): com janela larga e busca por ordem de lista, uma
+    frase como "dark-blue jacket" antecedida de "black hair, " pegava "black" (que so
+    aparece antes na string, nao mais perto do substantivo) em vez de "blue" -- a cor
+    do CABELO vazava pra dentro da checagem da cor da ROUPA. Agora pega a ocorrencia
+    de cor com maior indice na janela (mais perto de `keyword`). Substring-safe:
+    "dark-brown" contem "brown", entao um lado dizendo "brown" e o outro "dark-brown"
+    NAO conta como contradicao (mesma cor, detalhe a mais); só cores REALMENTE
+    diferentes (auburn vs brown) contam."""
+    low = (text or "").lower()
+    for m in re.finditer(rf"\b{keyword}\b", low):
+        window = low[max(0, m.start() - 40):m.start()]
+        best_color, best_pos = None, -1
+        for color in _COLOR_WORDS:
+            pos = window.rfind(color)
+            if pos > best_pos:
+                best_pos, best_color = pos, color
+        if best_color:
+            return best_color
+    return None
+
+
+def _garment_color(text: str) -> str | None:
+    for garment in _GARMENT_WORDS:
+        color = _color_near(text, garment)
+        if color:
+            return color
+    return None
+
+
+def _attribute_contradiction(anchor: str, descriptor: str) -> str | None:
+    """Devolve uma explicacao curta se anchor/descriptor contradizem um atributo
+    especifico (comprimento de cabelo, cor do cabelo, cor da roupa) -- None se nao
+    houver base de comparacao ou os dois baterem. Duas cores so contam como
+    contraditorias se nenhuma for substring da outra."""
+    a_len, d_len = _hair_length_bucket(anchor), _hair_length_bucket(descriptor)
+    if a_len and d_len and a_len != d_len:
+        return f"comprimento de cabelo ({a_len} -> {d_len})"
+    a_hair_color, d_hair_color = _color_near(anchor, "hair"), _color_near(descriptor, "hair")
+    if a_hair_color and d_hair_color and a_hair_color != d_hair_color \
+            and a_hair_color not in d_hair_color and d_hair_color not in a_hair_color:
+        return f"cor do cabelo ({a_hair_color} -> {d_hair_color})"
+    a_garment_color, d_garment_color = _garment_color(anchor), _garment_color(descriptor)
+    if a_garment_color and d_garment_color and a_garment_color != d_garment_color \
+            and a_garment_color not in d_garment_color and d_garment_color not in a_garment_color:
+        return f"cor da roupa ({a_garment_color} -> {d_garment_color})"
+    return None
+
+
 def _ground_truth_snippet(snippets: list[str]) -> Optional[str]:
     """A apresentacao visual do PROPRIO roteiro, se ele deu uma: o primeiro
     trecho de acao que descreve como o personagem esta VESTIDO (mesmo sinal
@@ -191,9 +272,11 @@ def _enforce_descriptor_fidelity(name: str, descriptor: str, anchor: str, log=pr
         return descriptor
     overlap = anchor_words & _content_words(descriptor)
     ratio = len(overlap) / len(anchor_words)
-    if ratio < 0.2:
+    contradiction = _attribute_contradiction(anchor, descriptor)
+    if ratio < 0.2 or contradiction:
+        motivo = (f"{ratio:.0%} de sobreposicao" if ratio < 0.2 else f"contradiz {contradiction}")
         log(f"[cast_characters] AUDITORIA: descritor de {name} contradiz a apresentacao "
-            f"do roteiro (\"{anchor[:90]}...\") -- {ratio:.0%} de sobreposicao, "
+            f"do roteiro (\"{anchor[:90]}...\") -- {motivo}, "
             "substituindo pelo texto original do roteiro.")
         cleaned = _clean_descriptor(anchor)
         if len(cleaned) > 300:
@@ -396,6 +479,276 @@ _FEMALE_CUES = re.compile(
     re.IGNORECASE)
 
 
+# --- figurantes recorrentes sem nome proprio -------------------------------------
+# MEDIDO 2026-09-27 (CERCO EM SEUL): o Presidente, o motociclista/terrorista e o
+# atirador agem em metade dos planos e nunca entravam no elenco -- o elenco so
+# conhecia quem FALA ou tem nome proprio. Sem identidade, o shot_plan jogava a
+# acao deles em insert e cada still inventava outra pessoa. O mesmo individuo
+# aparece com varios nomes ("motorcycle rider" = "terrorist" = "bomber"), e so um
+# modelo de linguagem junta isso; o codigo valida que cada apelido EXISTE no texto.
+EXTRAS_SYSTEM_PROMPT = (
+    "Voce e um assistente de casting. Responda APENAS com JSON valido no formato "
+    '{"extras": [{"name": "...", "aliases": ["..."], "descriptor": "...", '
+    '"gender": "male|female|unknown", "age": 0}]}. '
+    "Liste as PESSOAS SEM NOME PROPRIO que agem ou sao alvo de acao em mais de um "
+    "momento do texto e que sao sempre o MESMO individuo (ex.: 'the President', 'the "
+    "motorcycle rider' que depois e chamado de 'the terrorist'). NAO inclua multidoes, "
+    "grupos, plurais, figurantes de fundo que aparecem uma vez so, nem os personagens "
+    "ja nomeados que a mensagem lista. 'name': identificador curto em INGLES, CAIXA "
+    "ALTA, sem espaco (ex.: PRESIDENT, TERRORIST). 'aliases': TODAS as formas como o "
+    "texto se refere a essa pessoa, copiadas EXATAMENTE como aparecem (sem artigo). O "
+    "texto MISTURA idiomas (roteiro em portugues, acoes em ingles): liste as formas dos "
+    "DOIS idiomas (ex.: 'Presidente' E 'President'; 'motociclista' E 'motorcycle rider' "
+    "E 'terrorist'). 'descriptor': 2 frases em ingles, estilo prompt "
+    "de imagem, com cabelo, idade/porte, roupa com cores exatas e um item distintivo, "
+    "coerentes com o papel e o cenario. 'age': idade aproximada em anos (0 se "
+    "desconhecida). Se nao houver ninguem assim, responda {\"extras\": []}."
+)
+
+# Sem LLM: papeis comuns com artigo definido (um individuo especifico). Nao junta
+# sinonimos -- cada papel vira um figurante -- e por isso e so o plano B.
+_PAPEIS = (
+    "president", "prime minister", "king", "queen", "driver", "bodyguard", "guard", "soldier",
+    "officer", "police officer", "policeman", "cop", "detective", "motorcycle rider", "rider",
+    "motorcyclist", "biker", "terrorist", "bomber", "gunman", "sniper", "shooter", "attacker",
+    "assassin", "kidnapper", "hostage", "thief", "robber", "suspect", "fugitive", "victim",
+    "waiter", "waitress", "bartender", "doctor", "nurse", "patient", "pilot", "captain",
+    "flight attendant", "stranger", "reporter", "journalist", "photographer", "vendor",
+    "clerk", "receptionist", "priest", "teacher", "boss", "janitor", "paramedic",
+    "presidente", "motorista", "guarda", "soldado", "policial", "motociclista", "terrorista",
+    "atirador", "sequestrador", "ladr[aã]o", "suspeito", "fugitivo", "v[ií]tima", "gar[cç]om",
+    "m[eé]dico", "enfermeira", "piloto", "comiss[aá]ria", "rep[oó]rter", "vendedor", "padre",
+    "professor", "chefe",
+)
+_PAPEL_PT_EN = {
+    "presidente": "president", "motorista": "driver", "guarda": "guard", "soldado": "soldier",
+    "policial": "police officer", "motociclista": "motorcyclist", "terrorista": "terrorist",
+    "atirador": "shooter", "sequestrador": "kidnapper", "ladrao": "thief", "ladrão": "thief",
+    "suspeito": "suspect", "fugitivo": "fugitive", "vitima": "victim", "vítima": "victim",
+    "garcom": "waiter", "garçom": "waiter", "medico": "doctor", "médico": "doctor",
+    "enfermeira": "nurse", "piloto": "pilot", "comissaria": "flight attendant",
+    "comissária": "flight attendant", "reporter": "reporter", "repórter": "reporter",
+    "vendedor": "vendor", "padre": "priest", "professor": "teacher", "chefe": "boss",
+}
+# Formas equivalentes do MESMO papel (traducao PT <-> EN e sinonimo direto). NUNCA
+# junta papeis diferentes: que "o motociclista" e "o terrorista" sao a mesma pessoa e
+# decisao de ENREDO, tomada pelo LLM lendo a historia -- em outro roteiro podem ser
+# duas pessoas. So entram como apelido se aparecem no texto (validado em detect_extras).
+_FAMILIAS = (
+    ("president", "presidente"),
+    ("terrorist", "terrorista"),
+    ("motorcycle rider", "motociclista", "motorcyclist", "biker"),
+    ("bomber", "homem-bomba"),
+    ("fugitive", "fugitivo"),
+    ("sniper", "franco-atirador"),
+    ("shooter", "atirador", "gunman"),
+    ("driver", "motorista"), ("guard", "guarda", "bodyguard", "segurança"),
+    ("police officer", "policial", "policeman", "cop"), ("soldier", "soldado"),
+    ("kidnapper", "sequestrador"), ("hostage", "refém"), ("thief", "ladrão", "robber"),
+    ("suspect", "suspeito"), ("victim", "vítima"), ("waiter", "garçom"),
+    ("waitress", "garçonete"), ("doctor", "médico"), ("nurse", "enfermeira"),
+    ("pilot", "piloto"), ("flight attendant", "comissária"), ("reporter", "repórter"),
+    ("vendor", "vendedor"), ("priest", "padre"), ("teacher", "professor"), ("boss", "chefe"),
+)
+_FAMILIAS_DE_PAPEL = {forma: [f for f in familia if f != forma]
+                      for familia in _FAMILIAS for forma in familia}
+
+_PAPEL_RE = re.compile(r"\b(?:the|o|a)\s+(" + "|".join(_PAPEIS) + r")\b", re.IGNORECASE)
+
+
+def _texto_das_cenas(scenes: list[dict]) -> str:
+    partes = []
+    for sc in scenes:
+        partes.append(sc.get("action_text", "") or "")
+        for item in sc.get("shot_list", []) or []:
+            partes += [str(item.get("visual") or ""), str(item.get("actor") or "")]
+        for line in sc.get("dialogue", []) or []:
+            partes.append(str(line.get("beat_visual") or ""))
+    return "\n".join(p for p in partes if p)
+
+
+def _padrao_forma(forma: str) -> Optional[re.Pattern]:
+    """"HA-EUN" casa "Ha-eun", "Ha eun" e "Haeun", sempre com fronteira de palavra
+    ("PRESIDENT" nao casa dentro de "presidential")."""
+    partes = [re.escape(p) for p in re.split(r"[-\s]+", (forma or "").strip().lower()) if p]
+    if not partes:
+        return None
+    return re.compile(r"(?<![a-z0-9])" + r"[-\s]?".join(partes) + r"(?![a-z0-9])")
+
+
+def _cita_forma(texto: str, forma: str) -> bool:
+    padrao = _padrao_forma(forma)
+    return bool(padrao and padrao.search((texto or "").lower()))
+
+
+def personagens_citados(texto: str, cast: dict) -> list[str]:
+    """Personagens do cast.json citados no texto, na ordem em que aparecem: nome
+    proprio ou apelido de figurante (`aliases`). Fonte de audio fora de quadro
+    (`on_screen: false`) fica de fora -- nao tem corpo para descrever."""
+    baixo = (texto or "").lower()
+    achados = []
+    for nome, info in (cast or {}).items():
+        if (info or {}).get("on_screen") is False:
+            continue
+        posicoes = []
+        for forma in (nome, *((info or {}).get("aliases") or [])):
+            padrao = _padrao_forma(forma)
+            m = padrao.search(baixo) if padrao else None
+            if m:
+                posicoes.append(m.start())
+        if posicoes:
+            achados.append((min(posicoes), nome))
+    return [nome for _, nome in sorted(achados)]
+
+
+def _snippets_de(texto: str, formas: list[str]) -> list[str]:
+    frases = [f.strip() for f in re.split(r"(?<=[.!?])\s+|\n", texto) if f.strip()]
+    achadas = []
+    for frase in frases:
+        if any(_cita_forma(frase, f) for f in formas) and frase not in achadas:
+            achadas.append(frase)
+    return achadas
+
+
+def detect_extras(scenes: list[dict], known: list[str], *, engine: str | None,
+                  log=print) -> dict:
+    """{NOME: {"aliases", "descriptor", "gender", "age", "snippets"}} dos figurantes
+    recorrentes. Um figurante so entra se algum apelido aparece de fato no texto e
+    ele e citado em pelo menos DUAS frases (uma aparicao so e fundo, nao elenco)."""
+    texto = _texto_das_cenas(scenes)
+    conhecidos = {_normalize_name(n) for n in known}
+    candidatos: list[dict] = []
+    if engine:
+        from script_pipeline.story_structure import _call_ollama
+        user = (f"Personagens ja nomeados (NAO liste): {', '.join(known) or '(nenhum)'}\n\n"
+                f"Texto:\n{texto[:12000]}")
+        candidatos = list(((_call_ollama(EXTRAS_SYSTEM_PROMPT, user, engine, log=log) or {})
+                           .get("extras")) or [])
+    if not candidatos:
+        contagem: dict[str, int] = {}
+        for m in _PAPEL_RE.finditer(texto):
+            papel = m.group(1).lower()
+            contagem[papel] = contagem.get(papel, 0) + 1
+        # Mesmo papel em dois idiomas ("the President" / "o presidente") e UMA pessoa.
+        por_papel: dict[str, dict] = {}
+        for papel, n in contagem.items():
+            canon = _PAPEL_PT_EN.get(papel, papel)
+            item = por_papel.setdefault(canon, {"n": 0, "aliases": []})
+            item["n"] += n
+            item["aliases"].append(papel)
+        candidatos = [{"name": re.sub(r"[^A-Z]", "_", canon.upper()), "aliases": v["aliases"],
+                       "descriptor": "", "gender": "unknown", "age": 0}
+                      for canon, v in por_papel.items() if v["n"] >= 2]
+    extras: dict = {}
+    for c in candidatos:
+        nome = re.sub(r"[^A-Z0-9_-]", "", str(c.get("name") or "").upper().replace(" ", "_"))
+        brutos = [str(x).strip() for x in c.get("aliases") or []]
+        # O modelo tende a devolver so as formas de UM idioma (MEDIDO 2026-09-27: so
+        # "Presidente"/"motociclista", enquanto as acoes enriquecidas dizem "the President"/
+        # "the motorcycle rider" -- o shot_plan nao reconheceria ninguem). Completa com as
+        # formas equivalentes do outro idioma que o texto de fato usa.
+        for forma in list(brutos) + [nome.replace("_", " ")]:
+            brutos += _FAMILIAS_DE_PAPEL.get(forma.strip().lower(), [])
+        aliases = []
+        for a in brutos:
+            if a and a.lower() not in {x.lower() for x in aliases} and _cita_forma(texto, a):
+                aliases.append(a)
+        if not nome or not aliases or _normalize_name(nome) in conhecidos or nome in extras:
+            continue
+        snippets = _snippets_de(texto, aliases)
+        if len(snippets) < 2:
+            continue
+        idade = c.get("age")
+        extras[nome] = {"aliases": aliases, "descriptor": str(c.get("descriptor") or "").strip(),
+                        "gender": c.get("gender") if c.get("gender") in ("male", "female") else None,
+                        "age": int(idade) if isinstance(idade, (int, float)) and idade > 0 else None,
+                        "snippets": snippets[:3]}
+    if extras:
+        log(f"[cast_characters] {len(extras)} figurante(s) recorrente(s) sem nome: "
+            + ", ".join(f"{n} ({'/'.join(v['aliases'])})" for n, v in extras.items()))
+    return extras
+
+
+# --- idade e genero para a VOZ ---------------------------------------------------
+# MEDIDO 2026-09-27 (CERCO EM SEUL): a agente de 35 anos recebeu F01_infantil (a
+# primeira voz feminina da lista) e a agente de 20 e poucos recebeu voz MASCULINA
+# (descritor sem pronome -> genero "adivinhado" por alternancia). A foto de
+# referencia, quando existe, e a fonte mais confiavel das duas coisas.
+_IDADE_DECADA = re.compile(r"\b(early|mid|late)?[- ]?(\d)0s\b", re.IGNORECASE)
+_IDADE_ANOS = re.compile(r"\b(\d{1,2})[- ](?:year[- ]old|years? old|anos)\b", re.IGNORECASE)
+_IDADE_PALAVRA = (
+    (re.compile(r"\b(child|kid|little (?:boy|girl)|crian[cç]a|menin[oa])\b", re.I), 9),
+    (re.compile(r"\b(teen\w*|adolescente)\b", re.I), 16),
+    (re.compile(r"\b(elderly|old (?:man|woman)|idos[oa]|velh[oa]|senior)\b", re.I), 72),
+)
+
+
+def _parse_age(text: str) -> Optional[int]:
+    m = _IDADE_ANOS.search(text or "")
+    if m:
+        return int(m.group(1))
+    m = _IDADE_DECADA.search(text or "")
+    if m:
+        base = int(m.group(2)) * 10
+        return base + {"early": 2, "mid": 5, "late": 8}.get((m.group(1) or "mid").lower(), 5)
+    for padrao, idade in _IDADE_PALAVRA:
+        if padrao.search(text or ""):
+            return idade
+    return None
+
+
+def _faixa(idade: Optional[int]) -> Optional[str]:
+    if idade is None:
+        return None
+    return "infantil" if idade < 14 else "jovem" if idade < 30 else "adulto" if idade < 55 else "maduro"
+
+
+def _faixa_da_voz(voice_id: str) -> Optional[str]:
+    v = voice_id.lower()
+    for chave, faixa in (("infantil", "infantil"), ("jovem", "jovem"), ("adult", "adulto"),
+                         ("madur", "maduro")):
+        if chave in v:
+            return faixa
+    return None
+
+
+_ORDEM_FAIXAS = ["infantil", "jovem", "adulto", "maduro"]
+
+
+def _escolhe_voz(pool: list[str], faixa: Optional[str], usadas: set) -> str:
+    """Voz da faixa etaria certa, preferindo uma ainda nao usada no elenco. Sem
+    idade conhecida, nunca devolve voz infantil para quem nao e crianca."""
+    def ordem(v: str) -> tuple:
+        fv = _faixa_da_voz(v)
+        if faixa and fv:
+            dist = abs(_ORDEM_FAIXAS.index(faixa) - _ORDEM_FAIXAS.index(fv))
+        else:
+            dist = 0 if fv not in ("infantil",) else 9
+        return (dist, v in usadas)
+    return sorted(pool, key=ordem)[0]
+
+
+def _photo_gender_age(path: Optional[str]) -> tuple[Optional[str], Optional[int]]:
+    """Genero/idade do maior rosto da foto (insightface genderage, o mesmo modelo
+    do consistency_audit). Qualquer falha devolve (None, None)."""
+    if not path or not Path(path).exists():
+        return None, None
+    try:
+        import cv2
+        import numpy as np
+        from script_pipeline.consistency_audit import _get_app
+        img = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        faces = _get_app().get(img) if img is not None else []
+        if not faces:
+            return None, None
+        f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+        sexo = {"M": "male", "F": "female"}.get(str(getattr(f, "sex", "")).upper())
+        idade = getattr(f, "age", None)
+        return sexo, int(idade) if idade is not None else None
+    except Exception:
+        return None, None
+
+
 def _guess_gender(name: str, descriptor: str) -> Optional[str]:
     text = f"{name} {descriptor}"
     male_hit = bool(_MALE_CUES.search(text))
@@ -441,6 +794,7 @@ def assign_voices(characters: dict) -> dict:
         female_pool = female_pool or [s for s in speakers if "female" in s] or speakers
     male_i = female_i = 0
     unknown_toggle = 0
+    usadas: list[str] = []
     voice_map = load_voice_map()
 
     assignment = {}
@@ -468,25 +822,41 @@ def assign_voices(characters: dict) -> dict:
                 "qwen_speaker": None,
                 "qwen_instruct_default": mapped["direction"],  # doubles as Qwen's baseline
             }
+            usadas.append(mapped["base"])
             continue
 
-        gender = _guess_gender(name, info.get("descriptor", ""))
+        # Ordem de confianca: foto de referencia > inferencia do LLM sobre o texto
+        # inteiro > pista textual no descritor > alternancia (marcada como palpite).
+        foto_genero, foto_idade = _photo_gender_age(info.get("reference_image"))
+        gender = (foto_genero or info.get("gender_hint")
+                  or _guess_gender(name, info.get("descriptor", "")))
+        gender_source = ("photo" if foto_genero else "llm" if info.get("gender_hint")
+                         else "text" if gender else None)
         gender_guessed = gender is None
         if gender is None:
             # Alternate so consecutive unknown-gender characters don't all land on
             # the same voice -- still an honest guess, never a silent miss.
             gender = "male" if unknown_toggle % 2 == 0 else "female"
             unknown_toggle += 1
-        if gender == "male":
+        # Idade: o ROTEIRO define o personagem; a foto so estima a do ator (MEDIDO:
+        # Min-jun "mid-30s" no roteiro, 23 pela foto). Foto so quando o texto cala.
+        idade = info.get("age_hint") or _parse_age(info.get("descriptor", "")) or foto_idade
+        pool = male_pool if gender == "male" else female_pool
+        if emotive and all(v in emotive for v in pool):
+            speaker = _escolhe_voz(pool, _faixa(idade), set(usadas))
+        elif gender == "male":
             speaker = male_pool[male_i % len(male_pool)]
             male_i += 1
         else:
             speaker = female_pool[female_i % len(female_pool)]
             female_i += 1
+        usadas.append(speaker)
         assignment[name] = {
             "engine": "auto",
             "gender": gender,  # always "male"/"female" now -- see gender_guessed for confidence
             "gender_guessed": gender_guessed,  # True: no textual cue found, alternated as a placeholder -- verify by hand
+            "gender_source": gender_source,
+            "age": idade,
             "xtts_speaker_wav": speaker,
             # Set only for tier-2 voices: names the folder whose 17 takes synthesize_dialogue
             # picks from per line. Absent for flat clips, which have no emotional range.
@@ -609,6 +979,37 @@ def _enrich_descriptors_ollama(characters: dict, model: str, log=print) -> dict:
     return characters
 
 
+GENDER_AGE_SYSTEM_PROMPT = (
+    "Responda APENAS com JSON valido no formato "
+    '{"people": {"<NOME>": {"gender": "male|female|unknown", "age": 0}}}. '
+    "Para cada nome listado, deduza genero e idade aproximada A PARTIR DO TEXTO: "
+    "pronomes e concordancias que se referem a essa pessoa (cuidado: 'ela'/'ele' "
+    "podem se referir a outra pessoa da mesma frase), descricoes e papel. Use "
+    "'unknown' e age 0 quando o texto nao permitir concluir -- nunca chute pelo som "
+    "do nome. As chaves sao exatamente os nomes listados."
+)
+
+
+def _infer_gender_age_ollama(characters: dict, texto: str, engine: str, log=print) -> None:
+    """Preenche gender_hint/age_hint lendo o roteiro inteiro. O descritor visual
+    sozinho quase nunca tem pronome ("Short, dark hair tied back...") -- foi assim
+    que a Ha-eun virou voz masculina. Falha aqui so deixa os campos vazios."""
+    from script_pipeline.story_structure import _call_ollama
+    user = (f"Nomes: {', '.join(characters)}\n\nTexto:\n{texto[:12000]}")
+    pessoas = ((_call_ollama(GENDER_AGE_SYSTEM_PROMPT, user, engine, log=log) or {})
+               .get("people")) or {}
+    for name, info in characters.items():
+        dado = pessoas.get(name) or next(
+            (v for k, v in pessoas.items() if _normalize_name(k) == _normalize_name(name)), None)
+        if not isinstance(dado, dict):
+            continue
+        if dado.get("gender") in ("male", "female") and not info.get("gender_hint"):
+            info["gender_hint"] = dado["gender"]
+        idade = dado.get("age")
+        if isinstance(idade, (int, float)) and idade > 0 and not info.get("age_hint"):
+            info["age_hint"] = int(idade)
+
+
 def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: dict | None = None,
                engine: str | None = None, log=print) -> dict:
     """reference_images: {character_name: image_path}. A character with a reference
@@ -632,11 +1033,29 @@ def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: d
             info["descriptor"] = _enforce_descriptor_fidelity(
                 name, info["descriptor"], anchor, log=log)
 
+    # Figurantes ANTES da auditoria de completude e da inferencia de genero/idade: MEDIDO
+    # 2026-09-27, o descritor do figurante vindo do LLM saia generico ("a middle-aged man
+    # in a formal dark suit" -- sem cabelo nem cores) e escapava da auditoria, que ja
+    # tinha rodado.
+    extras = detect_extras(scenes, list(characters), engine=engine, log=log)
+    for name, ex in extras.items():
+        characters[name] = {
+            "snippets": ex["snippets"], "line_count": 0,
+            "descriptor": ex["descriptor"] or _default_descriptor(name, ex["snippets"]),
+            "gender_hint": ex["gender"], "age_hint": ex["age"],
+        }
+
     characters = _audit_and_fix_descriptors(characters, model=engine, log=log)
+
+    refs = reference_images or {}
+    texto = _texto_das_cenas(scenes)
+    if engine:
+        _infer_gender_age_ollama(characters, texto, engine, log=log)
+    for name, info in characters.items():
+        info["reference_image"] = refs.get(name)
 
     voices = assign_voices(characters)
 
-    refs = reference_images or {}
     cast = {}
     for name, info in characters.items():
         on_screen = not _is_offscreen_voice(name)
@@ -660,7 +1079,39 @@ def build_cast(scenes: list[dict], *, use_llm: bool = False, reference_images: d
             # nem receber close (shot_plan.py filtra isso ao montar o plano).
             "on_screen": on_screen,
         }
+        if name in extras:
+            # Lidos pelo shot_plan: "extra" entra na lista de personagens da cena
+            # e "aliases" reconhece o figurante pelo papel ("the motorcycle rider").
+            cast[name]["extra"] = True
+            cast[name]["aliases"] = extras[name]["aliases"]
     return cast
+
+
+def revoice(cast: dict, log=print) -> list[str]:
+    """Reavalia as vozes de um cast.json existente (foto, idade, genero), sem mexer
+    em voz escolhida a mao (`voice_locked`) nem no mapa curado. Devolve os nomes
+    alterados. Pensado para depois do import_reference: a foto chega DEPOIS do
+    casting, e era ela que teria evitado a voz masculina da Ha-eun."""
+    alvo = {}
+    for name, info in cast.items():
+        voz = info.get("voice") or {}
+        if voz.get("voice_locked") or voz.get("voice_map_source"):
+            continue
+        alvo[name] = {"descriptor": info.get("descriptor", ""),
+                      "reference_image": info.get("reference_image"),
+                      "gender_hint": None if voz.get("gender_guessed") else voz.get("gender"),
+                      "age_hint": None}
+    novas = assign_voices(alvo) if alvo else {}
+    mudou = []
+    for name, voz in novas.items():
+        antiga = cast[name].get("voice") or {}
+        if (antiga.get("xtts_speaker_wav"), antiga.get("gender")) != (voz["xtts_speaker_wav"], voz["gender"]):
+            log(f"[cast_characters] voz de {name}: {antiga.get('xtts_speaker_wav')} "
+                f"({antiga.get('gender')}) -> {voz['xtts_speaker_wav']} ({voz['gender']}, "
+                f"fonte {voz.get('gender_source') or 'palpite'}, idade {voz.get('age')})")
+            cast[name]["voice"] = {**antiga, **voz}
+            mudou.append(name)
+    return mudou
 
 
 # Nomes convencionais de fonte de audio SEM presenca fisica em cena -- a
@@ -691,11 +1142,22 @@ def main(argv=None) -> int:
                              "(ex: qwen3.6-35b-a3b:latest). Sem isto, o descritor e um recorte "
                              "do texto de acao -- que so vira aparencia se o roteiro apresentar "
                              "o personagem entre parenteses.")
+    parser.add_argument("--revoice", action="store_true",
+                        help="nao refaz o elenco: so reavalia as vozes do cast.json existente "
+                             "(foto de referencia, idade, genero). Voz com voice_locked=true fica.")
     args = parser.parse_args(argv)
 
     from script_pipeline import run_folder
 
     run_dir = Path(args.run_dir).resolve()
+    if args.revoice:
+        cast_path = run_dir / "characters" / "cast.json"
+        cast = json.loads(cast_path.read_text(encoding="utf-8"))
+        mudou = revoice(cast)
+        cast_path.write_text(json.dumps(cast, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[cast_characters] --revoice: {len(mudou)} voz(es) alterada(s)"
+              + (f": {', '.join(mudou)}" if mudou else ""))
+        return 0
     scenes = _load_scenes(run_dir)
     cast = build_cast(scenes, use_llm=args.llm, engine=args.engine)
 

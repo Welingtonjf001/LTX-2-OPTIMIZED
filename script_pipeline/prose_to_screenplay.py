@@ -285,12 +285,24 @@ REGRAS ABSOLUTAS:
    estágio depois deste consegue perceber a troca.
 6. Se o texto disser em que MEIO a obra é feita -- animação anime, animação
    3D, live action, aquarela, stop motion --, escreva isso na PRIMEIRA linha
-   do arquivo, antes do cabeçalho de cena, exatamente neste formato:
+   do arquivo, antes do cabeçalho de cena, neste formato (o texto depois dos
+   dois-pontos é só um EXEMPLO de sintaxe, não um valor padrão -- troque
+   pelo meio que o SEU texto de origem realmente descreve):
 
-       ESTILO VISUAL: polished hand-drawn cel animation, sharp ink lines
+       ESTILO VISUAL: <meio descrito no texto, em inglês, termos de prompt de imagem>
 
-   Uma linha só, em inglês, em termos de prompt de imagem. Sem ela o meio se
-   perde e cada plano acaba desenhado num acabamento diferente.
+   Uma linha só. NÃO copie o exemplo "polished hand-drawn cel animation, sharp
+   ink lines" se o texto de origem não pedir animação/ilustração -- ele é só
+   ilustrativo do formato, e copiá-lo por padrão empurra roteiros REALISTAS
+   (sem meio declarado) para saírem ilustrados, quebrando qualquer referência
+   fotográfica real de elenco (MEDIDO 2026-09-29: um roteiro sci-fi sem
+   qualquer menção de estilo saiu com "ESTILO VISUAL: polished hand-drawn cel
+   animation..." herdado do exemplo, e os stills saíram ilustrados em vez de
+   fotorrealistas, derrubando a consistência facial contra fotos reais de
+   ator para perto de zero). SE O TEXTO NÃO DISSER O MEIO, NÃO ESCREVA ESTA
+   LINHA -- a ausência da linha é o comportamento correto nesse caso, e
+   `shot_plan.py`/`generate_storyboards.py` já têm reforço de fotorrealismo
+   próprio para quando ela falta.
 
 FORMATO DE SAÍDA (texto puro, sem comentários seus, sem cercas de código):
 
