@@ -228,6 +228,28 @@ def check_cross_shot_descriptor_drift(shots: list[dict]) -> list[dict]:
     return problemas
 
 
+def _diff_excerpt(a: str, b: str, *, context: int = 60) -> tuple[str, str]:
+    """ACHADO 2026-09-29 (rodada de teste real, cena 'Palace of Emerald Shadows"): truncar
+    `de`/`para` nos primeiros N caracteres faz o relatorio mostrar a MESMA string dos dois
+    lados sempre que dois descritores compartilham um prefixo longo e so divergem depois do
+    corte -- parece correcao inutil ("de X para X"), quando na verdade os textos diferem mais
+    adiante. Acha o primeiro indice onde `a` e `b` diferem e recorta uma janela em volta dele
+    (com "..." nas pontas quando corta no meio), pra o "de"/"para" do relatorio sempre mostrar
+    a parte que realmente mudou."""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    if i == len(a) == len(b):
+        return a, b  # strings identicas (nao deveria chegar aqui, mas nao quebra se chegar)
+    inicio = max(0, i - context)
+    prefixo = "..." if inicio > 0 else ""
+    fim_a, fim_b = inicio + 2 * context, inicio + 2 * context
+    sufixo_a = "..." if fim_a < len(a) else ""
+    sufixo_b = "..." if fim_b < len(b) else ""
+    return (f"{prefixo}{a[inicio:fim_a]}{sufixo_a}", f"{prefixo}{b[inicio:fim_b]}{sufixo_b}")
+
+
 def fix_descriptors(shots: list[dict], cast: dict, log=print) -> tuple[list[dict], list[dict]]:
     """ACHADO 2026-09-29 (pedido do usuario): relatar deriva de descritor nao bastava --
     depois desta etapa os descritores tem que estar CORRETOS, prontos pra still. O
@@ -257,9 +279,10 @@ def fix_descriptors(shots: list[dict], cast: dict, log=print) -> tuple[list[dict
                 if texto and atual in texto:
                     shot[prompt_campo] = texto.replace(atual, canonico)
             shot[campo_desc] = canonico
+            de_excerto, para_excerto = _diff_excerpt(atual, canonico)
             correcoes.append({"tipo": "descritor_corrigido", "personagem": str(nome),
                               "plano": shot.get("index"), "motivo": motivo,
-                              "de": atual[:120], "para": canonico[:120]})
+                              "de": de_excerto, "para": para_excerto})
     if correcoes:
         log(f"[validacao-texto] {len(correcoes)} descritor(es) corrigido(s) contra o cast.json "
             "(descritor + storyboard_prompt/video_prompt atualizados).")
@@ -360,12 +383,19 @@ def audit(run_dir: Path, *, engine: str | None = None, log=print) -> dict:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     shots = plan.get("shots", plan) if isinstance(plan, dict) else plan
     scenes = _load_scenes_flat(run_dir)
+    # ACHADO 2026-09-29 (teste real, prompt LTX-2.3 de cena unica): com 1 cena so, nao
+    # existe "outra cena" pra uma fala/local ser atribuida por engano -- qualquer
+    # divergencia contra o texto DAQUELA cena e mais provavel ser artefato de traducao
+    # (location fica em ingles, action_text as vezes sai traduzido pro portugues) do que
+    # erro de atribuicao de verdade. So passa `scenes` pras checagens por-cena quando ha
+    # mais de uma cena pra comparar contra.
+    scenes_para_comparacao = scenes if len(scenes) > 1 else None
 
     problemas = []
     if source:
         problemas += check_characters(source, cast)
-        problemas += check_quotes(source, shots, scenes)
-        problemas += check_locations(source, shots, scenes)
+        problemas += check_quotes(source, shots, scenes_para_comparacao)
+        problemas += check_locations(source, shots, scenes_para_comparacao)
     else:
         log("[validacao-texto] AVISO: nenhum roteiro-fonte disponivel (nem original, nem "
             "reestruturado) -- pulando checagens de fidelidade textual.")

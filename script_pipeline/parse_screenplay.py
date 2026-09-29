@@ -798,7 +798,7 @@ def resolve_style_conflict(art_direction: str) -> tuple[str, str | None]:
     return ajustado, aviso
 
 
-def extract_art_direction(text: str) -> tuple[str, str]:
+def extract_art_direction(text: str, *, source_text: str | None = None) -> tuple[str, str]:
     """Tira a linha "ESTILO VISUAL: ..." do texto e devolve (texto_limpo, meio).
 
     Quem escreve essa linha e o `prose_to_screenplay`, quando o texto de origem
@@ -814,7 +814,19 @@ def extract_art_direction(text: str) -> tuple[str, str]:
     Deterministico de proposito. O modelo tambem devolve `art_direction` no
     enriquecimento, mas isto aqui e leitura de um dado que ja existe -- e por
     isso ganha dele, pela mesma regra que faz um cabecalho de cena real ganhar
-    do palpite do modelo em _apply_setting."""
+    do palpite do modelo em _apply_setting.
+
+    `source_text`: ACHADO 2026-09-29 (teste real com um prompt de video LTX-2.3, sem
+    formato de cena) -- o guard do exemplo literal acima so pega UMA frase especifica
+    copiada; o mesmo LLM inventou "polished 3D animation" (frase DIFERENTE, mesma
+    familia de alucinacao) para um prompt que descrevia uma cena fotorrealista
+    ("cinematic high-fantasy scene") sem citar NENHUM meio de animacao -- violando a
+    propria instrucao do prompt ("SE O TEXTO NAO DISSER O MEIO, NAO ESCREVA ESTA
+    LINHA"). Passar o texto-FONTE (antes da reestruturacao por LLM) permite uma
+    segunda defesa, mais geral: se o "meio" extraido cita termo de
+    animacao/ilustracao (`_ESTILO_ANIMADO_RE`) que nao aparece em lugar nenhum do
+    texto original, e quase certo que o LLM inventou -- descarta, mesma logica de
+    "dado lido vence palpite" usada em outros pontos deste arquivo."""
     m = ESTILO_VISUAL_RE.search(text or "")
     if not m:
         return text, ""
@@ -825,6 +837,14 @@ def extract_art_direction(text: str) -> tuple[str, str]:
               "do prose_to_screenplay -- provavel copia do LLM, nao dado real do roteiro; descartando.",
               file=sys.stderr)
         return texto_limpo, ""
+    if source_text is not None:
+        termos_meio = [t.group(1) for t in _ESTILO_ANIMADO_RE.finditer(meio)]
+        if termos_meio and not any(t.casefold() in source_text.casefold() for t in termos_meio):
+            print(f"[parse_screenplay] AVISO: 'ESTILO VISUAL: {meio}' cita meio de "
+                  f"animacao/ilustracao ({', '.join(sorted(set(termos_meio)))}) que nao aparece em "
+                  "lugar nenhum do texto-fonte original -- provavel invencao do LLM de "
+                  "reestruturacao; descartando.", file=sys.stderr)
+            return texto_limpo, ""
     return texto_limpo, meio
 
 
@@ -1399,7 +1419,7 @@ def main(argv=None) -> int:
             text, engine=args.enrich_engine, log=lambda m: print(m, file=sys.stderr),
         )
         if converted:
-            converted, arte_convertida = extract_art_direction(converted)
+            converted, arte_convertida = extract_art_direction(converted, source_text=text)
             # BUGFIX 2026-09-10 (achado pelo usuario num teste real): a linha
             # `ESTILO VISUAL:` do texto ORIGINAL e' extraida (e removida) no
             # inicio de main(), ANTES do texto ir pro prose_to_screenplay --

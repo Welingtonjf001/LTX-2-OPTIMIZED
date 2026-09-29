@@ -100,7 +100,24 @@ def test_fix_descriptors_nao_mexe_quando_ja_bate():
     shots = [{"index": 0, "subject": "ANA", "descriptor": "long dark hair", "storyboard_prompt": "x"}]
     fixed, correcoes = tv.fix_descriptors(shots, cast, log=lambda m: None)
     assert correcoes == []
-    assert fixed[0]["storyboard_prompt"] == "x"
+
+
+def test_fix_descriptors_relatorio_mostra_a_divergencia_de_verdade():
+    """Achado real (rodada de teste 2026-09-29, cena do palacio): dois descritores com um
+    prefixo comum LONGO (>120 chars) e que so divergem depois do corte antigo faziam o
+    relatorio mostrar "de X para X" -- parecia correcao inutil. O excerto tem que cair
+    exatamente na parte que MUDOU, nao no prefixo idendico."""
+    prefixo = "XIAO-LAN has long, dark raven hair tied in a neat bun, with a few loose strands " \
+             "framing her oval face. Her early 20s are "
+    atual = prefixo + "noted for a lively energy and quick wit."
+    canonico = prefixo + "marked by a serene and graceful demeanor."
+    cast = {"XIAO-LAN": {"descriptor": canonico}}
+    shots = [{"index": 0, "subject": "XIAO-LAN", "descriptor": atual, "storyboard_prompt": atual}]
+    _, correcoes = tv.fix_descriptors(shots, cast, log=lambda m: None)
+    assert len(correcoes) == 1
+    assert correcoes[0]["de"] != correcoes[0]["para"]
+    assert "noted for" in correcoes[0]["de"]
+    assert "marked by" in correcoes[0]["para"]
 
 
 def test_audit_end_to_end_corrige_e_regrava_shot_plan(tmp_path):
@@ -135,6 +152,34 @@ def test_audit_end_to_end_corrige_e_regrava_shot_plan(tmp_path):
     assert releitura["shots"][1]["descriptor"] == "long dark hair, charcoal suit"
     assert "pink hat" not in releitura["shots"][1]["storyboard_prompt"]
     assert (run / "parse" / "text_validation.md").exists()
+
+
+def test_audit_com_1_cena_so_nao_gera_falso_positivo_de_cena_errada(tmp_path):
+    """ACHADO 2026-09-29 (teste real, prompt LTX-2.3 de cena unica): com 1 cena so,
+    'local/fala em cena errada' e um falso positivo garantido quando o campo location
+    fica em ingles mas o action_text da cena sai traduzido pro portugues (mesmo
+    documento, sem cabecalhos de cena) -- nao existe OUTRA cena pra atribuir por
+    engano. `audit()` so deve repassar `scenes` as checagens por-cena quando ha mais
+    de uma."""
+    run = tmp_path
+    (run / "parse").mkdir()
+    (run / "characters").mkdir()
+    source = "A cinematic scene in the circular ancient stone chamber. Lyra enters."
+    (run / "parse" / "screenplay_original.txt").write_text(source, encoding="utf-8")
+    (run / "parse" / "scenes.json").write_text(json.dumps([
+        {"index": 0, "action_text": "Uma cena cinematica na camara circular antiga. Lyra entra.",
+         "characters": ["LYRA"], "shot_list": []}
+    ]), encoding="utf-8")
+    (run / "characters" / "cast.json").write_text(json.dumps({}), encoding="utf-8")
+    shot_plan = {"shots": [
+        {"index": 0, "scene": 0, "subject": "LYRA", "location": "CIRCULAR ANCIENT STONE CHAMBER",
+         "storyboard_prompt": "wide. LYRA in the chamber."},
+    ]}
+    (run / "parse" / "shot_plan.json").write_text(json.dumps(shot_plan), encoding="utf-8")
+
+    relatorio = tv.audit(run, log=lambda m: None)
+    tipos = {p["tipo"] for p in relatorio["problemas"]}
+    assert "local_em_cena_errada" not in tipos
 
 
 def test_audit_sem_roteiro_fonte_nao_quebra(tmp_path):
