@@ -150,6 +150,15 @@ SUBJECT_HINTS = {
     # motores. O enquadramento precisa de limites fisicos, nao so de nome.
     "close": "framed from the top of the head to the shoulders, face large and centered, "
              "mouth clearly visible, no hands or waist in frame",
+    # ACHADO 2026-09-29 (REENTRY WINDOW v2): mesmo problema do close, lado oposto da
+    # escada -- "extreme wide establishing shot, the figure small within a vast frame"
+    # saiu MEDIUM SHOT no gate (qwen3-vl percebeu "medium shot" onde o plano pedia
+    # wide), reprovado por framing_match. O nome do enquadramento nao bastava pro
+    # FLUX aqui tambem; precisa do mesmo tipo de limite fisico explicito que salvou o
+    # close (proporcao do quadro, nao so a palavra "wide"/"small").
+    "wide": "the full body visible from head to feet, occupying less than one-fifth of "
+            "the frame's height, surrounded by empty space on all sides, camera far from "
+            "the subject",
 }
 ANGLES = {
     "eye":  "",                     # default do modelo; não gastar prompt com isso

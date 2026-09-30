@@ -645,3 +645,29 @@ def test_storyboard_prompt_lowercases_shouting_location():
     prompt = _storyboard_prompt(framing="wide", angle="eye", subject="", location="AVENIDA DE SEUL",
                                 time_of_day="day", look="", descriptor="", screen_side=None)
     assert "AVENIDA DE SEUL" not in prompt and "avenida de seul" in prompt
+
+
+# ---- wide com sujeito saindo medium no gate (REENTRY WINDOW v2, 2026-09-29) ----
+
+def test_wide_com_sujeito_ganha_limite_fisico_de_proporcao():
+    """ACHADO 2026-09-29: "extreme wide establishing shot, the figure small within a
+    vast frame" (so o nome do enquadramento) saiu MEDIUM SHOT no gate do REENTRY
+    WINDOW v2 -- mesmo problema ja medido e corrigido pro close (CLAUDE.md 3.81: "o
+    NOME do enquadramento nao basta pro FLUX"). wide com sujeito agora carrega um
+    limite fisico de proporcao explicito, igual o close ja tinha."""
+    from script_pipeline.shot_plan import _storyboard_prompt
+    prompt = _storyboard_prompt(framing="wide", angle="eye", subject="ANA",
+                                location="FLIGHT DECK", time_of_day="day", look="",
+                                descriptor="short auburn hair", screen_side=None)
+    assert "occupying less than one-fifth" in prompt
+    assert "head to feet" in prompt
+
+
+def test_wide_sem_sujeito_nao_ganha_limite_fisico_de_pessoa():
+    """Plano de estabelecimento sem gente (FRAMINGS_SEM_SUJEITO) nao deve herdar o
+    limite fisico pensado pra uma FIGURA -- ele ja fala de ambiente, nao de corpo."""
+    from script_pipeline.shot_plan import _storyboard_prompt
+    prompt = _storyboard_prompt(framing="wide", angle="eye", subject="",
+                                location="FLIGHT DECK", time_of_day="day", look="",
+                                descriptor="", screen_side=None)
+    assert "occupying less than one-fifth" not in prompt
