@@ -6776,11 +6776,12 @@ mesma causa raiz de VRAM do §3.88. 18 testes em `tests/test_motion_director.py`
 >    parado no gate de stills): afrouxar `--gate-max-regen-fraction`/`--visual-max-retries` e
 >    aceitar imperfeição, ou investigar+corrigir os itens 1-2 antes de gastar mais GPU. Usuário
 >    escolheu pausar em 2026-09-29, decisão entre as duas opções ainda em aberto.
-> 6. **NOVO 2026-09-30: segunda RTX 3090 instalada, plano de otimização de GPU em `§3.143`,
->    NENHUMA fase implementada ainda.** Fase 1 (pinar Ollama na GPU 0, baixo risco) é o próximo
->    passo mais barato; Fase 2 (LTX+LongCat em paralelo real no `render_shots.py`) é o de maior
->    ganho estimado (~40-50%, já calculado no item 4 antigo desta seção). Catálogo completo dos
->    >20 arquivos hardcoded em `CUDA_VISIBLE_DEVICES=1` está no §3.143.
+> 6. Segunda RTX 3090 instalada, plano de otimização de GPU em `§3.143`. **Fase 1 (pinar
+>    Ollama na GPU 0) IMPLEMENTADA E VALIDADA em 2026-09-30** (`start_ollama_gpu0.bat` +
+>    atalho de Startup repontado). Falta confirmar dentro de uma corrida REAL de
+>    `run_decupagem` (só validado isolado até agora). **Fase 2 (LTX+LongCat em paralelo real
+>    no `render_shots.py`)** é o próximo passo, maior ganho estimado (~40-50%, já calculado no
+>    item 4 antigo desta seção) — NÃO implementada. Fase 3 (despachante de pool) depois.
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
 filme montado, do `prompt_polish` e do MiniMax H3. Itens fechados desde
@@ -9449,14 +9450,32 @@ código ainda não" — mas é a oportunidade de otimização mais óbvia da má
 
 **Plano de otimização, em fases (do mais seguro/barato pro mais arriscado/caro):**
 
-**Fase 1 — pinar o Ollama numa GPU dedicada (baixo risco, ganho imediato).** Setar
-`CUDA_VISIBLE_DEVICES=0` no AMBIENTE que sobe o servidor Ollama (não em código deste repo —
-Ollama é processo externo; precisa ir no `.bat`/atalho que inicia o serviço, ou numa variável
-de sistema persistente). Efeito: Ollama nunca mais disputa a GPU 1 com FLUX/LTX/MiniMax/
-LongCat — o `unload_all()` antes dos stills deixa de ser necessário (pode ficar como
-salvaguarda, mas não é mais obrigatório), e o modelo de gate/enriquecimento fica RESIDENTE
-entre chamadas, cortando o tempo de recarga (~20-30s por carga de qwen3-vl:30b, medido em
-sessões anteriores). Sem mudança de código Python nenhuma. **Não testado ainda.**
+**Fase 1 — pinar o Ollama numa GPU dedicada — IMPLEMENTADA E VALIDADA em 2026-09-30.**
+Novo `start_ollama_gpu0.bat` na raiz do repo: seta `CUDA_VISIBLE_DEVICES=0` +
+`OLLAMA_MODELS=W:\ollama\models` só para o PROCESSO do Ollama (`ollama app.exe`/`ollama.exe
+serve`) e os filhos dele — não mexe em nenhuma variável de ambiente GLOBAL do Windows, então
+os subprocessos deste repositório (que já definem `CUDA_VISIBLE_DEVICES=1` explicitamente no
+próprio dict de ambiente que passam ao `subprocess.Popen`) não herdam nada daqui e continuam
+funcionando sem mudança nenhuma. O atalho de Startup (`Ollama.lnk`) foi repontado pra esse
+`.bat` (original preservado como `Ollama_original_backup.lnk`, mesma pasta), então sobrevive a
+reboot.
+
+VALIDADO com GPU real: parei o Ollama antigo, subi pelo wrapper novo, e carreguei
+`qwen2.5:32b-instruct-q4_K_M` (23 GB) via `/api/generate` — foi inteiro pra **GPU 0** (23117
+MiB), **GPU 1 ficou em 56 MiB o tempo todo** (praticamente livre). Descarregado com
+`keep_alive:0`, GPU 0 volta a ~682 MiB.
+
+Efeito prático: Ollama nunca mais disputa a GPU 1 com FLUX/LTX/MiniMax/LongCat — o
+`unload_all()` que `run_decupagem.py` chama antes de subir o motor de imagem/vídeo **deixa de
+ser estritamente necessário** (mantido no código como salvaguarda, não removido — não custa
+nada rodar e é mais seguro não tirar sem mais validação de produção real), e o modelo de
+gate/enriquecimento pode ficar RESIDENTE entre chamadas, cortando o tempo de recarga
+(~20-30s por carga de qwen3-vl:30b, medido em sessões anteriores). Zero mudança de código
+Python — só infraestrutura (`.bat` novo + atalho de Startup repontado).
+
+**Pendência remanescente da Fase 1**: confirmar em uma corrida REAL de `run_decupagem` que o
+Ollama residente na GPU 0 realmente elimina o tempo de recarga/unload observável (só validado
+isolado, via `curl` direto — não dentro do pipeline completo ainda).
 
 **Fase 2 — LTX + LongCat em paralelo real dentro do `render_shots.py` (ganho maior, exige
 código novo).** Em vez de trocar 8188→8190 sequencialmente quando `engine="longcat"`, subir

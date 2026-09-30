@@ -10,7 +10,12 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-30 (review de código achou 2 buracos reais na validação de
+Última verificação: 2026-09-30 (Fase 1 do plano de otimização de GPU IMPLEMENTADA E
+VALIDADA: Ollama agora sobe pinado na GPU 0 via `start_ollama_gpu0.bat`, atalho de Startup
+repontado -- ver seção "Ollama" abaixo. VALIDADO com GPU real: modelo de 23 GB carregou
+inteiro na GPU 0, GPU 1 ficou livre. Fases 2-3 [LTX+LongCat em paralelo, despachante de
+pool] seguem como plano, não implementadas. Ver `MEMORIAL.md` §3.143.
+Verificação anterior: 2026-09-30 (review de código achou 2 buracos reais na validação de
 texto do dia anterior -- `check_quotes`/`check_locations` procuravam fala/local em
 QUALQUER lugar do roteiro-fonte, aprovando em silêncio fala/local colado na cena errada
 [exatamente o bug que motivou a validação existir]; corrigido, agora checa primeiro
@@ -303,6 +308,20 @@ arquivos `.bin`/`.param` do x4plus — fique no padrão `animevideov3` em
 falso-positivo no RIFE, que foi corrigido junto).
 
 ## Ollama: qual instância está no ar importa
+
+⚠️ **DESDE 2026-09-30, o Ollama sobe PINADO NA GPU 0.** Fase 1 do plano de otimização de GPU
+(`MEMORIAL.md` §3.143, IMPLEMENTADA E VALIDADA): o atalho de Startup (`Ollama.lnk`) foi
+repontado pra `start_ollama_gpu0.bat` (raiz do repo), que seta `CUDA_VISIBLE_DEVICES=0` +
+`OLLAMA_MODELS=W:\ollama\models` só pro processo do Ollama antes de subir `ollama app.exe` —
+não é uma variável de ambiente global, os subprocessos deste repo (que já fixam
+`CUDA_VISIBLE_DEVICES=1` no próprio ambiente) não são afetados. Atalho original preservado
+como `Ollama_original_backup.lnk` na mesma pasta de Startup, pra reverter se precisar. VALIDADO
+com GPU real: `qwen2.5:32b-instruct-q4_K_M` (23 GB) carregado via `/api/generate` foi inteiro
+pra GPU 0, GPU 1 ficou em 56 MiB o tempo todo. Efeito: o `unload_all()` que `run_decupagem.py`
+chama antes de FLUX/LTX **deixa de ser estritamente necessário** (mantido no código como
+salvaguarda) — o Ollama pode ficar residente sem disputar VRAM com o motor de imagem/vídeo.
+Se reiniciar a máquina e o Ollama voltar a carregar na GPU 1, confira se o `.lnk` de Startup
+ainda aponta pro wrapper (pode ter sido sobrescrito por uma atualização do app Ollama).
 
 ⚠️ **CORRIGIDO 2026-09-29 — esta seção estava invertida.** Os modelos de PRODUÇÃO (qwen3-vl:30b,
 qwen2.5vl:7b, qwen2.5:32b-instruct-q4_K_M, qwen3.6-35b-a3b:latest, gemma4:latest,
