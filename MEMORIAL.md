@@ -6759,6 +6759,24 @@ mesma causa raiz de VRAM do §3.88. 18 testes em `tests/test_motion_director.py`
 
 ## 7. Próximas etapas, por ordem de retorno
 
+> **PENDÊNCIAS MAIS RECENTES (2026-09-30, ver §3.142 para detalhe completo) — o P0 abaixo
+> ("estado em 2026-09-18") está desatualizado, mantido como histórico:**
+> 1. **Investigar `location_match` no gate visual do REENTRY WINDOW v2** — 35/41 stills
+>    reprovados por local não bater/não ficar consistente entre planos; causa raiz NÃO
+>    investigada, é a pendência de maior prioridade do projeto agora.
+> 2. Investigar por que `close` ainda sai "medium close-up" no gate apesar do fix de §3.81
+>    (25/41 das reprovações do REENTRY WINDOW v2 eram planos `close`).
+> 3. Refazer o teste da VAE int8 do MiniMax H3 (`MINIMAX_H3_VAE_INT8`) com metodologia
+>    correta — o resultado de ~2× mais rápido medido está INVALIDADO (confusão com cache de
+>    disco entre duas rodadas em processos separados).
+> 4. Validar com GPU real as outras 3 flags novas do MiniMax H3 (`MINIMAX_H3_CHUNK_FF`,
+>    `MINIMAX_H3_LOWVRAM_ATTN`, `MINIMAX_H3_SHIFT_VIDEO`/`_AUDIO`, `MINIMAX_H3_BLOCK_SPARSE_ATTN`)
+>    — nenhuma testada ainda, nem de forma inválida.
+> 5. Decidir como prosseguir com o REENTRY WINDOW v2 (`outputs/decupagem/20260929_REENTRY_WINDOW_v2`,
+>    parado no gate de stills): afrouxar `--gate-max-regen-fraction`/`--visual-max-retries` e
+>    aceitar imperfeição, ou investigar+corrigir os itens 1-2 antes de gastar mais GPU. Usuário
+>    escolheu pausar em 2026-09-29, decisão entre as duas opções ainda em aberto.
+
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
 filme montado, do `prompt_polish` e do MiniMax H3. Itens fechados desde
 2026-08-26 foram removidos daqui -- procure pelo número da seção no changelog
@@ -6766,7 +6784,8 @@ acima se precisar do histórico completo. Item 15 acrescentado em 2026-08-30.
 Item 17 acrescentado em 2026-09-06, depois do comparativo GGUF/checkpoint
 do §3.62. Item 18 acrescentado em 2026-09-07, ideia de API hospedada pro
 enriquecimento (§3.66/§3.67). P0 reescrito em 2026-09-18 depois do diretor de
-movimento (§3.87-3.91).)*
+movimento (§3.87-3.91). O P0 abaixo ficou estático desde então -- o estado
+REAL mais recente está no quadro de pendências logo acima, não neste P0.)*
 
 ### P0 -- estado em 2026-09-18, para quem abrir uma sessão nova
 
@@ -9244,4 +9263,128 @@ corretos, consistente com a checagem manual feita antes. Testes:
 `tests/test_text_validation_20260929.py` (8 casos, incluindo um end-to-end que grava um
 `shot_plan.json` com descritor divergente forçado, roda `audit()`, e confirma que o ARQUIVO
 em disco saiu corrigido, não só o objeto em memória). Suíte inteira: 414 passando, sem
-regressão. Nada commitado ainda.
+regressão. Commitado em `f20b925` (junto com o resto da sessão de 2026-09-29 — ver §3.142).
+
+### 3.142 — Review de código externo achou 2 buracos reais na validação nova; testes com conteúdo real (webui) acharam mais 2; MiniMax H3 ganhou 4 flags opt-in não validadas; REENTRY WINDOW v2 travou no gate visual por local inconsistente (não investigado) (2026-09-29/30)
+
+Sessão de continuação direta do §3.141 (mesmo dia). Quatro frentes independentes, nenhuma
+totalmente fechada — ver "Pendências" no fim desta seção e a `## 7.` do arquivo.
+
+**1. Review de código externo em `text_validation.py`/`verify_output.py` — 2 achados reais, 2
+corrigidos na hora.**
+
+- `check_quotes`/`check_locations` procuravam a fala/local em QUALQUER lugar do roteiro-fonte
+  — se existisse, passava, mesmo colada na cena/personagem errado. Era exatamente o tipo de
+  bug que motivou a §3.141 existir (fala de controle em terra colada em `EXT. UPPER
+  ATMOSPHERE`), e a validação nova não pegava. Corrigido: as duas funções agora recebem
+  `scenes` opcional e checam primeiro contra o texto DA PRÓPRIA cena do plano; só se falhar
+  ali é que olham o roteiro inteiro — e nesse caso o problema vira `fala_em_cena_errada`/
+  `local_em_cena_errada` (a fala/local EXISTE, só não onde o plano diz que está), não uma
+  aprovação silenciosa. Compatível com chamadas antigas sem `scenes` (comportamento anterior
+  preservado).
+- `verify_output._check_gates` pulava em silêncio (`continue`) quando um arquivo de gate não
+  existia, e convertia erro de leitura/JSON inválido em "sem alerta" — um `verification.json`
+  podia não registrar que a evidência faltou ou estava corrompida. Corrigido: cada gate grava
+  um `status` explícito (`missing`/`unreadable`/o status real), e ausência/erro também viram
+  pendência no relatório, não silêncio.
+- Achados #3 (relatório ≠ aprovação) e #4 (anotação de tipo errada) do review também
+  corrigidos: `audit()` agora grava `checagem_semantica_llm` (`ok`/`falhou`/`desativada`/
+  `pulada`) no relatório, e o markdown deixa explícito que "0 crítica" não é aprovação de
+  fidelidade quando a etapa semântica não rodou; `_source_text()` corrigida pra
+  `tuple[str, bool]`.
+- 13 testes novos, suíte 442 passando. Commitado junto com o item 1 acima.
+
+**2. `minimax_h3_backend.py` ganhou 4 flags opt-in de um workflow de terceiro (ComfyUI
+comunidade) — NENHUMA validada com GPU real ainda.** Análise do workflow (nós
+`MiniMaxChunkFeedForward`/`MiniMaxLowVRAMAttention`/`MiniMaxH3SigmaShift`/
+`BlockSparseAttention`, todos nativos do ComfyUI core ou do KJNodes já instalado) achou 4
+candidatos de ganho real, todos desligados por padrão (grafo idêntico sem elas):
+`MINIMAX_H3_VAE_INT8=1` (VAE de vídeo int8 convrot, já em disco, DIFERENTE da TRT já
+rejeitada), `MINIMAX_H3_CHUNK_FF=N`/`MINIMAX_H3_LOWVRAM_ATTN=N` (chunking de
+feedforward/atenção, reduz pico de VRAM sem mudar matemática), `MINIMAX_H3_SHIFT_VIDEO=X`/
+`_SHIFT_AUDIO=X` (agendamento de ruído separado por modalidade), `MINIMAX_H3_BLOCK_SPARSE_ATTN=1`
+(acelerador de atenção por blocos, SLA por padrão).
+
+**Teste da VAE int8 INVALIDADO por confusão de metodologia, não refeito ainda.** Rodei
+baseline (fp16, 520,3s) e depois int8 (270,6s) em processos SEPARADOS, cada um subindo um
+ComfyUI do zero — a diferença de quase 2× é grande demais pra vir só da VAE (que só entra no
+encode da referência e no decode final, uma fração pequena do tempo dominado pelos passos de
+difusão no UNET) e muito provavelmente vem do cache de disco do SO já aquecido pela segunda
+rodada (mesmo UNET de ~13 GB lido a frio na primeira, quente na segunda). **Pendência**: refazer
+com ordem invertida ou os dois já com o modelo quente, antes de acreditar em qualquer número.
+
+**3. Rodei 3 roteiros reais pela `decupagem_ui` (webui, não só testes sintéticos) pra validar
+as correções do dia — achou mais 2 bugs reais.** VOO 702 atualizado (0 crítica/atenção, 8
+lacunas reais achadas, 1 descritor corrigido — tudo funcionando), uma cena solta em
+inglês+português sem cabeçalho de personagens ("Palace of Emerald Shadows"), e um prompt de
+vídeo LTX-2.3 de parágrafo único (sem nenhum formato de cena) — os três chegaram até `--ate
+motion` (texto, antes de qualquer imagem) sem quebrar, confirmando que o parse aguenta
+formatos bem fora do roteiro clássico.
+
+- **Relatório de correção de descritor mostrava "de X → para X" quando os dois só divergiam
+  DEPOIS do corte de 120 caracteres** (achado na cena do palácio: XIAO-LAN tinha um prefixo
+  comum longo entre o descritor do plano e o canônico do `cast.json`, e a diferença real ficava
+  além do ponto de corte). Parecia correção inútil — não era, só o relatório escondia a
+  diferença. Corrigido com `_diff_excerpt()`: acha o primeiro índice onde os dois textos
+  divergem e recorta uma janela em volta dele, nos dois lados, ao invés de truncar cego do
+  início. 1 teste novo com o caso real.
+- **Prompt LTX de parágrafo único sem NENHUM meio de animação declarado saiu com "ESTILO
+  VISUAL: polished 3D animation"** — frase DIFERENTE do exemplo literal do §3.139 (mesma
+  família de alucinação: o LLM de reestruturação inventa um meio quando a instrução manda
+  explicitamente não escrever a linha se a fonte não disser o meio). O guard de ontem só
+  pegava a frase exata do exemplo; esse caso passava reto. Corrigido de forma mais geral:
+  `extract_art_direction()` ganhou `source_text` opcional — se o "meio" extraído cita termo de
+  animação/ilustração (`_ESTILO_ANIMADO_RE`, já existia pra outra checagem) que NÃO aparece em
+  lugar nenhum do texto-fonte original (antes da reestruturação), descarta como provável
+  invenção. 3 testes novos (invenção descartada, meio real com base na fonte mantido, meio
+  fotorrealista sem termo de animação não precisa de evidência).
+- Efeito colateral achado no MESMO teste: com **1 cena só**, "atribuído a cena errada" (do
+  item 1 desta seção) é falso positivo garantido quando `location` fica em inglês e o
+  `action_text` sai traduzido pro português — não existe "outra cena" pra confundir com 1 só.
+  `audit()` agora só repassa `scenes` às checagens por-cena quando há mais de uma.
+- 7 testes novos, suíte 446 passando. Commitado em `8e2c920`.
+
+**4. REENTRY WINDOW recriado do zero (`20260929_REENTRY_WINDOW_v2`, script completo, não o QA
+reduzido), com TODAS as correções de hoje — travou no gate visual dos stills, causa raiz NÃO
+investigada.** `run_decupagem --ate animatic` rodou parse→cast→TTS→estrutura→plano→motion→
+validação de texto→sheet→stills sem erro, e a corrida chegou ao gate com **identidade dos
+personagens correta** (`identity_matches: true` nos casos inspecionados — bem diferente do
+caos de nave/personagem-duplicado do §3.139). Travou por reprovação em massa: 41/46 stills
+reprovados (>40%, a trava de segurança do `gate_retry.py` — ver §3.139/CLAUDE.md
+`--gate-max-regen-fraction`), SEM regeneração automática.
+
+Contagem real dos motivos de reprovação (não só o resumo do log):
+
+| motivo | quantos dos 41 |
+|---|---|
+| `location_match` falhou | 35 |
+| `visual_pass` falhou (geral) | 38 |
+| `framing_match` falhou | 22 |
+| por enquadramento pedido `close` | 25 |
+| por enquadramento pedido `wide` | 2 |
+
+A causa DOMINANTE não é framing (que já tem um fix parcial, item 5 abaixo) — é
+`location_match`: exemplos reais tinham `"the location description indicates a vehicle
+interior, which does not align with the expected setting"` e `"location does not remain
+consistent across every target frame"`. Hipótese não testada: pode ser o mesmo tipo de
+vazamento de referência entre planos já documentado noutros motores (MSR em I2V, §3.82), ou
+descrição de local genérica demais no `storyboard_prompt` pra ancorar contra a referência de
+personagem. **Não investigado ainda** — é a pendência de maior prioridade desta seção.
+
+**5. Reforço de enquadramento `wide` com limite físico (mesmo tratamento do `close`,
+§3.81) — resolve só 1 das 41 reprovações acima, não a causa dominante.** Commit `3d6885f`.
+Ver detalhe na mensagem do commit; a maioria das reprovações por framing é `close` saindo
+"medium close-up" (o MESMO tipo de falha que o fix do close já deveria prevenir — sinal de
+que o fix de 2026-09-13 não converge sempre, não investigado por que).
+
+**Pendências desta seção (2026-09-30):**
+1. Investigar `location_match` (35/41 reprovações) no REENTRY WINDOW v2 — prioridade mais
+   alta, é a causa dominante do bloqueio.
+2. Investigar por que `close` ainda sai "medium close-up" às vezes, apesar do fix de §3.81.
+3. Refazer o teste da VAE int8 do MiniMax H3 com metodologia correta (ordem invertida ou
+   ambos já quentes em disco) — o resultado de 2× mais rápido está invalidado.
+4. Validar com GPU real as outras 3 flags novas do MiniMax H3 (chunk FF, low-VRAM attn, sigma
+   shift, block-sparse attn) — só a VAE int8 foi testada (e de forma inválida).
+5. Decidir como prosseguir com o REENTRY WINDOW v2: afrouxar `--gate-max-regen-fraction` e
+   aceitar enquadramento/local imperfeitos, ou investigar+corrigir antes de gastar mais GPU —
+   discutido com o usuário, ele escolheu pausar (não decidiu qual das duas ainda).

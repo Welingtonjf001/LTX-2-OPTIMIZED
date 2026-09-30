@@ -10,7 +10,29 @@ Divisão de papéis: aqui fica a **configuração operacional verificada**
 o sistema é assim** e o histórico das decisões — quando os dois divergirem, o
 MEMORIAL é o mais detalhado e o mais recente.
 
-Última verificação: 2026-09-29 (nova etapa `[V validação de texto]` em `run_decupagem.py`,
+Última verificação: 2026-09-30 (review de código achou 2 buracos reais na validação de
+texto do dia anterior -- `check_quotes`/`check_locations` procuravam fala/local em
+QUALQUER lugar do roteiro-fonte, aprovando em silêncio fala/local colado na cena errada
+[exatamente o bug que motivou a validação existir]; corrigido, agora checa primeiro
+contra a PRÓPRIA cena do plano. `verify_output._check_gates` pulava em silêncio gate
+ausente/ilegível; agora grava `status: missing/unreadable` explícito. Rodei 3 roteiros
+reais pela `decupagem_ui` [webui, não só teste sintético] pra validar -- achou mais 2
+bugs: relatório de correção de descritor mostrava "de X → para X" quando a diferença
+ficava depois do corte de 120 chars [`_diff_excerpt` corrige]; e um prompt LTX de
+parágrafo único sem nenhum meio de animação declarado saiu com "ESTILO VISUAL:
+polished 3D animation" -- MESMA família de alucinação do §3.139, frase diferente do
+guard de ontem, que só pegava a frase exata do exemplo; `extract_art_direction()`
+ganhou `source_text` opcional pra descartar qualquer termo de animação sem base no
+texto original. `minimax_h3_backend.py` ganhou 4 flags opt-in de um workflow de
+terceiro [VAE int8, chunking de FF/atenção, sigma shift, block-sparse attn] --
+NENHUMA validada com GPU real (o teste da VAE int8 mediu quase 2× mais rápido mas está
+INVALIDADO por confusão com cache de disco entre as duas rodadas, refazer antes de
+confiar). REENTRY WINDOW recriado do zero com todas as correções -- identidade dos
+personagens correta pela primeira vez, mas travou no gate visual [41/46 reprovados,
+causa dominante é `location_match`, NÃO investigada ainda -- reforço de enquadramento
+`wide` aplicado resolve só 1 dos 41]. Ver `MEMORIAL.md` §3.142 (pendências no fim da
+seção).
+Verificação anterior: 2026-09-29 (nova etapa `[V validação de texto]` em `run_decupagem.py`,
 `script_pipeline/text_validation.py`: compara o `shot_plan.json` INTEIRO contra o
 roteiro-fonte, AINDA EM TEXTO, antes de qualquer still -- personagem/fala/local sem base no
 roteiro [relata], descritor divergente entre planos [CORRIGE de verdade contra o canônico do
