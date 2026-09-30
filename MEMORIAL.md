@@ -6776,6 +6776,11 @@ mesma causa raiz de VRAM do §3.88. 18 testes em `tests/test_motion_director.py`
 >    parado no gate de stills): afrouxar `--gate-max-regen-fraction`/`--visual-max-retries` e
 >    aceitar imperfeição, ou investigar+corrigir os itens 1-2 antes de gastar mais GPU. Usuário
 >    escolheu pausar em 2026-09-29, decisão entre as duas opções ainda em aberto.
+> 6. **NOVO 2026-09-30: segunda RTX 3090 instalada, plano de otimização de GPU em `§3.143`,
+>    NENHUMA fase implementada ainda.** Fase 1 (pinar Ollama na GPU 0, baixo risco) é o próximo
+>    passo mais barato; Fase 2 (LTX+LongCat em paralelo real no `render_shots.py`) é o de maior
+>    ganho estimado (~40-50%, já calculado no item 4 antigo desta seção). Catálogo completo dos
+>    >20 arquivos hardcoded em `CUDA_VISIBLE_DEVICES=1` está no §3.143.
 
 *(reescrita em 2026-08-29, depois da auditoria externa, dos quatro defeitos do
 filme montado, do `prompt_polish` e do MiniMax H3. Itens fechados desde
@@ -9388,3 +9393,101 @@ que o fix de 2026-09-13 não converge sempre, não investigado por que).
 5. Decidir como prosseguir com o REENTRY WINDOW v2: afrouxar `--gate-max-regen-fraction` e
    aceitar enquadramento/local imperfeitos, ou investigar+corrigir antes de gastar mais GPU —
    discutido com o usuário, ele escolheu pausar (não decidiu qual das duas ainda).
+
+### 3.143 — Segunda RTX 3090 instalada: replaneja distribuição de GPU/modelos, avalia paralelismo real (2026-09-30)
+
+Mudança de HARDWARE, não de código: a RTX 4070 (a "GPU de display", índice 0 no nvidia-smi)
+foi substituída por uma segunda RTX 3090. `nvidia-smi -L` e
+`torch.cuda.get_device_properties(i).uuid` confirmam as duas placas idênticas, 24,5 GB cada.
+
+**Achado que invalida um aviso documentado há meses**: `torch.cuda.get_device_properties(i).uuid`
+comparado contra `nvidia-smi -L` mostra que os índices **agora batem 1:1**
+(nvidia-smi 0 = torch `cuda:0`, nvidia-smi 1 = torch `cuda:1`). O desalinhamento antigo
+("`CUDA_VISIBLE_DEVICES=1` bate com o torch, não com o nvidia-smi") só existia porque a 4070
+e a 3090 eram enumeradas em ORDENS DIFERENTES pelos dois sistemas (provavelmente por
+capacidade de computação ou ordem de detecção do driver) — com duas placas idênticas essa
+fonte de discrepância desaparece. Não é uma mudança de comportamento do CUDA_VISIBLE_DEVICES=1
+já usado no repo (continua apontando pra uma 3090 real), é a ELIMINAÇÃO da armadilha que
+motivava o aviso — mas também elimina qualquer utilidade de "escolher pela VRAM total, não
+pelo índice": as duas têm a MESMA VRAM agora, o índice sozinho não diz mais nada.
+
+**Estado ATUAL (antes de qualquer mudança de código): GPU 0 ociosa, GPU 1 sobrecarregada.**
+Catálogo de quem usa qual GPU hoje, todos hardcoded em `CUDA_VISIBLE_DEVICES=1`/`--cuda-device 1`
+(convenção herdada de "a placa forte é a 1", que fazia sentido com a 4070 mas não faz mais
+sentido nenhum agora que as duas são iguais):
+
+| componente | arquivo | GPU hoje |
+|---|---|---|
+| LTX 2.5 (ComfyUI 8188) | `ltx25_backend.py:365` (`env.setdefault(...)`) | 1 |
+| MiniMax H3 (ComfyUI 8189) | `minimax_h3_backend.py:458,487` | 1 |
+| LongCat-Video-Avatar (ComfyUI 8190) | `longcat_video_backend.py:118,123` | 1 |
+| `render_scenes.py` (caminho screenplay_ui) | `script_pipeline/render_scenes.py:660` | 1 |
+| `motion_director.py` (InterGen→pose→ControlNet) | `script_pipeline/motion_director.py:132` | 1 |
+| `continuous_chain.py` | `continuous_chain.py:283` | 1 |
+| LTX 2.3 nativo (`ltx_pipelines`, ICLoraPipeline) | via `CUDA_VISIBLE_DEVICES=1` na chamada manual (seção acima do CLAUDE.md) | 1 |
+| Fish Speech (TTS, porta 8080) | `START_API.ps1` já fixa `CUDA_VISIBLE_DEVICES=1` | 1 |
+| Z-Image (porta 8191), Qwen-Image-2.1 (7862/8192), tensorxx_ge (TensorRT, porta 7861) | cada um com sua própria convenção, ver arquivos individuais | mistos (tensorxx_ge é o único que já usa a GPU 0 de propósito — prefill do Gemma na 4070 antiga, agora seria a 3090 nova) |
+| Ollama (LLM de enriquecimento/gate) | processo EXTERNO ao repo, sobe sozinho antes de qualquer script | **não coordenado** — Ollama escolhe GPU por conta própria (provavelmente a com mais VRAM livre no momento), pode brigar com qualquer um dos acima sem aviso |
+
+Ou seja: **hoje, com duas 3090 livres, o repositório inteiro ainda serializa tudo numa GPU só**
+(a "1"), e a segunda fica ociosa o tempo todo exceto pelo Ollama, que não tem coordenação
+nenhuma com o resto. Isso não é um bug — é simplesmente o estado esperado de "hardware mudou,
+código ainda não" — mas é a oportunidade de otimização mais óbvia da máquina agora.
+
+**Onde a contenção de GPU já dói, hoje, medido e documentado (não é hipótese):**
+- `render_shots.py:724-725`: "LTX (8188) e LongCat (8190) disputam a mesma 3090: todos os
+  planos SEM fala [rodam ação no LTX, depois] planos de fala no LongCat" — **serial por
+  necessidade de hardware, não por design**. Com uma GPU livre, os dois podem rodar ao MESMO
+  TEMPO (ação no LTX numa GPU, fala no LongCat na outra).
+- `run_decupagem.py`/`ollama_runtime.unload_all()`: chamado ANTES de subir FLUX/LTX pra
+  liberar VRAM do Ollama (qwen3-vl 30B, ~19-22 GB carregado) — só existe porque os dois
+  disputavam a MESMA placa. Com Ollama pinado numa GPU dedicada, esse unload deixa de ser
+  necessário (o modelo de enriquecimento/gate fica residente, sem recarregar a cada corrida).
+- §7 P0 item 4 (histórico, "segunda RTX 3090 analisada, não comprada") já tinha estimado
+  ~40-50% menos tempo total numa decupagem com fala, rodando LTX e LongCat (ou TTS) em
+  paralelo — a estimativa antiga vale, agora com hardware de verdade pra confirmar.
+
+**Plano de otimização, em fases (do mais seguro/barato pro mais arriscado/caro):**
+
+**Fase 1 — pinar o Ollama numa GPU dedicada (baixo risco, ganho imediato).** Setar
+`CUDA_VISIBLE_DEVICES=0` no AMBIENTE que sobe o servidor Ollama (não em código deste repo —
+Ollama é processo externo; precisa ir no `.bat`/atalho que inicia o serviço, ou numa variável
+de sistema persistente). Efeito: Ollama nunca mais disputa a GPU 1 com FLUX/LTX/MiniMax/
+LongCat — o `unload_all()` antes dos stills deixa de ser necessário (pode ficar como
+salvaguarda, mas não é mais obrigatório), e o modelo de gate/enriquecimento fica RESIDENTE
+entre chamadas, cortando o tempo de recarga (~20-30s por carga de qwen3-vl:30b, medido em
+sessões anteriores). Sem mudança de código Python nenhuma. **Não testado ainda.**
+
+**Fase 2 — LTX + LongCat em paralelo real dentro do `render_shots.py` (ganho maior, exige
+código novo).** Em vez de trocar 8188→8190 sequencialmente quando `engine="longcat"`, subir
+os dois ComfyUI (LTX em `CUDA_VISIBLE_DEVICES=1`, LongCat em `CUDA_VISIBLE_DEVICES=0`) e
+despachar os planos de ação e os planos de fala em THREADS/PROCESSOS separados, sincronizando
+só na escrita final do `clips.json`. É exatamente o item 4 do §7 P0 antigo ("exige
+despachante por servidor em render_shots, tirar o CUDA_VISIBLE_DEVICES=1 fixo"), agora
+possível de verdade. Precisa cuidar de RAM (dois offloads simultâneos, ver aviso na seção
+Hardware do CLAUDE.md) e watchdog (cada servidor precisa do seu próprio `gpu_watchdog.
+StallWatch`, não compartilhado).
+
+**Fase 3 — generalizar um "pool" de GPU em vez de hardcode por arquivo (maior escopo, faz
+sentido só depois de validar as fases 1-2).** Um despachante central (provavelmente em
+`gpu_watchdog.py`, que já concentra a lógica de porta/processo) que aloca GPU 0 ou 1 pra
+cada backend por JOB, não por arquivo — permitiria, por exemplo, MiniMax H3 long-take numa
+GPU enquanto FLUX gera os stills da PRÓXIMA cena na outra, ao invés de sempre "GPU 1 = tudo".
+Só vale a pena se as fases 1-2 confirmarem o ganho na prática; sem isso é otimização
+prematura.
+
+**Riscos a considerar antes de qualquer fase, não resolvidos ainda:**
+- RAM (80 GB): cada offload de modelo grande (LTX 2.5 bf16, MiniMax H3, etc.) usa RAM própria
+  além da VRAM. Dois processos pesados simultâneos podem se espremer na mesma RAM de um jeito
+  que nunca aconteceu com um só por vez — não medido.
+- `gpu_watchdog.free_port()`/`ensure_comfyui_running()` assumem hoje que só UM servidor por
+  vez está subindo/descendo pra liberar a GPU 1 — com dois servidores permanentes (um por
+  GPU), essa lógica de "derrubar antes de subir o próximo" precisa virar "cada GPU cuida do
+  seu", não compartilhada.
+- Ollama multi-GPU nativo: se o Ollama ATUAL já está usando as duas placas sem coordenação
+  (não verificado — nenhum modelo estava carregado no momento desta checagem), pinar ele na
+  GPU 0 pode reduzir a VRAM disponível pra ele carregar modelos maiores que 24,5 GB (nenhum
+  dos modelos do catálogo atual passa disso, então não é bloqueio hoje, mas vale checar antes
+  de fixar).
+- Nenhuma das fases foi implementada ou testada com GPU real ainda — isto é um PLANO, não uma
+  mudança de código. Ver pendência no topo da `## 7.`.

@@ -198,24 +198,47 @@ diagnóstico das folhas de referência estão em `script_pipeline/CONTINUIDADE_V
 
 ## Hardware
 
+⚠️ **MUDANÇA DE HARDWARE 2026-09-30: segunda RTX 3090 instalada, a RTX 4070 saiu.**
+Isso invalida a convenção de índices documentada há meses (ver aviso abaixo) e abre uma
+oportunidade real de paralelismo que antes não existia — plano completo de otimização e
+distribuição em `MEMORIAL.md` §3.143. Resumo do que já mudou e do que ainda não:
+
 | | |
 |---|---|
-| GPU 0 (nvidia-smi) | **RTX 3090, 24,5 GB** — é a GPU de geração |
-| GPU 1 (nvidia-smi) | RTX 4070, 12,9 GB — display/desktop |
+| GPU 0 (nvidia-smi) | **RTX 3090, 24,5 GB** |
+| GPU 1 (nvidia-smi) | **RTX 3090, 24,5 GB** (nova, substituiu a RTX 4070) |
 | RAM | **79,9 GB** (medido 2026-08-27; ~35 GB livres com o LTX 2.5 carregado) |
 | Pagefile | C: 38 GB + E: 31,2 GB — praticamente ocioso (0,9 + 0,1 GB em uso) |
+| Driver | 610.74 |
 
 ⚠️ **A RAM foi ampliada de 48 para 80 GB e a documentação não acompanhou.**
 Isso importa além do registro: `LTX_TRANSFORMER_CPU_MEMORY=34GiB`, que a seção
 da ICLoraPipeline mais abaixo usa, foi dimensionado para a máquina de 48 GB.
-Com 80 GB dá para dar bem mais folga ao offload da rota 2.3 — não testado.
-| Driver | 610.74 |
+Com 80 GB dá para dar bem mais folga ao offload da rota 2.3 — não testado. Com DOIS
+processos pesados rodando ao mesmo tempo (um por GPU, ver §3.143), essa folga de RAM
+fica mais apertada — cada offload consome RAM própria, e os dois podem competir.
 
-**Atenção à ordem dos índices.** O `nvidia-smi` enumera a 3090 como `0`; o torch
-enumera como `cuda:1`. A convenção do repositório é `CUDA_VISIBLE_DEVICES=1` =
-3090 (ver `gguf_backend.py:121`, `generate_upscale.ps1:13`, `music_maker_ui_v*`),
-e ela **bate com o torch**, não com o nvidia-smi. Não assuma que os dois
-coincidem — escolha a GPU pela VRAM total, não pelo índice.
+⚠️ **A convenção antiga de índices ("nvidia-smi 0 = torch cuda:1") MORREU.** MEDIDO
+2026-09-30 (`torch.cuda.get_device_properties(i).uuid` contra `nvidia-smi -L`): com as
+duas placas IDÊNTICAS agora, **os índices do nvidia-smi e do torch batem 1:1**
+(nvidia-smi 0 = torch cuda:0, nvidia-smi 1 = torch cuda:1) — o desalinhamento antigo só
+existia porque a 4070 e a 3090 eram enumeradas em ordens diferentes pelos dois sistemas.
+Isso **não quebra nada que já funcionava** (o código inteiro usa `CUDA_VISIBLE_DEVICES=1`,
+que continua apontando pra uma 3090 de verdade — só que agora as DUAS são 3090, então
+"1" não tem mais nada de especial). Mas **NÃO reintroduza a checagem antiga "escolha pela
+VRAM total, não pelo índice"** em código novo sem saber por que ela existia — ela resolvia
+um problema (placas diferentes) que não existe mais; o problema de hoje é o oposto,
+**decidir COMO DIVIDIR duas placas iguais**, não como diferenciá-las.
+
+**Todo o código do repositório está hardcoded para `CUDA_VISIBLE_DEVICES=1`** (LTX 2.5,
+MiniMax H3, LongCat, `render_scenes.py`, `motion_director.py`, `continuous_chain.py`, mais
+de 20 arquivos — catálogo completo em `MEMORIAL.md` §3.143) — herança de quando só uma das
+duas placas era forte o bastante. Isso **continua funcionando sem erro**, só que agora
+significa que **a GPU 0 (a segunda 3090) fica ociosa o tempo todo**, exceto pelo Ollama
+(que escolhe GPU sozinho e pode estar usando as duas sem coordenação com o resto). Nenhum
+código foi alterado ainda para usar a segunda placa — é trabalho de otimização em aberto,
+não um bug. Ver plano de fases em `MEMORIAL.md` §3.143 antes de mexer em qualquer um dos
+mais de 20 arquivos que hardcodam `"1"`.
 
 ## Ambientes Python
 
