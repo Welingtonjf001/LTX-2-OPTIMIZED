@@ -838,6 +838,37 @@ Trocar: `MINIMAX_H3_VARIANT=w4a8` (ou `gguf-q4km`). `MINIMAX_H3_UNET`/
 arquivo específico. Ver memória de projeto "MiniMax H3 watchdog bug and
 quality tests" pro detalhe completo dos números.
 
+### Dois arquivos novos instalados de `W:\temp` (2026-09-30, NENHUM testado ainda)
+
+Achados soltos em `W:\temp` (destino errado -- pasta de trabalho, não a de modelos), avaliados
+por metadata do próprio `.safetensors` (sem precisar carregar o tensor) e movidos pro lugar
+certo:
+
+- **`models/loras/minimax_h3_lora_dianying_jingtou_cinematic-shot_ai-toolkit.safetensors`**
+  (148 MB) -- LoRA de verdade (416 tensores `lora_A`/`lora_B`, `ss_base_model_version=minimax_h3`,
+  treinado com `ai-toolkit`). O nome original vinha com o nome chinês do LoRA codificado em hex
+  UTF-8 no próprio nome do arquivo (`...E79C9FE5AE9E...` = "电影镜头", "lente/enquadramento de
+  cinema") -- por isso o rename. **Não testado.**
+- **`models/diffusion_models/Minimax-h3_Singularity_int8_unpruned.safetensors`** (34 GB) --
+  checkpoint completo (1035 tensores, prefixo `model.diffusion_model.*` -- ATENÇÃO, é diferente
+  do prefixo `diffusion_model.*` sem `model.` do checkpoint w4a8 já em produção
+  [`LONGTAKE_UNET_FILENAME`], então pode precisar de ajuste no loader antes de funcionar).
+  Variante INT8 SEM pruning do mesmo finetune de terceiro "Singularity" já usado no
+  `minimax-longtake` (que hoje usa a versão w4a8 PRUNED, 11,8 GB) -- maior e provavelmente mais
+  lento, mas com potencial de qualidade maior por não ter perda de poda. **Não testado, não
+  ligado a nenhuma variável de ambiente.**
+- **`minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` -- DUPLICATA EXATA
+  removida** (hash MD5 idêntico ao arquivo já em produção em `models/loras/`).
+- **`bunnyH3ConditioningBridge_v10.safetensors` (22 MB) -- NÃO instalado, ainda em
+  `W:\temp`.** Não é LoRA nem checkpoint: é uma ponte de destilação pequena (MLP de 3 camadas,
+  metadata `bridge_type=BUNNY_H3_ActionLogic_Bridge`, mapeia uma representação de um modelo
+  "professor" `SenseNova_L34` pra dentro da camada 49 do MiniMax H3, aparentemente pra melhorar
+  aderência a lógica de ação/movimento). **Nenhum custom node instalado neste checkout sabe
+  consumir esse formato** (busca por "bunny"/"ActionLogic" nos `custom_nodes/` não achou nada)
+  -- colocar num `models/` normal não faria nada, nenhum node escaneia essa pasta procurando
+  por ele. Precisa achar/instalar o custom node de origem antes de ter utilidade aqui; até lá,
+  fica de fora.
+
 ### VAE TensorRT — compilada, disponível, NÃO recomendada
 
 `MINIMAX_H3_TRT_VAE=1` troca a VAE de vídeo (só a de vídeo; a de áudio não
