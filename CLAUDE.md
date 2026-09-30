@@ -859,15 +859,21 @@ certo:
   ligado a nenhuma variável de ambiente.**
 - **`minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` -- DUPLICATA EXATA
   removida** (hash MD5 idêntico ao arquivo já em produção em `models/loras/`).
-- **`bunnyH3ConditioningBridge_v10.safetensors` (22 MB) -- NÃO instalado, ainda em
-  `W:\temp`.** Não é LoRA nem checkpoint: é uma ponte de destilação pequena (MLP de 3 camadas,
-  metadata `bridge_type=BUNNY_H3_ActionLogic_Bridge`, mapeia uma representação de um modelo
-  "professor" `SenseNova_L34` pra dentro da camada 49 do MiniMax H3, aparentemente pra melhorar
-  aderência a lógica de ação/movimento). **Nenhum custom node instalado neste checkout sabe
-  consumir esse formato** (busca por "bunny"/"ActionLogic" nos `custom_nodes/` não achou nada)
-  -- colocar num `models/` normal não faria nada, nenhum node escaneia essa pasta procurando
-  por ele. Precisa achar/instalar o custom node de origem antes de ter utilidade aqui; até lá,
-  fica de fora.
+- **`bunnyH3ConditioningBridge_v10.safetensors` (22 MB) -- CUSTOM NODE ACHADO E INSTALADO
+  (2026-09-30, atualização do mesmo dia).** Usuário deu o repositório de origem
+  ([`aa335615543-ux/BUNNY_H3_Conditioning_Bridge`](https://github.com/aa335615543-ux/BUNNY_H3_Conditioning_Bridge)):
+  não é LoRA nem checkpoint, é um "bridge" de condicionamento SEMÂNTICO (não mexe em
+  MODEL/LoRA/LATENT/VAE) que se insere no meio do cabo `CONDITIONING`, entre a saída de texto
+  do H3 e o nó seguinte, pra estabilizar relação entre personagens/arma/alvo em cenas de
+  múltiplos personagens -- combina com COMBAT V2/Motion Continuity Repair LoRA, segundo o
+  README do autor. Clonado em `ComfyUI/custom_nodes/BUNNY_H3_Conditioning_Bridge/` (só
+  precisa de `safetensors`, já presente no venv), arquivo renomeado pro nome que o node
+  procura por padrão (`models/BUNNY_H3_ActionLogic_Bridge_V1.safetensors`, dentro da própria
+  pasta do node). Sintaxe do node conferida sem GPU (`ast.parse`), **NÃO testado dentro do
+  ComfyUI ainda** (precisa reiniciar o servidor do MiniMax H3 pra carregar o node novo, e
+  então testar um plano de ação real). Parâmetros recomendados pelo autor: `alpha` 0,10-0,15,
+  `magnitude_match=per_token`; taxa de acerto informada pelo autor (não verificada aqui):
+  ~60% melhora, 20% sem diferença, 10% piora -- calibrar com seed fixa antes de confiar.
 
 ### VAE TensorRT — compilada, disponível, NÃO recomendada
 
